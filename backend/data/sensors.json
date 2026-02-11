@@ -1,0 +1,182 @@
+[
+    {
+        "sensor_id": "AQI-001",
+        "sensor_type": "aqi",
+        "value": 85,
+        "location": {
+            "zone": "north",
+            "lat": 12.9716,
+            "lng": 77.5946
+        }
+    },
+    {
+        "sensor_id": "AQI-001",
+        "sensor_type": "aqi",
+        "value": 92,
+        "location": {
+            "zone": "north",
+            "lat": 12.9716,
+            "lng": 77.5946
+        }
+    },
+    {
+        "sensor_id": "AQI-001",
+        "sensor_type": "aqi",
+        "value": 110,
+        "location": {
+            "zone": "north",
+            "lat": 12.9716,
+            "lng": 77.5946
+        }
+    },
+    {
+        "sensor_id": "AQI-001",
+        "sensor_type": "aqi",
+        "value": 245,
+        "location": {
+            "zone": "north",
+            "lat": 12.9716,
+            "lng": 77.5946
+        }
+    },
+    {
+        "sensor_id": "AQI-002",
+        "sensor_type": "aqi",
+        "value": 65,
+        "location": {
+            "zone": "south",
+            "lat": 12.9116,
+            "lng": 77.6046
+        }
+    },
+    {
+        "sensor_id": "AQI-002",
+        "sensor_type": "aqi",
+        "value": 70,
+        "location": {
+            "zone": "south",
+            "lat": 12.9116,
+            "lng": 77.6046
+        }
+    },
+    {
+        "sensor_id": "FIRE-001",
+        "sensor_type": "fire",
+        "value": 28,
+        "location": {
+            "zone": "industrial",
+            "lat": 13.0016,
+            "lng": 77.5546
+        }
+    },
+    {
+        "sensor_id": "FIRE-001",
+        "sensor_type": "fire",
+        "value": 30,
+        "location": {
+            "zone": "industrial",
+            "lat": 13.0016,
+            "lng": 77.5546
+        }
+    },
+    {
+        "sensor_id": "FIRE-001",
+        "sensor_type": "fire",
+        "value": 95,
+        "location": {
+            "zone": "industrial",
+            "lat": 13.0016,
+            "lng": 77.5546
+        }
+    },
+    {
+        "sensor_id": "SMOKE-001",
+        "sensor_type": "smoke",
+        "value": 15,
+        "location": {
+            "zone": "industrial",
+            "lat": 13.0016,
+            "lng": 77.5546
+        }
+    },
+    {
+        "sensor_id": "SMOKE-001",
+        "sensor_type": "smoke",
+        "value": 18,
+        "location": {
+            "zone": "industrial",
+            "lat": 13.0016,
+            "lng": 77.5546
+        }
+    },
+    {
+        "sensor_id": "SMOKE-001",
+        "sensor_type": "smoke",
+        "value": 120,
+        "location": {
+            "zone": "industrial",
+            "lat": 13.0016,
+            "lng": 77.5546
+        }
+    },
+    {
+        "sensor_id": "NOISE-001",
+        "sensor_type": "noise",
+        "value": 55,
+        "location": {
+            "zone": "residential",
+            "lat": 12.9516,
+            "lng": 77.5846
+        }
+    },
+    {
+        "sensor_id": "NOISE-001",
+        "sensor_type": "noise",
+        "value": 58,
+        "location": {
+            "zone": "residential",
+            "lat": 12.9516,
+            "lng": 77.5846
+        }
+    },
+    {
+        "sensor_id": "NOISE-001",
+        "sensor_type": "noise",
+        "value": 95,
+        "location": {
+            "zone": "residential",
+            "lat": 12.9516,
+            "lng": 77.5846
+        }
+    },
+    {
+        "sensor_id": "TRAFFIC-001",
+        "sensor_type": "traffic",
+        "value": 0.4,
+        "location": {
+            "zone": "central",
+            "lat": 12.9656,
+            "lng": 77.5946
+        }
+    },
+    {
+        "sensor_id": "TRAFFIC-001",
+        "sensor_type": "traffic",
+        "value": 0.6,
+        "location": {
+            "zone": "central",
+            "lat": 12.9656,
+            "lng": 77.5946
+        }
+    },
+    {
+        "sensor_id": "TRAFFIC-001",
+        "sensor_type": "traffic",
+        "value": 0.95,
+        "location": {
+            "zone": "central",
+            "lat": 12.9656,
+            "lng": 77.5946
+        }
+    }
+]

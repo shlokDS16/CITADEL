@@ -1,0 +1,74 @@
+[
+    {
+        "title": "Road not repaired for 6 months",
+        "description": "The main road in Jayanagar 4th Block has been damaged since monsoon. Multiple potholes causing accidents. Vehicles are getting damaged. Urgent repair needed.",
+        "expected_category": "infrastructure",
+        "expected_priority": "high"
+    },
+    {
+        "title": "Streetlight not working",
+        "description": "The streetlight near bus stop on 5th cross road is not working for 2 weeks. The area becomes very dark at night. Safety concern for pedestrians.",
+        "expected_category": "civic_services",
+        "expected_priority": "medium"
+    },
+    {
+        "title": "Garbage not collected",
+        "description": "Garbage truck has not come to our area for 5 days. Waste is piling up and causing bad smell. Flies and mosquitoes increasing. Health hazard.",
+        "expected_category": "civic_services",
+        "expected_priority": "high"
+    },
+    {
+        "title": "Water supply timing query",
+        "description": "What is the water supply schedule for BTM Layout? I moved here recently and want to know the timings.",
+        "expected_category": "query",
+        "expected_priority": "low"
+    },
+    {
+        "title": "Property tax receipt not received",
+        "description": "I paid my property tax online 3 weeks ago but haven't received the receipt. Transaction ID: TXN789456. Need receipt for documentation.",
+        "expected_category": "documentation",
+        "expected_priority": "medium"
+    },
+    {
+        "title": "Delay in building permit",
+        "description": "Applied for building permit 2 months ago (Application ID: BPA-2024-5678). No updates received. Multiple visits to office but no resolution. This is causing project delays.",
+        "expected_category": "complaint",
+        "expected_priority": "high"
+    },
+    {
+        "title": "Emergency: Water pipeline burst",
+        "description": "URGENT! Water pipeline has burst near MG Road junction. Water flooding the road. Traffic blocked. Immediate action needed!",
+        "expected_category": "infrastructure",
+        "expected_priority": "critical"
+    },
+    {
+        "title": "Request for birth certificate",
+        "description": "I need to apply for a birth certificate for my newborn. What documents are required and what is the process?",
+        "expected_category": "documentation",
+        "expected_priority": "low"
+    },
+    {
+        "title": "Sewage overflow in residential area",
+        "description": "Sewage is overflowing on 12th main road, Indiranagar. Dirty water entering homes. Health emergency. Children falling sick.",
+        "expected_category": "infrastructure",
+        "expected_priority": "critical"
+    },
+    {
+        "title": "Park maintenance needed",
+        "description": "The children's park in our locality needs maintenance. Swings are broken, grass is overgrown. Kids can't play safely.",
+        "expected_category": "civic_services",
+        "expected_priority": "medium"
+    },
+    {
+        "title": "Corruption complaint against official",
+        "description": "An official at the sub-registrar office demanded Rs. 5000 bribe for property registration. I have audio recording as evidence. Please take action.",
+        "expected_category": "complaint",
+        "expected_priority": "critical"
+    },
+    {
+        "title": "Status of license application",
+        "description": "I applied for a trade license for my shop on 15th January. Application number: TL-2024-789. What is the current status?",
+        "expected_category": "query",
+        "expected_priority": "low"
+    }
+]

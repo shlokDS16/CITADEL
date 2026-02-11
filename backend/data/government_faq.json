@@ -1,0 +1,231 @@
+{
+    "policies": [
+        {
+            "title": "Property Tax Payment Guidelines",
+            "category": "taxation",
+            "content": "Property tax is payable annually by all property owners. The tax is calculated based on property area, location zone, and usage type (residential/commercial). Payment can be made online through the municipal portal or at designated bank branches. The due date is March 31st each year. Late payment attracts a penalty of 2% per month. Senior citizens above 60 years are eligible for a 10% rebate. Ex-servicemen receive a 20% rebate. Properties used for charitable purposes may apply for exemption.",
+            "faq": [
+                {
+                    "q": "How do I pay property tax online?",
+                    "a": "Visit the municipal portal, enter your property ID, verify details, and pay using net banking, credit/debit card, or UPI."
+                },
+                {
+                    "q": "What is the penalty for late payment?",
+                    "a": "Late payment attracts a penalty of 2% per month on the outstanding amount."
+                },
+                {
+                    "q": "Are there any rebates available?",
+                    "a": "Yes, senior citizens (60+) get 10% rebate, ex-servicemen get 20% rebate."
+                }
+            ]
+        },
+        {
+            "title": "Building Permit Application Process",
+            "category": "urban_development",
+            "content": "Building permits are required for all new constructions, major renovations, and structural modifications. The application process involves: 1) Submit application with property documents, site plan, and structural drawings. 2) Pay processing fee based on construction area. 3) Site inspection by municipal engineer. 4) Review by building committee. 5) Approval or rejection within 30 days. Required documents include: property deed, encumbrance certificate, approved site plan, structural stability certificate, and NOC from neighbors for constructions within 3 meters of boundary.",
+            "faq": [
+                {
+                    "q": "How long does building permit approval take?",
+                    "a": "The approval process takes up to 30 working days from complete application submission."
+                },
+                {
+                    "q": "What documents are required for building permit?",
+                    "a": "Property deed, encumbrance certificate, site plan, structural drawings, stability certificate, and neighbor NOC."
+                },
+                {
+                    "q": "What is the fee for building permit?",
+                    "a": "Processing fee is Rs. 10 per square foot of proposed construction area, minimum Rs. 1000."
+                }
+            ]
+        },
+        {
+            "title": "Water Supply Connection",
+            "category": "utilities",
+            "content": "New water connections are provided within 15 working days of application approval. Residential connections require: property ownership proof, building approval copy, and ID proof. Commercial connections additionally require trade license. Connection charges: Rs. 2500 for residential (half-inch pipe), Rs. 5000 for commercial (one-inch pipe). Monthly tariff: First 10KL free for BPL families, Rs. 5/KL for first 20KL, Rs. 10/KL for 20-50KL, Rs. 20/KL above 50KL. Meters are mandatory and provided by the department.",
+            "faq": [
+                {
+                    "q": "How do I apply for new water connection?",
+                    "a": "Submit application at the water works office with property documents, building approval, and ID proof. Pay the connection fee."
+                },
+                {
+                    "q": "What is the water tariff rate?",
+                    "a": "Rs. 5/KL for first 20KL, Rs. 10/KL for 20-50KL, Rs. 20/KL above 50KL. BPL families get first 10KL free."
+                },
+                {
+                    "q": "How long does new connection take?",
+                    "a": "New connections are provided within 15 working days after application approval."
+                }
+            ]
+        },
+        {
+            "title": "Birth Certificate Application",
+            "category": "civil_registration",
+            "content": "Birth registration is mandatory within 21 days of birth. Registration is free if done within 21 days. Late registration (21 days to 1 year) requires Rs. 50 fee and affidavit. Registration after 1 year requires court order. Required documents: Hospital birth report, parent IDs, parent marriage certificate, address proof. Certificates are issued within 7 working days. Online application available. Multiple copies can be obtained for Rs. 20 each.",
+            "faq": [
+                {
+                    "q": "How do I register a birth?",
+                    "a": "Submit hospital birth report, parent IDs, marriage certificate, and address proof at the registrar office or online portal within 21 days."
+                },
+                {
+                    "q": "What is the fee for birth certificate?",
+                    "a": "Free if registered within 21 days. Rs. 50 for late registration. Rs. 20 for additional copies."
+                },
+                {
+                    "q": "What if birth was not registered within 21 days?",
+                    "a": "Late registration requires affidavit and Rs. 50 fee. After 1 year, court order is required."
+                }
+            ]
+        },
+        {
+            "title": "Trade License for Business",
+            "category": "commerce",
+            "content": "Trade license is mandatory for all commercial establishments. Application requires: ID proof, address proof, property ownership/rental agreement, NOC from fire department (for certain categories), food license (for food businesses). License fees vary by trade category: Category A (high impact): Rs. 5000/year, Category B (medium): Rs. 2000/year, Category C (low): Rs. 500/year. License valid for 1 year and renewable. Operating without license attracts penalty of Rs. 10,000.",
+            "faq": [
+                {
+                    "q": "How do I get a trade license?",
+                    "a": "Apply at the municipal office with ID, address proof, property documents, and category-specific NOCs. Pay the prescribed fee."
+                },
+                {
+                    "q": "What is the trade license fee?",
+                    "a": "Category A: Rs. 5000/year, Category B: Rs. 2000/year, Category C: Rs. 500/year."
+                },
+                {
+                    "q": "What happens if I operate without trade license?",
+                    "a": "Operating without license attracts a penalty of Rs. 10,000 and possible closure."
+                }
+            ]
+        },
+        {
+            "title": "Garbage Collection and Waste Management",
+            "category": "sanitation",
+            "content": "Door-to-door garbage collection is provided daily in residential areas. Timings: 7 AM to 10 AM for most areas. Waste segregation is mandatory: green bin for wet waste, blue bin for dry recyclables, red bin for hazardous waste. Bulk waste generators (hotels, markets) must arrange private collection or pay additional charges. Composting is encouraged; subsidized composters available at Rs. 500. Littering attracts fine of Rs. 500 first offense, Rs. 1000 for repeat offenses.",
+            "faq": [
+                {
+                    "q": "What are the garbage collection timings?",
+                    "a": "Door-to-door collection is between 7 AM and 10 AM daily in residential areas."
+                },
+                {
+                    "q": "How should I segregate waste?",
+                    "a": "Green bin for wet waste, blue bin for dry recyclables, red bin for hazardous items."
+                },
+                {
+                    "q": "What is the fine for littering?",
+                    "a": "Rs. 500 for first offense, Rs. 1000 for repeat offenses."
+                }
+            ]
+        },
+        {
+            "title": "Road Repair and Pothole Complaints",
+            "category": "infrastructure",
+            "content": "Road repair complaints can be filed through: 1) Municipal helpline 1800-XXX-XXXX, 2) Online portal, 3) Mobile app, 4) In-person at ward office. Priority classification: Critical (main roads, high traffic) - 48 hours, High (arterial roads) - 7 days, Medium (residential) - 15 days, Low (internal lanes) - 30 days. Complaint tracking available online with ticket number. Contractor penalties for poor quality work. Citizens can report repair quality issues within 30 days.",
+            "faq": [
+                {
+                    "q": "How do I report a pothole?",
+                    "a": "Call helpline 1800-XXX-XXXX, use the online portal, mobile app, or visit your ward office."
+                },
+                {
+                    "q": "How long does pothole repair take?",
+                    "a": "Critical roads: 48 hours, arterial roads: 7 days, residential: 15 days, lanes: 30 days."
+                },
+                {
+                    "q": "How can I track my complaint?",
+                    "a": "Use the ticket number provided to track status on the online portal or mobile app."
+                }
+            ]
+        },
+        {
+            "title": "Street Light Complaint",
+            "category": "electrical",
+            "content": "Street light complaints can be registered through the same channels as road complaints. Categories: Not working, Dim light, Damaged pole, New installation request. Response times: Not working - 48 hours, Damaged pole - 24 hours (safety priority), New installation - subject to budget and survey. LED conversion program ongoing - all sodium vapor lamps being replaced. Report wire theft immediately to police.",
+            "faq": [
+                {
+                    "q": "How do I report a street light issue?",
+                    "a": "Call the municipal helpline, use the online portal, or visit your ward office with location details."
+                },
+                {
+                    "q": "How quickly are street lights repaired?",
+                    "a": "Non-working lights within 48 hours, damaged poles within 24 hours due to safety priority."
+                },
+                {
+                    "q": "How do I request a new street light?",
+                    "a": "Submit request at ward office; installation subject to survey and budget availability."
+                }
+            ]
+        },
+        {
+            "title": "Senior Citizen Welfare Schemes",
+            "category": "social_welfare",
+            "content": "Available schemes for senior citizens (60+): 1) Old Age Pension - Rs. 1000/month for BPL, Rs. 500 for APL. 2) Free bus travel pass. 3) Health checkup camps quarterly. 4) 10% property tax rebate. 5) Priority queue at government offices. 6) Subsidized medicines at government hospitals. 7) Day care centers in each ward. Application requires: Age proof, Aadhaar, BPL card (if applicable), bank account details.",
+            "faq": [
+                {
+                    "q": "What is the old age pension amount?",
+                    "a": "Rs. 1000/month for BPL families, Rs. 500/month for APL families."
+                },
+                {
+                    "q": "How do I apply for senior citizen benefits?",
+                    "a": "Apply at the social welfare office with age proof, Aadhaar, BPL card, and bank details."
+                },
+                {
+                    "q": "What benefits do senior citizens get?",
+                    "a": "Pension, free bus pass, health camps, property tax rebate, priority queues, subsidized medicines."
+                }
+            ]
+        },
+        {
+            "title": "Public Grievance Redressal",
+            "category": "administration",
+            "content": "Citizens can file grievances against government services through: 1) Centralized Public Grievance Portal (CPGRAM), 2) State-level portals, 3) Municipal grievance cell, 4) RTI applications. Grievances must be acknowledged within 3 working days. Resolution timeline: 30 days for department-level, 45 days for inter-departmental, 60 days for policy matters. Monthly review by senior officers. Escalation available if not resolved. Anonymous complaints accepted for corruption-related issues.",
+            "faq": [
+                {
+                    "q": "How do I file a grievance against a government office?",
+                    "a": "Use CPGRAM portal, state portal, or visit the municipal grievance cell with details and documents."
+                },
+                {
+                    "q": "How long does grievance resolution take?",
+                    "a": "30 days for department matters, 45 days for inter-departmental, 60 days for policy issues."
+                },
+                {
+                    "q": "Can I file anonymous complaints?",
+                    "a": "Yes, anonymous complaints are accepted for corruption and misconduct issues."
+                }
+            ]
+        }
+    ],
+    "schemes": [
+        {
+            "name": "Pradhan Mantri Awas Yojana (PMAY)",
+            "description": "Housing scheme providing financial assistance for construction/purchase of houses for eligible families.",
+            "eligibility": "Annual household income up to Rs. 18 lakhs, no pucca house in any family member's name",
+            "benefits": "Interest subsidy of 3-6.5% on home loans, direct benefit for construction",
+            "how_to_apply": "Apply online at pmay portal or through registered banks/housing finance companies"
+        },
+        {
+            "name": "Ayushman Bharat (PMJAY)",
+            "description": "Health insurance scheme providing Rs. 5 lakh cover per family per year for secondary and tertiary hospitalization.",
+            "eligibility": "Families as per SECC database, automatic enrollment for eligible families",
+            "benefits": "Cashless treatment at empanelled hospitals, covers pre and post hospitalization expenses",
+            "how_to_apply": "Check eligibility on mera.pmjay.gov.in, get e-card from Common Service Centers"
+        },
+        {
+            "name": "PM Kisan Samman Nidhi",
+            "description": "Income support scheme for farmer families providing Rs. 6000 per year in three installments.",
+            "eligibility": "All landholding farmer families with cultivable land",
+            "benefits": "Rs. 2000 every four months directly to bank account",
+            "how_to_apply": "Register at local agriculture office or online at pmkisan.gov.in"
+        },
+        {
+            "name": "Sukanya Samriddhi Yojana",
+            "description": "Savings scheme for girl child with attractive interest rates and tax benefits.",
+            "eligibility": "Parents of girl child below 10 years of age",
+            "benefits": "7.6% interest rate, tax free returns, secure future for girl child",
+            "how_to_apply": "Open account at any post office or authorized bank with birth certificate"
+        },
+        {
+            "name": "Atal Pension Yojana",
+            "description": "Pension scheme for workers in unorganized sector with government co-contribution.",
+            "eligibility": "Indian citizens aged 18-40 years with savings bank account",
+            "benefits": "Guaranteed monthly pension of Rs. 1000-5000 after 60 years",
+            "how_to_apply": "Apply through bank where you have savings account"
+        }
+    ]
+}

@@ -1,0 +1,67 @@
+[
+    {
+        "title": "Senior Software Engineer",
+        "department": "IT",
+        "description": "Looking for experienced software engineer to lead development of government portal modernization project.",
+        "required_skills": [
+            "python",
+            "javascript",
+            "sql",
+            "docker"
+        ],
+        "preferred_skills": [
+            "aws",
+            "kubernetes",
+            "react"
+        ],
+        "experience_min": 5.0
+    },
+    {
+        "title": "Data Analyst",
+        "department": "Planning",
+        "description": "Analyze city development data and create dashboards for decision making.",
+        "required_skills": [
+            "sql",
+            "python",
+            "tableau"
+        ],
+        "preferred_skills": [
+            "powerbi",
+            "excel",
+            "statistics"
+        ],
+        "experience_min": 2.0
+    },
+    {
+        "title": "Project Manager",
+        "department": "Administration",
+        "description": "Manage e-governance implementation projects across departments.",
+        "required_skills": [
+            "leadership",
+            "communication",
+            "problem-solving"
+        ],
+        "preferred_skills": [
+            "agile",
+            "pmp",
+            "teamwork"
+        ],
+        "experience_min": 7.0
+    },
+    {
+        "title": "Junior Developer",
+        "department": "IT",
+        "description": "Entry-level position for fresh graduates to work on web application development.",
+        "required_skills": [
+            "javascript",
+            "html",
+            "css"
+        ],
+        "preferred_skills": [
+            "react",
+            "python",
+            "sql"
+        ],
+        "experience_min": 0.0
+    }
+]

@@ -1,0 +1,29 @@
+{
+  "documents": [
+    {
+      "title": "Municipal Traffic Regulation Policy 2024",
+      "doc_type": "policy",
+      "content": "Policy No: MTP-2024-001\nEffective Date: 01/01/2024\nDepartment: Traffic & Transportation\n\nSection 1: Speed Limits\nAll residential areas shall have a maximum speed limit of 30 km/h.\nCommercial zones permit 50 km/h during non-peak hours.\n\nSection 2: Parking Regulations\nNo parking within 10 meters of traffic signals.\nTwo-wheeler parking zones designated in all commercial areas.\n\nSection 3: Penalties\nFirst offense: Warning notice\nSecond offense: Rs. 500 fine\nThird offense: Rs. 2000 fine and license review"
+    },
+    {
+      "title": "Water Supply Guidelines 2024",
+      "doc_type": "policy",
+      "content": "Policy No: WSG-2024-002\nEffective Date: 15/02/2024\nDepartment: Water Works\n\nSection 1: Supply Schedule\nResidential areas: 6 AM - 9 AM and 5 PM - 8 PM\nCommercial areas: 24/7 supply with metered usage\n\nSection 2: Connection Applications\nNew connections require property documents and ID proof.\nProcessing time: 15 working days\nConnection fee: Rs. 2500 (residential), Rs. 5000 (commercial)\n\nSection 3: Complaints\nLeakage reports: Priority 1 (24-hour resolution)\nBilling disputes: 7 working days"
+    },
+    {
+      "title": "Building Permit Application Form",
+      "doc_type": "application",
+      "content": "Application ID: BPA-2024-1234\nDate: 15/03/2024\n\nApplicant Details:\nName: Rajesh Kumar\nAddress: 123 MG Road, Bangalore 560001\nPhone: +91 9876543210\nEmail: rajesh.kumar@email.com\nAadhaar: 1234-5678-9012\n\nProperty Details:\nSurvey Number: 45/2A\nPlot Area: 2400 sq ft\nProposed Construction: G+2 Residential\nEstimated Cost: Rs. 45,00,000\n\nDocuments Attached:\n- Property deed\n- Site plan\n- Structural drawings\n- NOC from neighbors"
+    },
+    {
+      "title": "Property Tax Receipt",
+      "doc_type": "receipt",
+      "content": "Receipt No: PTR-2024-5678\nDate: 01/04/2024\n\nProperty Owner: Sunita Sharma\nProperty ID: BBMP-BNG-12345\nAddress: 45 Jayanagar, Bangalore\n\nTax Details:\nBase Amount: Rs. 15,000\nPenalty: Rs. 0\nTotal: Rs. 15,000\n\nPayment Mode: Online\nTransaction ID: TXN123456789\n\nValid Till: 31/03/2025"
+    },
+    {
+      "title": "Gazette Notification - Holiday List 2024",
+      "doc_type": "gazette",
+      "content": "Gazette No: GOK-2024-123\nPublished: 01/01/2024\nDepartment: General Administration\n\nOfficial Holidays for Government Offices 2024:\n\n1. Republic Day - 26 January\n2. Ugadi - 09 April\n3. Good Friday - 29 March\n4. May Day - 01 May\n5. Independence Day - 15 August\n6. Gandhi Jayanti - 02 October\n7. Kannada Rajyotsava - 01 November\n8. Diwali - 01 November\n9. Christmas - 25 December\n\nRestricted Holidays: Employees may avail any 2 from the list of 15 restricted holidays."
+    }
+  ]
+}

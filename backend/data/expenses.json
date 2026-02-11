@@ -1,0 +1,122 @@
+[
+    {
+        "department": "Public Works",
+        "amount": 150000,
+        "description": "Road repair materials for sector 5",
+        "timestamp": "2024-01-05"
+    },
+    {
+        "department": "Public Works",
+        "amount": 250000,
+        "description": "Bridge maintenance contract payment",
+        "timestamp": "2024-01-12"
+    },
+    {
+        "department": "Public Works",
+        "amount": 1500000,
+        "description": "New road construction phase 1",
+        "timestamp": "2024-01-20"
+    },
+    {
+        "department": "Water Works",
+        "amount": 80000,
+        "description": "Pipe replacement supplies",
+        "timestamp": "2024-01-08"
+    },
+    {
+        "department": "Water Works",
+        "amount": 45000,
+        "description": "Water testing equipment",
+        "timestamp": "2024-01-15"
+    },
+    {
+        "department": "Water Works",
+        "amount": 5000000,
+        "description": "New treatment plant equipment",
+        "timestamp": "2024-01-25"
+    },
+    {
+        "department": "Education",
+        "amount": 25000,
+        "description": "Office stationery for schools",
+        "timestamp": "2024-01-03"
+    },
+    {
+        "department": "Education",
+        "amount": 120000,
+        "description": "Computer lab equipment",
+        "timestamp": "2024-01-18"
+    },
+    {
+        "department": "Education",
+        "amount": 35000,
+        "description": "Library books purchase",
+        "timestamp": "2024-01-22"
+    },
+    {
+        "department": "Health",
+        "amount": 200000,
+        "description": "Medical supplies for PHCs",
+        "timestamp": "2024-01-07"
+    },
+    {
+        "department": "Health",
+        "amount": 75000,
+        "description": "Ambulance fuel and maintenance",
+        "timestamp": "2024-01-14"
+    },
+    {
+        "department": "Health",
+        "amount": 500000,
+        "description": "Diagnostic equipment",
+        "timestamp": "2024-01-28"
+    },
+    {
+        "department": "Administration",
+        "amount": 15000,
+        "description": "Office supplies",
+        "timestamp": "2024-01-02"
+    },
+    {
+        "department": "Administration",
+        "amount": 8000,
+        "description": "Internet and telephone bills",
+        "timestamp": "2024-01-10"
+    },
+    {
+        "department": "Administration",
+        "amount": 5000000,
+        "description": "Vehicle purchase for officials",
+        "timestamp": "2024-01-30"
+    },
+    {
+        "department": "Sanitation",
+        "amount": 60000,
+        "description": "Garbage truck fuel",
+        "timestamp": "2024-01-06"
+    },
+    {
+        "department": "Sanitation",
+        "amount": 40000,
+        "description": "Cleaning equipment",
+        "timestamp": "2024-01-16"
+    },
+    {
+        "department": "Sanitation",
+        "amount": 90000,
+        "description": "Waste disposal contractor payment",
+        "timestamp": "2024-01-24"
+    },
+    {
+        "department": "Parks",
+        "amount": 25000,
+        "description": "Gardening tools and seeds",
+        "timestamp": "2024-01-09"
+    },
+    {
+        "department": "Parks",
+        "amount": 45000,
+        "description": "Park bench installation",
+        "timestamp": "2024-01-19"
+    }
+]

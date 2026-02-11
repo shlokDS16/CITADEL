@@ -1,0 +1,22 @@
+[
+    {
+        "candidate_name": "Priya Sharma",
+        "content": "Priya Sharma\nSoftware Engineer\nEmail: priya.sharma@email.com | Phone: +91 9876543210\n\nPROFESSIONAL SUMMARY\n5 years of experience in full-stack development with expertise in Python, JavaScript, and cloud technologies.\n\nSKILLS\n- Programming: Python, JavaScript, TypeScript, SQL\n- Frameworks: React, Django, FastAPI, Node.js\n- Databases: PostgreSQL, MongoDB, Redis\n- Cloud: AWS, Docker, Kubernetes\n- Tools: Git, JIRA, CI/CD\n\nEXPERIENCE\nSenior Software Engineer | Tech Corp | 2021-Present\n- Developed microservices architecture handling 1M+ requests/day\n- Led team of 4 developers\n- Reduced system latency by 40%\n\nSoftware Developer | StartupXYZ | 2019-2021\n- Built customer-facing web applications\n- Implemented RESTful APIs\n\nEDUCATION\nB.Tech Computer Science | IIT Delhi | 2019"
+    },
+    {
+        "candidate_name": "Rahul Verma",
+        "content": "RAHUL VERMA\nData Analyst\nrahul.verma@email.com | 9812345678\n\nSummary\n3 years experience in data analysis and business intelligence. Strong in SQL and visualization tools.\n\nTechnical Skills:\n- Languages: SQL, Python, R\n- Tools: Tableau, Power BI, Excel\n- Databases: MySQL, PostgreSQL\n- Statistics: Regression, Hypothesis Testing\n\nWork Experience:\nData Analyst | Analytics Inc | 2022-Present\n- Created dashboards reducing report generation time by 60%\n- Analyzed customer behavior patterns\n- Automated monthly reporting\n\nJunior Analyst | DataCorp | 2021-2022\n- Supported senior analysts\n- Data cleaning and preparation\n\nEducation:\nMBA (Business Analytics) | IIM Bangalore | 2021\nBCom | Delhi University | 2019"
+    },
+    {
+        "candidate_name": "Amit Kumar",
+        "content": "Amit Kumar\nProject Manager\nEmail: amit.k@email.com\nPhone: 9988776655\n\nProfile\nPMP certified project manager with 8 years experience managing large-scale IT projects.\n\nCore Competencies:\n- Leadership and team management\n- Agile/Scrum methodology\n- Stakeholder communication\n- Risk management\n- Budget planning\n\nProfessional Experience:\n\nProgram Manager | Enterprise Solutions | 2020-Present\n- Managing portfolio of 5 projects worth $10M\n- Team of 25 members across 3 countries\n- Achieved 95% on-time delivery rate\n\nProject Manager | IT Services Co | 2016-2020\n- Led digital transformation projects\n- Improved team productivity by 30%\n\nTeam Lead | Software Firm | 2014-2016\n- Managed development team of 8\n\nCertifications:\n- PMP (Project Management Professional)\n- Certified Scrum Master (CSM)\n- ITIL Foundation\n\nEducation:\nB.Tech IT | NIT Trichy | 2014"
+    },
+    {
+        "candidate_name": "Sneha Patel",
+        "content": "SNEHA PATEL | UI/UX Designer\nPortfolio: snehadesigns.com\nEmail: sneha.patel@email.com\n\nAbout Me:\nCreative UI/UX designer with 4 years of experience crafting user-centered digital experiences.\n\nSkills:\n- Design: Figma, Adobe XD, Sketch, Photoshop\n- Prototyping: InVision, Principle\n- Research: User interviews, A/B testing\n- Front-end: HTML, CSS, JavaScript basics\n- Soft skills: Communication, teamwork, problem-solving\n\nExperience:\n\nSenior Designer | Design Studio | 2022-Present\n- Redesigned e-commerce app increasing conversion by 25%\n- Led design system creation\n- Mentored junior designers\n\nUI Designer | Product Co | 2020-2022\n- Designed B2B SaaS dashboards\n- Conducted user research\n\nEducation:\nBDes | NID Ahmedabad | 2020"
+    },
+    {
+        "candidate_name": "Vikram Singh",
+        "content": "Vikram Singh\nFreshers | Computer Science Graduate\nvikram.s@email.com | 8877665544\n\nObjective:\nSeeking entry-level position to apply my programming skills and learn from experienced professionals.\n\nEducation:\nB.Tech Computer Science | VIT Vellore | 2024\nCGPA: 8.5/10\n\nTechnical Skills:\n- Languages: C++, Java, Python\n- Web: HTML, CSS, JavaScript\n- Database: MySQL\n- Tools: Git, VS Code\n\nProjects:\n1. Online Bookstore (Java, MySQL)\n   - Developed full-stack web application\n   - Implemented shopping cart and payment\n\n2. Chat Application (Python, Socket)\n   - Real-time messaging system\n   - File sharing capability\n\nInternships:\nSummer Intern | Software Co | May-July 2023\n- Worked on bug fixes\n- Wrote unit tests\n\nCertifications:\n- Python Programming (Coursera)\n- Web Development (Udemy)"
+    }
+]
