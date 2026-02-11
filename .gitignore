@@ -56,4 +56,3 @@ Thumbs.db
 backend/.tmp/
 backend/data/dataset/  # If the dataset is large, it's better not to push it
 *.log
-frontend/
