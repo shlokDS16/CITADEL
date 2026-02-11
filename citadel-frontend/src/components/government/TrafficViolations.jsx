@@ -79,7 +79,8 @@ export default function TrafficViolations() {
     useEffect(() => {
         const fetchFines = async () => {
             try {
-                const response = await fetch('http://localhost:8000/api/traffic-violations/fines', {
+                const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+                const response = await fetch(`${API_URL}/api/traffic-violations/fines`, {
                     headers: {
                         'x-user-role': 'government_official', // Mocking auth for demo
                         'x-user-id': 'demo-gov-user'
