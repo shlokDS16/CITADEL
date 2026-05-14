@@ -101,6 +101,7 @@ def _shape_incident(row: dict) -> dict[str, Any]:
     conf_raw = row.get("detection_confidence") or 0
     # accept both 0..1 and 0..100 storage
     conf_pct = int(round(conf_raw * 100)) if conf_raw <= 1 else int(conf_raw)
+    meta = row.get("frame_metadata") or {}
     return {
         "id": row.get("inc_id"),
         "type": VIOLATION_LABEL.get(row.get("violation_type", ""), (row.get("violation_type") or "").upper()),
@@ -110,6 +111,9 @@ def _shape_incident(row: dict) -> dict[str, Any]:
         "conf": conf_pct,
         "severity": (row.get("severity") or "medium").upper(),
         "status": _incident_status_to_ui(row.get("status")),
+        "description": (meta.get("description") or "") if isinstance(meta, dict) else "",
+        "scene":       (meta.get("groq_scene") or "") if isinstance(meta, dict) else "",
+        "detected_at": detected_at,
     }
 
 
@@ -640,7 +644,19 @@ _DEFAULT_LOOP_DURATION = 9.6   # seconds — derived from the mp4 (287f / 30fps)
 
 
 def loop_assignment_for(cam_id: str, index: int) -> dict[str, Any]:
-    """Return loop info for a given camera, or None if loops disabled."""
+    """
+    Return loop info for a given camera, or None if loops disabled.
+
+    Default behaviour: DISABLED — every tile renders its own distinct Singapore
+    LTA camera JPG (90 cams available, we use 24). LTA refreshes each JPG every
+    1–5 minutes; the frontend polls /snapshots every 30 s so the tiles tick
+    over as new frames are captured. Each tile is a different real camera.
+
+    Set TV_DEMO_LOOPS=1 to restore the old fallback (single shared Vegas mp4
+    clip with staggered offsets — useful for offline demos only).
+    """
+    if os.getenv("TV_DEMO_LOOPS", "0") not in ("1", "true", "True"):
+        return None
     if not (LOOPS_DIR / f"{_DEFAULT_LOOP_ID}.mp4").exists():
         return None
     # stagger offsets to give visual variety across the grid
@@ -1123,11 +1139,160 @@ def _should_classify_with_groq(cam_id: str, boxes: list[dict[str, Any]]) -> tupl
     return False, "below_threshold"
 
 
-def _save_live_evidence_jpg(jpg_bytes: bytes, inc_id: str) -> Optional[str]:
-    """Save raw JPG to .tv_clips/{inc_id}.jpg. Return the absolute path."""
+# Per-class BGR colour table for the evidence overlay (cv2 uses BGR not RGB)
+_EVIDENCE_BOX_BGR = {
+    "car":        (255, 200,   0),    # cyan-ish
+    "truck":      (  0, 200, 255),    # amber
+    "bus":        (255,   0, 255),    # magenta
+    "motorcycle": (255, 255,   0),    # yellow
+    "person":     (  0, 255, 100),    # green
+}
+
+
+def _annotate_evidence_jpg(
+    jpg_bytes: bytes,
+    boxes: list[dict[str, Any]],
+    vtype: str,
+    severity: str,
+    focus_box: Optional[dict[str, Any]] = None,
+    description: str = "",
+    plate: Optional[str] = None,
+) -> bytes:
+    """
+    Burn YOLO bboxes into the JPG so officers can see EXACTLY where the
+    violation was committed. Returns the annotated image as JPG bytes; falls
+    back to the original bytes on any failure.
+
+    The `focus_box` (typically the largest vehicle for plate OCR, or the
+    nearest violator) is highlighted in red with a "VIOLATION" tag so the
+    suspect is unambiguous.
+    """
+    if not jpg_bytes:
+        return jpg_bytes
     try:
+        import cv2
+        import numpy as np
+
+        arr = np.frombuffer(jpg_bytes, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            return jpg_bytes
+        h, w = img.shape[:2]
+
+        # ------- draw all secondary bboxes (passive context) -------
+        for b in boxes or []:
+            cls = b.get("cls", "")
+            colour = _EVIDENCE_BOX_BGR.get(cls, (180, 180, 180))
+            x1 = int(max(0, (b.get("x") or 0) * w))
+            y1 = int(max(0, (b.get("y") or 0) * h))
+            x2 = int(min(w - 1, ((b.get("x") or 0) + (b.get("w") or 0)) * w))
+            y2 = int(min(h - 1, ((b.get("y") or 0) + (b.get("h") or 0)) * h))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            is_focus = bool(focus_box) and b is focus_box
+            if is_focus:
+                continue  # drawn later on top
+            cv2.rectangle(img, (x1, y1), (x2, y2), colour, 2)
+            tag = f"{cls.upper()} {int(round((b.get('conf') or 0) * 100))}%"
+            (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+            cv2.rectangle(img, (x1, max(0, y1 - th - 6)),
+                          (x1 + tw + 6, y1), colour, -1)
+            cv2.putText(img, tag, (x1 + 3, max(12, y1 - 4)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
+
+        # ------- draw the violator focus box -------
+        if focus_box:
+            x1 = int(max(0, (focus_box.get("x") or 0) * w))
+            y1 = int(max(0, (focus_box.get("y") or 0) * h))
+            x2 = int(min(w - 1, ((focus_box.get("x") or 0) + (focus_box.get("w") or 0)) * w))
+            y2 = int(min(h - 1, ((focus_box.get("y") or 0) + (focus_box.get("h") or 0)) * h))
+            if x2 > x1 and y2 > y1:
+                # double thick red rectangle + corner marks
+                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 4)
+                corner = max(8, int(min(x2 - x1, y2 - y1) * 0.18))
+                cv2.line(img, (x1, y1), (x1 + corner, y1), (0, 255, 255), 4)
+                cv2.line(img, (x1, y1), (x1, y1 + corner), (0, 255, 255), 4)
+                cv2.line(img, (x2, y1), (x2 - corner, y1), (0, 255, 255), 4)
+                cv2.line(img, (x2, y1), (x2, y1 + corner), (0, 255, 255), 4)
+                cv2.line(img, (x1, y2), (x1 + corner, y2), (0, 255, 255), 4)
+                cv2.line(img, (x1, y2), (x1, y2 - corner), (0, 255, 255), 4)
+                cv2.line(img, (x2, y2), (x2 - corner, y2), (0, 255, 255), 4)
+                cv2.line(img, (x2, y2), (x2, y2 - corner), (0, 255, 255), 4)
+                label = f"[!] {VIOLATION_LABEL.get(vtype, vtype.upper())}"
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
+                cv2.rectangle(img, (x1, max(0, y1 - th - 12)),
+                              (x1 + tw + 14, y1), (0, 0, 255), -1)
+                cv2.putText(img, label, (x1 + 6, max(20, y1 - 6)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
+
+        # ------- top-strip banner: severity + type + plate + timestamp -------
+        sev_col = {
+            "CRITICAL": (0, 0, 255),
+            "HIGH":     (0, 80, 255),
+            "MEDIUM":   (0, 200, 255),
+            "LOW":      (0, 255, 200),
+        }.get((severity or "").upper(), (0, 200, 255))
+        banner_h = 38
+        cv2.rectangle(img, (0, 0), (w, banner_h), (0, 0, 0), -1)
+        cv2.rectangle(img, (0, 0), (max(8, int(w * 0.012)), banner_h), sev_col, -1)
+        header = f"CITADEL | {VIOLATION_LABEL.get(vtype, vtype.upper())} | {severity.upper()}"
+        if plate:
+            header += f" | PLATE {plate}"
+        cv2.putText(img, header, (16, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2, cv2.LINE_AA)
+        ts_text = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        (tw, _), _ = cv2.getTextSize(ts_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        cv2.putText(img, ts_text, (w - tw - 12, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
+
+        # ------- bottom caption (Groq description) -------
+        if description:
+            cap = description[:96] + ("..." if len(description) > 96 else "")
+            (tw, th), _ = cv2.getTextSize(cap, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            y0 = h - th - 14
+            cv2.rectangle(img, (0, y0 - 4), (w, h), (0, 0, 0), -1)
+            cv2.putText(img, cap, (12, y0 + th + 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1, cv2.LINE_AA)
+
+        ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+        return buf.tobytes() if ok else jpg_bytes
+    except Exception as e:
+        log.warning("evidence annotation failed: %s", e)
+        return jpg_bytes
+
+
+def _save_live_evidence_jpg(
+    jpg_bytes: bytes,
+    inc_id: str,
+    *,
+    boxes: Optional[list[dict[str, Any]]] = None,
+    vtype: str = "",
+    severity: str = "",
+    focus_box: Optional[dict[str, Any]] = None,
+    description: str = "",
+    plate: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Save the JPG to .tv_clips/{inc_id}.jpg with bbox + violator overlay so the
+    evidence shows EXACTLY where the violation was. Returns the absolute path.
+
+    Two files are written when annotation succeeds:
+      - {inc_id}.jpg          (annotated, default for UI + Telegram)
+      - {inc_id}.raw.jpg      (the original unmarked frame, for audit)
+    """
+    try:
+        annotated = _annotate_evidence_jpg(
+            jpg_bytes, boxes or [], vtype, severity, focus_box,
+            description=description, plate=plate,
+        )
         out = CLIPS_DIR / f"{inc_id}.jpg"
-        out.write_bytes(jpg_bytes)
+        out.write_bytes(annotated)
+        # Save the raw frame too so we can re-render the overlay if needed
+        try:
+            raw = CLIPS_DIR / f"{inc_id}.raw.jpg"
+            raw.write_bytes(jpg_bytes)
+        except Exception:
+            pass
         return str(out)
     except Exception as e:
         log.warning("evidence save failed for %s: %s", inc_id, e)
@@ -1381,11 +1546,42 @@ def _maybe_create_live_incidents_for_cam(
             continue
 
         inc_id = _next_human_inc_id()
-        evidence_path = _save_live_evidence_jpg(jpg_bytes, inc_id)
         description = (v.get("description") or "")[:240]
 
         # Phase A.3 — extract plate from the largest vehicle bbox before insert.
         plate_text, plate_conf = _extract_plate_for_live(jpg_bytes, cam_id, boxes)
+
+        # Phase 6.2 — burn YOLO bboxes + violator marker onto the evidence JPG
+        # so officers can SEE which vehicle / person committed the violation.
+        # Pick the focus box by violation semantics, not by raw area.
+        def _focus_for(vt: str, _boxes: list[dict[str, Any]]):
+            def _largest(cls_pred):
+                cands = [b for b in _boxes if cls_pred(b.get("cls"))]
+                return max(cands, key=lambda b: (b.get("w") or 0) * (b.get("h") or 0)) if cands else None
+            if vt in ("no_helmet",):
+                # rider on a motorcycle without helmet
+                return _largest(lambda c: c == "motorcycle") or _largest(lambda c: c == "person")
+            if vt in ("no_seatbelt",):
+                # car/truck driver — pick the dominant 4-wheeler
+                return _largest(lambda c: c in ("car", "truck", "bus"))
+            if vt in ("speeding", "rash_driving"):
+                return _largest(lambda c: c in ("car", "truck", "bus", "motorcycle"))
+            if vt in ("illegal_parking",):
+                return _largest(lambda c: c in ("car", "truck", "bus"))
+            if vt in ("red_light", "wrong_lane", "lane_violation"):
+                return _largest(lambda c: c in ("car", "truck", "bus", "motorcycle"))
+            if vt in ("accident", "overturned", "debris"):
+                return _largest(lambda c: c in ("car", "truck", "bus", "motorcycle"))
+            if vt in ("overload",):
+                return _largest(lambda c: c in ("truck", "bus"))
+            # default — biggest vehicle
+            return _largest(lambda c: c in ("car", "truck", "bus", "motorcycle"))
+        focus = _focus_for(vtype, boxes)
+        evidence_path = _save_live_evidence_jpg(
+            jpg_bytes, inc_id,
+            boxes=boxes, vtype=vtype, severity=severity,
+            focus_box=focus, description=description, plate=plate_text,
+        )
 
         row = {
             "inc_id": inc_id,
@@ -2036,7 +2232,30 @@ def approve_incident(inc_id: str, actor: str = "rsd") -> dict[str, Any]:
     # Telegram delivery
     telegram_message_id = None
     telegram_error = None
+    # Prefer the annotated evidence JPG (bbox + violator marker) as the photo.
+    evidence_jpg_path = None
+    try:
+        candidate = CLIPS_DIR / f"{inc_id}.jpg"
+        if candidate.exists() and candidate.stat().st_size > 0:
+            evidence_jpg_path = str(candidate)
+    except Exception:
+        evidence_jpg_path = None
+    # Evidence URL fall-back for the "View full evidence clip" link (slideshow mp4)
     evidence_url = inc.get("video_clip_path")
+    # Best human-readable location: prefer the camera name, fall back to lat/lng
+    inc_meta = inc.get("frame_metadata") or {}
+    cam_name = None
+    try:
+        cam_row = (
+            sb.table("tv_cameras").select("name").eq("id", inc.get("cam_id")).limit(1).execute()
+        ).data or []
+        if cam_row:
+            cam_name = cam_row[0].get("name")
+    except Exception:
+        pass
+    loc_str = cam_name
+    if not loc_str and isinstance(inc_meta, dict) and inc_meta.get("lat") and inc_meta.get("lng"):
+        loc_str = f"{inc_meta['lat']:.4f}, {inc_meta['lng']:.4f}"
     try:
         msg = tg.send_challan(
             chat_id=driver.get("telegram_chat_id"),
@@ -2047,6 +2266,12 @@ def approve_incident(inc_id: str, actor: str = "rsd") -> dict[str, Any]:
             due_by=due_by[:10],
             legal_section=legal_section,
             evidence_url=evidence_url,
+            photo_path=evidence_jpg_path,
+            severity=(inc.get("severity") or "medium").upper(),
+            issued_at=now.isoformat(),
+            cam_id=inc.get("cam_id"),
+            location=loc_str,
+            description=(inc_meta.get("description") if isinstance(inc_meta, dict) else None),
         )
         if msg:
             telegram_message_id = str(msg.get("message_id") or "")

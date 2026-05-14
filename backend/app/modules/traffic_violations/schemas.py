@@ -47,6 +47,9 @@ class IncidentRow(BaseModel):
     conf: int                       # 0-100
     severity: str                   # CRITICAL | HIGH | MEDIUM | LOW
     status: str                     # pending | approved | rejected
+    description: Optional[str] = None    # what Groq Vision said (filled for live incidents)
+    scene: Optional[str] = None          # overall scene description
+    detected_at: Optional[str] = None    # ISO-8601 full timestamp for sort by date
 
 
 class IncidentList(BaseModel):

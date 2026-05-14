@@ -3230,11 +3230,31 @@ const CameraTile = ({ cam, index, snapshot, detections, violationLabels = [] }) 
   const boxes = hasLoop ? loopBoxes : (Array.isArray(detections) ? detections : []);
 
   // Snapshot refresh: bump cache-buster every 10s so the <img> re-fetches.
+  // The parent <TrafficLive> re-polls /snapshots every 30 s, so once LTA has a
+  // new frame the image_url itself changes and the tile picks it up.
   React.useEffect(() => {
     if (!hasSnapshot) return;
     const t = setInterval(() => setImgTs(Date.now()), 10000);
     return () => clearInterval(t);
   }, [hasSnapshot]);
+
+  // Human-readable "captured X ago" for the live-freshness chip on each tile.
+  const capturedAt = snapshot?.captured_at;
+  const [freshLabel, setFreshLabel] = React.useState('');
+  React.useEffect(() => {
+    if (!capturedAt) { setFreshLabel(''); return; }
+    const tick = () => {
+      const t0 = new Date(capturedAt).getTime();
+      if (!isFinite(t0)) { setFreshLabel(''); return; }
+      const ageS = Math.max(0, Math.round((Date.now() - t0) / 1000));
+      if (ageS < 60)        setFreshLabel(`${ageS}s ago`);
+      else if (ageS < 3600) setFreshLabel(`${Math.round(ageS/60)}m ago`);
+      else                  setFreshLabel(`${Math.round(ageS/3600)}h ago`);
+    };
+    tick();
+    const t = setInterval(tick, 5000);
+    return () => clearInterval(t);
+  }, [capturedAt]);
 
   // Loop video: load tracks JSON once, sync bbox overlay to playback via rAF
   React.useEffect(() => {
@@ -3417,6 +3437,13 @@ const CameraTile = ({ cam, index, snapshot, detections, violationLabels = [] }) 
         </div>
         <div className="cam-overlay-tr">
           <span style={{ fontSize: 10 }}>{cam.fps ? `${cam.fps.toFixed ? cam.fps.toFixed(1) : cam.fps} FPS` : '— FPS'}</span>
+          {hasSnapshot && freshLabel && (
+            <span style={{
+              marginLeft: 6, fontSize: 9, padding: '1px 5px',
+              background: 'rgba(0,255,170,0.18)', border: '1px solid var(--green)',
+              color: 'var(--green)', letterSpacing: 0.8,
+            }} title={`Captured at ${capturedAt}`}>◉ {freshLabel}</span>
+          )}
         </div>
         {/* Detection box overlays will be drawn by Phase 2 from real OTVision output */}
         <div className="cam-overlay-bl">
@@ -3614,17 +3641,19 @@ const TrafficLive = () => {
 // Falls back to a friendly message if the clip wasn't generated.
 // ====================================================================
 const IncidentClipModal = ({ inc, onClose }) => {
-  // Two evidence types: live-pipeline incidents save a JPG snapshot, upload-pipeline
-  // incidents save a 3s mp4 clip. Try JPG first via img.onerror fallback; if that
-  // fails too, show a message.
+  // Two evidence types: live-pipeline incidents save an ANNOTATED JPG with
+  // bbox + violator marker; upload-pipeline incidents stitch a slideshow mp4.
+  // Default to JPG (now bbox-overlaid); user can flip to slideshow.
   const [mode, setMode] = React.useState('jpg');   // 'jpg' | 'mp4' | 'none'
-  React.useEffect(() => { setMode('jpg'); }, [inc?.id]);
+  const [jpgOk, setJpgOk] = React.useState(true);
+  const [mp4Ok, setMp4Ok] = React.useState(true);
+  React.useEffect(() => { setMode('jpg'); setJpgOk(true); setMp4Ok(true); }, [inc?.id]);
   if (!inc) return null;
   const jpgUrl = `${API_BASE || ''}/api/traffic-violations/incidents/${inc.id}/evidence.jpg`;
   const mp4Url = `${API_BASE || ''}/api/traffic-violations/incidents/${inc.id}/clip.mp4`;
   return (
     <div className="tv-modal-backdrop" onClick={onClose}>
-      <div className="tv-modal" style={{ maxWidth: 800 }} onClick={e => e.stopPropagation()}>
+      <div className="tv-modal" style={{ maxWidth: 880 }} onClick={e => e.stopPropagation()}>
         <div className="tv-modal-head">
           <div>
             <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, opacity: 0.7 }}>{inc.id}</div>
@@ -3637,28 +3666,49 @@ const IncidentClipModal = ({ inc, onClose }) => {
           <button className="btn-brutal" onClick={onClose} style={{ fontSize: 10, padding: '4px 10px', marginLeft: 'auto' }}>✕ CLOSE</button>
         </div>
         <div style={{ padding: 18 }}>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+            <button
+              className="btn-brutal"
+              onClick={() => setMode('jpg')}
+              disabled={!jpgOk}
+              style={{ fontSize: 11, padding: '4px 10px', background: mode === 'jpg' ? 'var(--cyan)' : '#fff', color: '#000' }}
+            >🔍 ANNOTATED FRAME</button>
+            <button
+              className="btn-brutal"
+              onClick={() => setMode('mp4')}
+              disabled={!mp4Ok}
+              style={{ fontSize: 11, padding: '4px 10px', background: mode === 'mp4' ? 'var(--cyan)' : '#fff', color: '#000' }}
+            >▶ SLIDESHOW CLIP</button>
+            <a
+              href={jpgUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn-brutal"
+              style={{ fontSize: 11, padding: '4px 10px', marginLeft: 'auto', textDecoration: 'none', color: '#000' }}
+            >⤓ DOWNLOAD JPG</a>
+          </div>
           {mode === 'jpg' && (
             <div style={{ position: 'relative' }}>
               <img
                 src={jpgUrl}
                 alt={`Evidence for ${inc.id}`}
-                onError={() => setMode('mp4')}
-                style={{ width: '100%', maxHeight: '60vh', objectFit: 'contain', background: '#000', border: '3px solid #000', display: 'block' }}
+                onError={() => { setJpgOk(false); setMode('mp4'); }}
+                style={{ width: '100%', maxHeight: '64vh', objectFit: 'contain', background: '#000', border: '3px solid #000', display: 'block' }}
               />
               <div style={{
                 position: 'absolute', top: 8, left: 8,
                 background: 'var(--gold)', color: '#000', padding: '2px 8px',
                 fontFamily: 'var(--font-mono)', fontSize: 10, fontWeight: 700, letterSpacing: 1,
                 border: '2px solid #000',
-              }}>LIVE-CAM SNAPSHOT</div>
+              }}>YOLO + VIOLATOR OVERLAY</div>
             </div>
           )}
           {mode === 'mp4' && (
             <video
               src={mp4Url}
               controls autoPlay muted loop
-              onError={() => setMode('none')}
-              style={{ width: '100%', maxHeight: '60vh', background: '#000', border: '3px solid #000' }}
+              onError={() => { setMp4Ok(false); setMode('none'); }}
+              style={{ width: '100%', maxHeight: '64vh', background: '#000', border: '3px solid #000' }}
             />
           )}
           {mode === 'none' && (
@@ -3666,9 +3716,13 @@ const IncidentClipModal = ({ inc, onClose }) => {
               No evidence file saved for this incident. The detection metadata is still valid below.
             </div>
           )}
-          <div style={{ marginTop: 12, fontFamily: 'var(--font-mono)', fontSize: 11, opacity: 0.7, lineHeight: 1.7 }}>
-            <strong>What the system flagged:</strong> {inc.description || `${inc.type} detected with ${inc.conf}% confidence at ${inc.time}.`}<br />
-            <strong>Status:</strong> {inc.status?.toUpperCase()}
+          <div style={{ marginTop: 12, fontFamily: 'var(--font-mono)', fontSize: 11, opacity: 0.75, lineHeight: 1.7 }}>
+            <div><strong>What the system flagged:</strong> {inc.description || `${inc.type} detected with ${inc.conf}% confidence at ${inc.time}.`}</div>
+            {inc.scene && <div><strong>Scene:</strong> {inc.scene}</div>}
+            <div><strong>Status:</strong> {inc.status?.toUpperCase()}</div>
+            <div style={{ fontSize: 10, opacity: 0.55, marginTop: 6 }}>
+              Red box marks the suspected violator. Coloured boxes are other detected objects (cyan car · amber truck · magenta bus · yellow motorcycle · green person).
+            </div>
           </div>
         </div>
       </div>
@@ -3889,10 +3943,39 @@ const BulkActionsBar = ({ count, onApproveAll, onRejectAll, onClear }) => {
   );
 };
 
+// Fix #3 — Severity / status ordering for client-side sort
+const TV_SEV_RANK = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 };
+const TV_INC_STATUS_RANK = { pending: 3, approved: 2, rejected: 1 };
+
+const tvSortIncidents = (rows, sortKey) => {
+  const list = [...rows];
+  switch (sortKey) {
+    case 'newest':
+      return list.sort((a, b) => (b.detected_at || b.time || '').localeCompare(a.detected_at || a.time || ''));
+    case 'oldest':
+      return list.sort((a, b) => (a.detected_at || a.time || '').localeCompare(b.detected_at || b.time || ''));
+    case 'sev_desc':
+      return list.sort((a, b) => (TV_SEV_RANK[b.severity] || 0) - (TV_SEV_RANK[a.severity] || 0));
+    case 'sev_asc':
+      return list.sort((a, b) => (TV_SEV_RANK[a.severity] || 0) - (TV_SEV_RANK[b.severity] || 0));
+    case 'conf_desc':
+      return list.sort((a, b) => (b.conf || 0) - (a.conf || 0));
+    case 'conf_asc':
+      return list.sort((a, b) => (a.conf || 0) - (b.conf || 0));
+    case 'cam':
+      return list.sort((a, b) => (a.cam || '').localeCompare(b.cam || ''));
+    case 'pending_first':
+      return list.sort((a, b) => (TV_INC_STATUS_RANK[b.status] || 0) - (TV_INC_STATUS_RANK[a.status] || 0));
+    default:
+      return list;
+  }
+};
+
 const TrafficIncidents = () => {
   const [selected, setSelected] = React.useState([]);  // chip filter state (unused — legacy)
   const [incidents, setIncidents] = React.useState([]);
   const [filters, setFilters] = React.useState({});
+  const [sortKey, setSortKey] = React.useState('newest');
   const [loading, setLoading] = React.useState(true);
   const [refreshKey, setRefreshKey] = React.useState(0);
   const [selectedIds, setSelectedIds] = React.useState([]);   // bulk-select inc_id list
@@ -3901,28 +3984,33 @@ const TrafficIncidents = () => {
   const [toast, setToast] = React.useState('');                    // approve/reject feedback
   const [busyId, setBusyId] = React.useState(null);                // per-card busy flag
 
+  // Map filter UI labels → backend param values
+  const filterParams = React.useMemo(() => {
+    const out = { limit: 50 };
+    Object.entries(filters).forEach(([k, v]) => { if (v) out[k] = v; });
+    return out;
+  }, [filters]);
+
   React.useEffect(() => {
     setLoading(true);
-    const params = { limit: 50 };
-    Object.entries(filters).forEach(([k, v]) => { if (v) params[k] = v; });
-    apiFetch('/api/traffic-violations/incidents', { ...TRAFFIC_AUTH, params })
+    apiFetch('/api/traffic-violations/incidents', { ...TRAFFIC_AUTH, params: filterParams })
       .then(d => { setIncidents(d.incidents || []); setLoading(false); })
       .catch(() => { setIncidents([]); setLoading(false); });
-  }, [filters, refreshKey]);
+  }, [filterParams, refreshKey]);
 
   // Phase A.1 — auto-poll for new live-pipeline incidents every 15s.
   // Silent (no loading flag) so the user's interaction isn't interrupted.
   React.useEffect(() => {
     const tick = () => {
-      const params = { limit: 50 };
-      Object.entries(filters).forEach(([k, v]) => { if (v) params[k] = v; });
-      apiFetch('/api/traffic-violations/incidents', { ...TRAFFIC_AUTH, params })
+      apiFetch('/api/traffic-violations/incidents', { ...TRAFFIC_AUTH, params: filterParams })
         .then(d => setIncidents(d.incidents || []))
         .catch(() => {});
     };
     const id = setInterval(tick, 15000);
     return () => clearInterval(id);
-  }, [filters]);
+  }, [filterParams]);
+
+  const sortedIncidents = React.useMemo(() => tvSortIncidents(incidents, sortKey), [incidents, sortKey]);
 
   const toggleSelected = (id) => {
     setSelectedIds(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]);
@@ -3997,16 +4085,30 @@ const TrafficIncidents = () => {
         }}>{toast}</div>
       )}
 
-      <div className="toolbar">
+      <div className="toolbar" style={{ display: 'flex', alignItems: 'flex-end', gap: 12, flexWrap: 'wrap' }}>
         <FilterBar
           filters={[
-            { key: 'type', label: 'Type', options: ['NO HELMET', 'SPEEDING', 'WRONG LANE', 'RED LIGHT', 'NO SEATBELT', 'ILLEGAL PARK'] },
+            { key: 'type', label: 'Type', options: ['NO HELMET', 'SPEEDING', 'WRONG LANE', 'RED LIGHT', 'NO SEATBELT', 'ILLEGAL PARK', 'ACCIDENT', 'RASH DRIVING', 'LANE VIOLATION'] },
             { key: 'severity', label: 'Severity', options: ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'] },
             { key: 'status', label: 'Status', options: ['pending', 'approved', 'rejected'] },
           ]}
           values={filters}
-          onChange={setFilters}
+          onChange={(k, v) => setFilters(f => ({ ...f, [k]: v }))}
+          onClear={() => setFilters({})}
         />
+        <div className="filter-group">
+          <label className="filter-label">Sort by</label>
+          <select className="filter-select" value={sortKey} onChange={e => setSortKey(e.target.value)}>
+            <option value="newest">Newest first</option>
+            <option value="oldest">Oldest first</option>
+            <option value="pending_first">Pending first</option>
+            <option value="sev_desc">Severity (high → low)</option>
+            <option value="sev_asc">Severity (low → high)</option>
+            <option value="conf_desc">Confidence (high → low)</option>
+            <option value="conf_asc">Confidence (low → high)</option>
+            <option value="cam">Camera (A → Z)</option>
+          </select>
+        </div>
       </div>
       {!loading && incidents.length === 0 && (
         <div className="widget-card" style={{ padding: 40, textAlign: 'center' }}>
@@ -4017,7 +4119,7 @@ const TrafficIncidents = () => {
         </div>
       )}
       <div className="incident-grid">
-        {incidents.map((inc, i) => {
+        {sortedIncidents.map((inc, i) => {
           const isPending = inc.status === 'pending';
           const isSelected = selectedIds.includes(inc.id);
           return (
@@ -4167,19 +4269,40 @@ const RevenueForecastCard = () => {
   );
 };
 
+const TV_CHALLAN_STATUS_RANK = { UNPAID: 3, DISPUTED: 2, PAID: 1 };
+
+const tvSortChallans = (rows, sortKey) => {
+  const list = [...rows];
+  switch (sortKey) {
+    case 'newest':       return list.sort((a, b) => (b.issued || '').localeCompare(a.issued || ''));
+    case 'oldest':       return list.sort((a, b) => (a.issued || '').localeCompare(b.issued || ''));
+    case 'due_soon':     return list.sort((a, b) => (a.due || '').localeCompare(b.due || ''));
+    case 'amt_desc':     return list.sort((a, b) => (b.amt || 0) - (a.amt || 0));
+    case 'amt_asc':      return list.sort((a, b) => (a.amt || 0) - (b.amt || 0));
+    case 'unpaid_first': return list.sort((a, b) => (TV_CHALLAN_STATUS_RANK[b.status] || 0) - (TV_CHALLAN_STATUS_RANK[a.status] || 0));
+    case 'plate':        return list.sort((a, b) => (a.plate || '').localeCompare(b.plate || ''));
+    default:             return list;
+  }
+};
+
 const TrafficChallans = () => {
   const [challans, setChallans] = React.useState([]);
   const [kpis, setKpis] = React.useState({ issued_30d: 0, total_collected: 0, collection_rate: 0, disputed_pct: 0 });
   const [openChallan, setOpenChallan] = React.useState(null);
   const [refreshKey, setRefreshKey] = React.useState(0);
+  const [statusFilter, setStatusFilter] = React.useState('');
+  const [sortKey, setSortKey] = React.useState('newest');
 
   React.useEffect(() => {
-    apiFetch('/api/traffic-violations/challans', TRAFFIC_AUTH)
+    const params = statusFilter ? { status: statusFilter } : {};
+    apiFetch('/api/traffic-violations/challans', { ...TRAFFIC_AUTH, params })
       .then(d => setChallans(d.challans || []))
       .catch(() => setChallans([]));
     apiFetch('/api/traffic-violations/challans/kpis', TRAFFIC_AUTH)
       .then(setKpis).catch(() => {});
-  }, [refreshKey]);
+  }, [refreshKey, statusFilter]);
+
+  const sorted = React.useMemo(() => tvSortChallans(challans, sortKey), [challans, sortKey]);
 
   return (
     <div className="tab-pane">
@@ -4193,8 +4316,34 @@ const TrafficChallans = () => {
         <SLAWidget />
         <RevenueForecastCard />
       </div>
+      <div className="toolbar mt-20" style={{ display: 'flex', alignItems: 'flex-end', gap: 12, flexWrap: 'wrap' }}>
+        <div className="filter-group">
+          <label className="filter-label">Status</label>
+          <select className="filter-select" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
+            <option value="">All</option>
+            <option value="UNPAID">Unpaid</option>
+            <option value="PAID">Paid</option>
+            <option value="DISPUTED">Disputed</option>
+          </select>
+        </div>
+        <div className="filter-group">
+          <label className="filter-label">Sort by</label>
+          <select className="filter-select" value={sortKey} onChange={e => setSortKey(e.target.value)}>
+            <option value="newest">Newest issued</option>
+            <option value="oldest">Oldest issued</option>
+            <option value="unpaid_first">Unpaid first</option>
+            <option value="due_soon">Due soonest</option>
+            <option value="amt_desc">Amount (high → low)</option>
+            <option value="amt_asc">Amount (low → high)</option>
+            <option value="plate">Plate (A → Z)</option>
+          </select>
+        </div>
+        <div style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 10, opacity: 0.55 }}>
+          {sorted.length} of {challans.length} challan{challans.length === 1 ? '' : 's'}
+        </div>
+      </div>
       <div className="widget-card mt-20">
-        {challans.length === 0 ? (
+        {sorted.length === 0 ? (
           <div style={{ padding: 40, textAlign: 'center' }}>
             <div style={{ fontSize: 14, opacity: 0.6, marginBottom: 8 }}>NO CHALLANS ISSUED YET</div>
             <div style={{ fontSize: 11, opacity: 0.4, fontFamily: 'var(--font-mono)' }}>
@@ -4215,7 +4364,7 @@ const TrafficChallans = () => {
                 { key: 'due',    label: 'DUE BY',   width: 110 },
                 { key: 'status', label: 'STATUS',   width: 130, render: v => <Badge variant={v === 'PAID' ? 'green' : v === 'DISPUTED' ? 'gold' : 'red'}>{v}</Badge> },
               ]}
-              rows={challans}
+              rows={sorted}
             />
             <ChallanDetailModal
               challan={openChallan}
@@ -4340,19 +4489,39 @@ const OffenderTimelineModal = ({ plate, onClose }) => {
   );
 };
 
+const TV_OFFENDER_RISK_RANK = { HIGH: 3, MEDIUM: 2, LOW: 1 };
+
+const tvSortOffenders = (rows, sortKey) => {
+  const list = [...rows];
+  switch (sortKey) {
+    case 'rank':         return list.sort((a, b) => (a.rank || 99) - (b.rank || 99));
+    case 'offenses':     return list.sort((a, b) => (b.offenses || 0) - (a.offenses || 0));
+    case 'pending_desc': return list.sort((a, b) => (b.total || 0) - (a.total || 0));
+    case 'pending_asc':  return list.sort((a, b) => (a.total || 0) - (b.total || 0));
+    case 'risk':         return list.sort((a, b) => (TV_OFFENDER_RISK_RANK[b.risk] || 0) - (TV_OFFENDER_RISK_RANK[a.risk] || 0));
+    case 'plate':        return list.sort((a, b) => (a.plate || '').localeCompare(b.plate || ''));
+    default:             return list;
+  }
+};
+
 const TrafficOffenders = () => {
   const [offenders, setOffenders] = React.useState([]);
   const [loading, setLoading] = React.useState(true);
   const [openPlate, setOpenPlate] = React.useState(null);
   const [notifyBusy, setNotifyBusy] = React.useState('');
   const [toast, setToast] = React.useState('');
+  const [days, setDays] = React.useState(90);
+  const [limit, setLimit] = React.useState(10);
+  const [sortKey, setSortKey] = React.useState('rank');
 
   const load = React.useCallback(() => {
-    apiFetch('/api/traffic-violations/offenders/top', { ...TRAFFIC_AUTH, params: { days: 90, limit: 5 } })
+    apiFetch('/api/traffic-violations/offenders/top', { ...TRAFFIC_AUTH, params: { days, limit } })
       .then(d => { setOffenders(d.offenders || []); setLoading(false); })
       .catch(() => { setOffenders([]); setLoading(false); });
-  }, []);
+  }, [days, limit]);
   React.useEffect(load, [load]);
+
+  const sorted = React.useMemo(() => tvSortOffenders(offenders, sortKey), [offenders, sortKey]);
 
   const quickNotify = async (plate, e) => {
     e.stopPropagation();
@@ -4382,18 +4551,49 @@ const TrafficOffenders = () => {
           border: '2px solid #000', boxShadow: '4px 4px 0 #000',
         }}>{toast}</div>
       )}
+      <div className="toolbar" style={{ display: 'flex', alignItems: 'flex-end', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+        <div className="filter-group">
+          <label className="filter-label">Window</label>
+          <select className="filter-select" value={days} onChange={e => setDays(parseInt(e.target.value, 10))}>
+            <option value={7}>Last 7 days</option>
+            <option value={30}>Last 30 days</option>
+            <option value={90}>Last 90 days</option>
+            <option value={180}>Last 180 days</option>
+            <option value={365}>Last year</option>
+          </select>
+        </div>
+        <div className="filter-group">
+          <label className="filter-label">Show</label>
+          <select className="filter-select" value={limit} onChange={e => setLimit(parseInt(e.target.value, 10))}>
+            <option value={5}>Top 5</option>
+            <option value={10}>Top 10</option>
+            <option value={20}>Top 20</option>
+          </select>
+        </div>
+        <div className="filter-group">
+          <label className="filter-label">Sort by</label>
+          <select className="filter-select" value={sortKey} onChange={e => setSortKey(e.target.value)}>
+            <option value="rank">Rank</option>
+            <option value="offenses">Offense count</option>
+            <option value="pending_desc">Pending fine (high → low)</option>
+            <option value="pending_asc">Pending fine (low → high)</option>
+            <option value="risk">Risk level</option>
+            <option value="plate">Plate (A → Z)</option>
+          </select>
+        </div>
+      </div>
       <div className="widget-card">
-        <div className="widget-title">TOP 5 REPEAT OFFENDERS · LAST 90 DAYS</div>
-        {!loading && offenders.length === 0 ? (
+        <div className="widget-title">TOP {limit} REPEAT OFFENDERS · LAST {days} DAYS</div>
+        {!loading && sorted.length === 0 ? (
           <div style={{ padding: 40, textAlign: 'center' }}>
             <div style={{ fontSize: 14, opacity: 0.6, marginBottom: 8 }}>NO REPEAT OFFENDERS YET</div>
             <div style={{ fontSize: 11, opacity: 0.4, fontFamily: 'var(--font-mono)' }}>
-              This rolls up tv_incidents + tv_challans by plate (90-day window). Populates as Phase 2 detections accumulate.
+              This rolls up tv_incidents + tv_challans by plate ({days}-day window). Populates as Phase 2 detections accumulate.
             </div>
           </div>
         ) : (
         <div className="offender-list">
-          {offenders.map(o => (
+          {sorted.map(o => (
             <div
               key={o.rank}
               className="offender-row"
