@@ -889,6 +889,10 @@ def _compute_detect_payload(snaps: dict[str, Any], sig: str) -> dict[str, Any]:
                     log.debug("detect fetch failed for %s: %s", cam_id, e)
                     boxes = []
                 per_cam[cam_id] = boxes
+                if jpg_bytes:
+                    # Phase A.4 — feed the rolling frame buffer + tick pending clip captures.
+                    _push_cam_frame(cam_id, jpg_bytes)
+                    _tick_clip_captures(cam_id, jpg_bytes)
                 for b in boxes:
                     if b["cls"] == "car":         summary["cars"] += 1
                     elif b["cls"] == "motorcycle": summary["motorcycles"] += 1
@@ -1048,6 +1052,103 @@ def _save_live_evidence_jpg(jpg_bytes: bytes, inc_id: str) -> Optional[str]:
         return str(out)
     except Exception as e:
         log.warning("evidence save failed for %s: %s", inc_id, e)
+        return None
+
+
+# Phase A.4 — rolling per-cam frame buffer + pending capture jobs.
+# When an incident is created we snap the prior N frames from the buffer,
+# then collect the next N frames over subsequent cycles and stitch all
+# into .tv_clips/{inc_id}.mp4 at 2 fps (≈10 s of "before + after" context
+# compressed from real time so officers see what led up to the violation).
+_CAM_FRAME_BUFFER: dict[str, list[bytes]] = {}
+_CAM_FRAME_BUFFER_SIZE = 5
+_PENDING_CLIP_CAPTURES: dict[str, dict[str, Any]] = {}
+_CLIP_FRAMES_AFTER = 5     # how many additional cycles to capture
+_CLIP_FPS = 2              # output fps in the stitched mp4
+
+
+def _push_cam_frame(cam_id: str, jpg_bytes: bytes) -> None:
+    buf = _CAM_FRAME_BUFFER.setdefault(cam_id, [])
+    buf.append(jpg_bytes)
+    if len(buf) > _CAM_FRAME_BUFFER_SIZE:
+        buf.pop(0)
+
+
+def _queue_clip_capture(inc_id: str, cam_id: str) -> None:
+    """Capture starts NOW — seed with whatever's in the rolling buffer."""
+    pre = list(_CAM_FRAME_BUFFER.get(cam_id, []))
+    _PENDING_CLIP_CAPTURES[inc_id] = {
+        "cam_id": cam_id,
+        "frames": pre[-_CAM_FRAME_BUFFER_SIZE:],
+        "remaining": _CLIP_FRAMES_AFTER,
+        "started_at": _time.time(),
+    }
+
+
+def _tick_clip_captures(cam_id: str, jpg_bytes: bytes) -> None:
+    """For every pending capture on this cam, append the fresh frame.
+    Finalise once remaining hits 0."""
+    for inc_id in list(_PENDING_CLIP_CAPTURES.keys()):
+        p = _PENDING_CLIP_CAPTURES[inc_id]
+        if p["cam_id"] != cam_id:
+            continue
+        # Avoid appending the same incident-anchor frame twice (the queueing
+        # step seeds the buffer; this tick fires AFTER the anchor cycle).
+        if p["remaining"] <= 0:
+            _PENDING_CLIP_CAPTURES.pop(inc_id, None)
+            continue
+        p["frames"].append(jpg_bytes)
+        p["remaining"] -= 1
+        if p["remaining"] <= 0:
+            try:
+                _finalise_live_clip(inc_id, p["frames"])
+            finally:
+                _PENDING_CLIP_CAPTURES.pop(inc_id, None)
+
+
+def _finalise_live_clip(inc_id: str, frame_jpgs: list[bytes]) -> Optional[str]:
+    """Stitch a list of JPG bytes into .tv_clips/{inc_id}.mp4. Best-effort."""
+    if not frame_jpgs:
+        return None
+    try:
+        import cv2
+        import numpy as np
+        frames: list[Any] = []
+        h, w = 0, 0
+        for jb in frame_jpgs:
+            arr = np.frombuffer(jb, dtype=np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if img is None:
+                continue
+            if not frames:
+                h, w = img.shape[:2]
+            elif (img.shape[0], img.shape[1]) != (h, w):
+                img = cv2.resize(img, (w, h))
+            frames.append(img)
+        if not frames or w == 0 or h == 0:
+            return None
+        out_path = CLIPS_DIR / f"{inc_id}.mp4"
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(str(out_path), fourcc, _CLIP_FPS, (w, h))
+        if not writer.isOpened():
+            log.warning("VideoWriter failed to open for %s", inc_id)
+            return None
+        for f in frames:
+            writer.write(f)
+        writer.release()
+        # Update tv_incidents.video_clip_path so the audit shows a clip
+        try:
+            sb = get_supabase()
+            sb.table("tv_incidents").update({
+                "video_clip_path": str(out_path),
+                "duration_seconds": len(frames) / max(1, _CLIP_FPS),
+            }).eq("inc_id", inc_id).execute()
+        except Exception as e:
+            log.debug("update tv_incidents.video_clip_path failed for %s: %s", inc_id, e)
+        log.info("Live evidence clip saved: %s (%d frames)", out_path, len(frames))
+        return str(out_path)
+    except Exception as e:
+        log.warning("clip stitch failed for %s: %s", inc_id, e)
         return None
 
 
@@ -1235,6 +1336,8 @@ def _maybe_create_live_incidents_for_cam(
             sb.table("tv_incidents").insert(row).execute()
             incident_ids.append(inc_id)
             _LIVE_VIOLATION_COOLDOWN[ck] = _time.time()
+            # Phase A.4 — schedule a slideshow-clip capture for this incident.
+            _queue_clip_capture(inc_id, cam_id)
             violation_labels.append({
                 "type": vtype, "severity": severity,
                 "label": VIOLATION_LABEL.get(vtype, vtype.upper()),
