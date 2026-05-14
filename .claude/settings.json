@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git branch*)",
+      "Bash(git show*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git stash*)",
+      "Bash(npm install)",
+      "Bash(npm install:*)",
+      "Bash(npm run build:*)",
+      "Bash(npm run dev:*)",
+      "Bash(npm run test:*)",
+      "Bash(npm uninstall:*)",
+      "Bash(npx tailwindcss:*)",
+      "Bash(npx vercel:*)",
+      "Bash(python -m http.server:*)",
+      "Bash(python -m venv:*)",
+      "Bash(python -m pip:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(python -m uvicorn:*)",
+      "Bash(pip install:*)",
+      "Bash(pip uninstall:*)",
+      "Bash(pip freeze*)",
+      "Bash(pytest:*)",
+      "Bash(uvicorn:*)",
+      "Bash(curl -s -o*)",
+      "Bash(curl -s *)",
+      "Bash(ls:*)",
+      "Bash(wc -l:*)",
+      "Bash(mkdir -p:*)",
+      "Bash(cp:*)",
+      "Bash(mv:*)"
+    ],
+    "deny": [
+      "Bash(rm -rf:*)",
+      "Bash(git push --force*)",
+      "Bash(git reset --hard*)",
+      "Bash(git clean -f*)",
+      "Bash(git push origin main*)",
+      "Bash(git push origin master*)"
+    ],
+    "ask": [
+      "Bash(rm:*)",
+      "Bash(git push:*)",
+      "Bash(npm publish:*)",
+      "Bash(docker:*)"
+    ]
+  },
+  "env": {
+    "CITADEL_MODE": "frontend-mock",
+    "PYTHONUNBUFFERED": "1"
+  }
+}

@@ -1,0 +1,96 @@
+"""
+Centralized application settings.
+All env-driven config goes through this Settings class — never read os.environ
+directly elsewhere in the codebase.
+"""
+from __future__ import annotations
+
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+BACKEND_ROOT = Path(__file__).resolve().parent.parent  # .../CITADEL/backend
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=str(BACKEND_ROOT / ".env"),
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+        extra="ignore",
+    )
+
+    # ---- Supabase ----
+    SUPABASE_URL: str = Field(..., description="https://<project-ref>.supabase.co")
+    SUPABASE_ANON_KEY: str = Field(..., description="Public anon JWT")
+    SUPABASE_SERVICE_ROLE_KEY: str = Field(..., description="Server-side JWT — full access")
+
+    # ---- OCR Space ----
+    OCR_SPACE_API_KEY: str = Field(..., description="ocr.space free-tier API key")
+    OCR_SPACE_ENDPOINT: str = "https://api.ocr.space/parse/image"
+    OCR_SPACE_MAX_REQUEST_MB: int = 1
+
+    # ---- Groq (document classification) ----
+    GROQ_API_KEY: str = Field(..., description="gsk_...")
+    GROQ_CLASSIFIER_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_ENDPOINT: str = "https://api.groq.com/openai/v1/chat/completions"
+
+    # ---- Server ----
+    APP_ENV: str = "development"
+    APP_HOST: str = "0.0.0.0"
+    APP_PORT: int = 8000
+    CORS_ORIGINS: str = "http://127.0.0.1:8080,http://localhost:8080"
+
+    # ---- Storage ----
+    SUPABASE_BUCKET_DOCUMENTS: str = "documents"
+    SUPABASE_BUCKET_PROCESSED: str = "processed"
+
+    # ---- Limits ----
+    MAX_UPLOAD_SIZE_MB: int = 10
+    MAX_BATCH_SIZE: int = 10
+
+    # ---- Embeddings ----
+    EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"
+    EMBEDDING_DIM: int = 384
+    CHUNK_SIZE_TOKENS: int = 500
+    CHUNK_OVERLAP_TOKENS: int = 50
+
+    # ---- Resume Screening ----
+    TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_DEFAULT_CHAT_ID: str = ""
+    TELEGRAM_API_BASE: str = "https://api.telegram.org"
+    SUPABASE_BUCKET_RESUMES: str = "resumes"
+    COST_PER_HIRE_RUPEES: int = 18000
+    RESUME_AUTO_SHORTLIST_DEFAULT: float = 70.0
+
+    # --- derived helpers ---
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
+
+    @property
+    def max_upload_bytes(self) -> int:
+        return self.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+
+    @property
+    def ocr_max_request_bytes(self) -> int:
+        return self.OCR_SPACE_MAX_REQUEST_MB * 1024 * 1024
+
+    @field_validator("APP_ENV")
+    @classmethod
+    def _validate_env(cls, v: str) -> str:
+        v = v.lower()
+        if v not in {"development", "staging", "production"}:
+            raise ValueError("APP_ENV must be development | staging | production")
+        return v
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """Cached settings singleton — lazily loads .env on first call."""
+    return Settings()
+
+
+settings = get_settings()

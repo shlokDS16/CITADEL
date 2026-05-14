@@ -56,3 +56,20 @@ Thumbs.db
 backend/.tmp/
 backend/data/dataset/  # If the dataset is large, it's better not to push it
 *.log
+
+# Runtime artifacts (auto-generated, do not commit)
+backend/.tv_uploads/
+backend/.tv_clips/
+backend/.tv_camera_loops/
+backend/yolov8*.pt
+backend/*.pt
+uploads/
+_test_resumes/
+tasks/
+test-*.docx
+test-*.pdf
+netlify-drop/
+
+# Claude worktrees + transient agent data
+.claude/worktrees/
+.claude/__claude_resume__/

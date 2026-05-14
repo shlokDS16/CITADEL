@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>C.I.T.A.D.E.L. OS</title>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <link rel="stylesheet" href="styles.css?v=20260504b" />
+  <!-- Quill rich-text editor (formal Word-like editor used in the Templates → Edit modal) -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/quill@2.0.3/dist/quill.snow.css" />
+  <script src="https://cdn.jsdelivr.net/npm/quill@2.0.3/dist/quill.js"></script>
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+  <!-- HLS.js — for playing m3u8 streams in Chrome/Firefox/Edge (Safari has native HLS). Used by Traffic Violations live feed. -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" src="components.jsx?v=20260504b"></script>
+  <script type="text/babel" src="pages.jsx?v=20260504b"></script>
+  <script type="text/babel" src="tweaks-panel.jsx?v=20260504b"></script>
+  <script type="text/babel">
+
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "accentHue": 43,
+  "scanlines": true,
+  "animatedShapes": true
+}/*EDITMODE-END*/;
+
+// ==================== MAIN APP ====================
+const App = () => {
+  const [tweaks, setTweaks] = typeof useTweaks === 'function' ? useTweaks(TWEAK_DEFAULTS) : [TWEAK_DEFAULTS, ()=>{}];
+  const [page, setPage] = React.useState('landing');
+  const [role, setRole] = React.useState(null);
+  const [loginRole, setLoginRole] = React.useState(null);
+  const [cmdOpen, setCmdOpen] = React.useState(false);
+
+  const goLanding = () => { setPage('landing'); setRole(null); setCmdOpen(false); };
+  const goLogin = (r) => { setLoginRole(r); setPage('login'); };
+  const doLogin = () => { setRole(loginRole); setPage('dashboard'); };
+  const goSub = (sub) => { setPage(sub); setCmdOpen(false); };
+  const goDash = () => { setPage('dashboard'); setCmdOpen(false); };
+  const openCmd = () => setCmdOpen(true);
+
+  React.useEffect(() => {
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        if (role) setCmdOpen(o => !o);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [role]);
+
+  // Landing Page
+  if (page === 'landing') return (
+    <div>
+      <CitadelBackground />
+      <div className="landing-page">
+        <div style={{ animation: 'fadeIn 0.6s ease-out' }}>
+          <div className="landing-title">C.I.T.A.D.E.L.</div>
+          <div className="landing-sub">Centralized Intelligence & Technology</div>
+          <div className="landing-sub2">Administration Dashboard for Enhanced Living</div>
+        </div>
+        <div className="portal-cards">
+          <div className="portal-card" onClick={() => goLogin('government')} style={{ animationDelay: '0.2s', animation: 'slideUp 0.6s ease-out both' }}>
+            <div className="portal-card-header" style={{ background: 'var(--gold)' }}>Government</div>
+            <div className="portal-card-body">
+              <div className="portal-icon">🛡</div>
+              <ul className="portal-features">
+                <li>Document Intelligence</li>
+                <li>Resume Screening</li>
+                <li>Traffic Violations</li>
+                <li>Infrastructure Monitoring</li>
+              </ul>
+            </div>
+            <div className="portal-card-footer">
+              <button className="portal-btn" style={{ background: 'var(--gold)' }}>ACCESS PORTAL</button>
+            </div>
+          </div>
+          <div className="portal-card" onClick={() => goLogin('citizen')} style={{ animationDelay: '0.35s', animation: 'slideUp 0.6s ease-out both' }}>
+            <div className="portal-card-header" style={{ background: 'var(--red)', color: '#fff' }}>Citizen</div>
+            <div className="portal-card-body">
+              <div className="portal-icon">👥</div>
+              <ul className="portal-features">
+                <li>AI Chatbot Assistant</li>
+                <li>Fake News Detection</li>
+                <li>Support Tickets</li>
+                <li>Expense Management</li>
+              </ul>
+            </div>
+            <div className="portal-card-footer">
+              <button className="portal-btn" style={{ background: 'var(--red)', color: '#fff' }}>ACCESS PORTAL</button>
+            </div>
+          </div>
+        </div>
+        <div className="landing-footer">Secure Authentication Required • Authorized Personnel Only</div>
+      </div>
+    </div>
+  );
+
+  // Login Page
+  if (page === 'login') {
+    const isGov = loginRole === 'government';
+    const accent = isGov ? 'var(--gold)' : 'var(--red)';
+    return (
+      <div>
+        <CitadelBackground />
+        <div className="login-page">
+          <div style={{ position: 'absolute', top: 20, left: 20 }}>
+            <button className="btn-brutal" onClick={goLanding} style={{ fontSize: 11, padding: '4px 14px' }}>← BACK</button>
+          </div>
+          <div className="login-card fade-in">
+            <div className="login-header" style={{ background: accent, color: isGov ? '#000' : '#fff' }}>
+              {isGov ? 'Government' : 'Citizen'} Login
+            </div>
+            <div className="login-body">
+              <label className="field-label">Username</label>
+              <input className="brutal-input" placeholder="Enter username" defaultValue={isGov ? 'rsd' : 'ss'} />
+              <label className="field-label">Password</label>
+              <input className="brutal-input" type="password" placeholder="Enter password" defaultValue="••••••••" />
+              <button className="btn-brutal action-btn" style={{ background: accent, color: isGov ? '#000' : '#fff', marginTop: 20 }} onClick={doLogin}>
+                ACCESS SYSTEM
+              </button>
+            </div>
+            <div className="login-footer">
+              Need an account? <a>Sign Up</a>
+            </div>
+          </div>
+          <div style={{ position: 'absolute', bottom: 30, fontFamily: 'var(--font-mono)', fontSize: 10, letterSpacing: 2, opacity: 0.3, textTransform: 'uppercase' }}>
+            Secure Connection • 256-bit Encryption
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Government Dashboard
+  if (page === 'dashboard' && role === 'government') {
+    const govGateways = [
+      { title: 'Document Intelligence', id: 'GATEWAY_01', icon: '📋', desc: 'OCR + NER + Layout Analysis', page: 'doc-intel', color: 'var(--gold)' },
+      { title: 'Resume Screening', id: 'GATEWAY_02', icon: '👥', desc: 'BERT + TF-IDF Matching', page: 'resume', color: 'var(--red)' },
+      { title: 'Traffic Violations', id: 'GATEWAY_03', icon: '🚦', desc: 'YOLOv8 + DeepSort + OCR', page: 'traffic', color: 'var(--cyan)' },
+      { title: 'Anomaly Monitoring', id: 'GATEWAY_04', icon: '📡', desc: 'IoT Fusion + Isolation Forest', page: 'anomaly', color: 'var(--red)' },
+    ];
+    const govLogLines = [
+      'CITADEL_GOV v3.7.1 :: Bootloader initialized',
+      'Mounting encrypted volumes... <span style="color:var(--green)">OK</span>',
+      'Neural processing grid: <span style="color:var(--green)">ONLINE</span>',
+      'Quantum coprocessor: <span style="color:var(--gold)">STANDBY</span>',
+      'Biometric auth layer: <span style="color:var(--green)">ACTIVE</span>',
+      'Threat assessment: <span style="color:var(--green)">LOW</span>',
+      'All government gateways: <span style="color:var(--green)">OPERATIONAL</span>',
+    ];
+    const govEvents = [
+      { action: 'Document batch processed (47 files)', time: '2 min ago', color: 'var(--gold)' },
+      { action: 'Traffic scan completed — Sector 12', time: '8 min ago', color: 'var(--cyan)' },
+      { action: 'Anomaly alert: Bridge sensor drift', time: '14 min ago', color: 'var(--red)' },
+      { action: 'Resume screening batch #204 done', time: '22 min ago', color: 'var(--red)' },
+      { action: 'System backup completed', time: '1 hr ago', color: 'var(--green)' },
+      { action: 'NER model retrained (v3.8)', time: '2 hr ago', color: 'var(--gold)' },
+    ];
+    const topoNodes = [
+      { label: 'DOC-01', status: 'online', name: 'Document Processing' },
+      { label: 'RES-02', status: 'online', name: 'Resume Engine' },
+      { label: 'TRF-03', status: 'busy', name: 'Traffic Analysis' },
+      { label: 'ANM-04', status: 'alert', name: 'Anomaly Detection' },
+      { label: 'AUTH', status: 'online', name: 'Authentication' },
+      { label: 'DB-01', status: 'online', name: 'Primary Database' },
+      { label: 'DB-02', status: 'online', name: 'Replica Database' },
+      { label: 'CACHE', status: 'busy', name: 'Redis Cache' },
+    ];
+
+    return (
+      <div>
+        <CitadelBackground />
+        <NavBar role="government" user="RSD" onLogout={goLanding} onOpenCmd={openCmd} />
+        <CommandPalette open={cmdOpen} onClose={() => setCmdOpen(false)} onJump={goSub} role="government" />
+        <div className="dashboard-content">
+          <div className="dashboard-header">
+            <div style={{ display: 'flex', alignItems: 'center' }}>
+              <h1>Government</h1>
+              <span className="portal-badge" style={{ background: 'var(--gold)' }}>COMMAND CENTER</span>
+            </div>
+            <p>C.I.T.A.D.E.L. Administrative Control Panel • Clearance Level: Alpha</p>
+          </div>
+
+          <div className="gateways-grid">
+            {govGateways.map((g, i) => (
+              <GatewayCard key={i} index={i} title={g.title} gatewayId={g.id} icon={g.icon} status="OPERATIONAL" description={g.desc} accentColor={g.color} onClick={() => goSub(g.page)} />
+            ))}
+          </div>
+
+          <div className="stats-grid">
+            <StatCard value={<AnimNum value={4} />} label="Active Gateways" accentColor="var(--gold)" />
+            <StatCard value={"99.7%"} label="Uptime" accentColor="var(--green)" />
+            <StatCard value={<AnimNum value={847} />} label="Sensors Online" accentColor="var(--cyan)" />
+            <StatCard value={<AnimNum value={12} />} label="Alerts Today" accentColor="var(--red)" />
+          </div>
+
+          <div className="section-divider">
+            <span>System Overview</span>
+            <span style={{ fontSize: 10, opacity: 0.4 }}>LIVE</span>
+          </div>
+
+          <div className="widgets-grid">
+            <CoreDynamics />
+            <SessionLog lines={govLogLines} />
+          </div>
+
+          <div className="section-divider">
+            <span>Intelligence & Monitoring</span>
+          </div>
+
+          <div className="widgets-grid-3">
+            <ActivityTimeline events={govEvents} />
+            <NetworkTopology nodes={topoNodes} />
+            <MiniChart title="GATEWAY THROUGHPUT (7D)" data={[340, 420, 380, 510, 470, 390, 560]} color="var(--gold)" />
+          </div>
+
+          <div className="widgets-grid-3">
+            <MiniChart title="DOCUMENTS PROCESSED" data={[12, 18, 9, 24, 31, 22, 28]} color="var(--gold)" />
+            <MiniChart title="VIOLATIONS DETECTED" data={[5, 8, 3, 12, 7, 9, 6]} color="var(--red)" />
+            <QuickActions accent="var(--gold)" actions={[
+              { icon: '📋', label: 'Scan Docs', onClick: () => goSub('doc-intel') },
+              { icon: '👥', label: 'Screen CVs', onClick: () => goSub('resume') },
+              { icon: '🚦', label: 'Traffic Scan', onClick: () => goSub('traffic') },
+              { icon: '📡', label: 'Run Anomaly', onClick: () => goSub('anomaly') },
+            ]} />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Citizen Dashboard
+  if (page === 'dashboard' && role === 'citizen') {
+    const citGateways = [
+      { title: 'RAG Chatbot', id: 'GATEWAY_01', icon: '🤖', desc: 'Ollama Llama-3.2 + FAISS Retrieval', page: 'chatbot', color: 'var(--gold)' },
+      { title: 'Fake News Detector', id: 'GATEWAY_02', icon: '📰', desc: 'BERT + Ensemble Classifier', page: 'fake-news', color: 'var(--red)' },
+      { title: 'Support Tickets', id: 'GATEWAY_03', icon: '🎫', desc: 'BERT + VADER + Auto-Route', page: 'tickets', color: 'var(--cyan)' },
+      { title: 'Expense Categorizer', id: 'GATEWAY_04', icon: '💰', desc: 'TF-IDF + Isolation Forest', page: 'expenses', color: 'var(--gold)' },
+    ];
+    const citLogLines = [
+      'CITADEL_CIV v3.7.1 :: User session active',
+      'Knowledge base sync: <span style="color:var(--green)">COMPLETE</span>',
+      'News verification DB: <span style="color:var(--green)">UPDATED</span>',
+      'Support AI classifier: <span style="color:var(--green)">READY</span>',
+      'Expense analytics engine: <span style="color:var(--green)">LOADED</span>',
+      'All citizen gateways: <span style="color:var(--green)">OPERATIONAL</span>',
+    ];
+    const citEvents = [
+      { action: 'Chatbot query answered (Aadhaar help)', time: '1 min ago', color: 'var(--gold)' },
+      { action: 'News article verified — REAL', time: '5 min ago', color: 'var(--green)' },
+      { action: 'Ticket #TKT-1024 auto-routed', time: '12 min ago', color: 'var(--cyan)' },
+      { action: 'Expense anomaly flagged — ₹8,500', time: '18 min ago', color: 'var(--red)' },
+      { action: 'KB article updated: Passport renewal', time: '30 min ago', color: 'var(--gold)' },
+      { action: 'Monthly expense report generated', time: '1 hr ago', color: 'var(--green)' },
+    ];
+    const citNodes = [
+      { label: 'CHAT', status: 'online', name: 'Chatbot Engine' },
+      { label: 'NLP', status: 'online', name: 'NLP Pipeline' },
+      { label: 'TKTS', status: 'online', name: 'Ticket System' },
+      { label: 'EXPNS', status: 'online', name: 'Expense Engine' },
+      { label: 'OLLAMA', status: 'busy', name: 'LLM Instance' },
+      { label: 'FAISS', status: 'online', name: 'Vector Store' },
+      { label: 'BERT', status: 'online', name: 'BERT Model' },
+      { label: 'KB', status: 'online', name: 'Knowledge Base' },
+    ];
+
+    return (
+      <div>
+        <CitadelBackground />
+        <NavBar role="citizen" user="SS" onLogout={goLanding} onOpenCmd={openCmd} />
+        <CommandPalette open={cmdOpen} onClose={() => setCmdOpen(false)} onJump={goSub} role="citizen" />
+        <div className="dashboard-content">
+          <div className="dashboard-header">
+            <div style={{ display: 'flex', alignItems: 'center' }}>
+              <h1>Citizen</h1>
+              <span className="portal-badge" style={{ background: 'var(--red)', color: '#fff' }}>SERVICE PORTAL</span>
+            </div>
+            <p>C.I.T.A.D.E.L. Citizen Access Layer • AI-Powered Government Services</p>
+          </div>
+
+          <div className="gateways-grid">
+            {citGateways.map((g, i) => (
+              <GatewayCard key={i} index={i} title={g.title} gatewayId={g.id} icon={g.icon} status="OPERATIONAL" description={g.desc} accentColor={g.color} onClick={() => goSub(g.page)} />
+            ))}
+          </div>
+
+          <div className="stats-grid">
+            <StatCard value={<AnimNum value={4} />} label="Active Services" accentColor="var(--red)" />
+            <StatCard value={<AnimNum value={10} />} label="KB Documents" accentColor="var(--gold)" />
+            <StatCard value={<><AnimNum value={92} />%</>} label="AI Accuracy" accentColor="var(--green)" />
+            <StatCard value="24/7" label="Availability" accentColor="var(--cyan)" />
+          </div>
+
+          <div className="section-divider">
+            <span>System Overview</span>
+            <span style={{ fontSize: 10, opacity: 0.4 }}>LIVE</span>
+          </div>
+
+          <div className="widgets-grid">
+            <CoreDynamics />
+            <SessionLog lines={citLogLines} />
+          </div>
+
+          <div className="section-divider">
+            <span>Activity & Services</span>
+          </div>
+
+          <div className="widgets-grid-3">
+            <ActivityTimeline events={citEvents} />
+            <NetworkTopology nodes={citNodes} />
+            <MiniChart title="QUERIES THIS WEEK" data={[23, 34, 19, 41, 37, 28, 45]} color="var(--red)" />
+          </div>
+
+          <div className="widgets-grid-3">
+            <MiniChart title="TICKETS RESOLVED" data={[4, 7, 3, 9, 6, 8, 5]} color="var(--cyan)" />
+            <MiniChart title="EXPENSE ENTRIES" data={[8, 12, 6, 15, 11, 9, 14]} color="var(--gold)" />
+            <QuickActions accent="var(--red)" actions={[
+              { icon: '🤖', label: 'Ask AI', onClick: () => goSub('chatbot') },
+              { icon: '📰', label: 'Verify News', onClick: () => goSub('fake-news') },
+              { icon: '🎫', label: 'New Ticket', onClick: () => goSub('tickets') },
+              { icon: '💰', label: 'Add Expense', onClick: () => goSub('expenses') },
+            ]} />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Sub-pages
+  const subPages = {
+    'doc-intel': <DocumentIntelligence onBack={goDash} />,
+    'resume': <ResumeScreening onBack={goDash} />,
+    'traffic': <TrafficViolations onBack={goDash} />,
+    'anomaly': <AnomalyMonitoring onBack={goDash} />,
+    'chatbot': <RAGChatbot onBack={goDash} />,
+    'fake-news': <FakeNewsDetector onBack={goDash} />,
+    'tickets': <SupportTickets onBack={goDash} />,
+    'expenses': <ExpenseCategorizer onBack={goDash} />,
+  };
+
+  if (subPages[page]) {
+    return (
+      <div>
+        <CitadelBackground />
+        <NavBar role={role} user={role === 'government' ? 'RSD' : 'SS'} onLogout={goLanding} onDashboard={goDash} onOpenCmd={openCmd} />
+        <CommandPalette open={cmdOpen} onClose={() => setCmdOpen(false)} onJump={goSub} role={role} />
+        {subPages[page]}
+      </div>
+    );
+  }
+
+  return null;
+};
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+  </script>
+</body>
+</html>

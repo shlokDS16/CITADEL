@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "citadel-frontend",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["serve_frontend.py", "8080"],
+      "port": 8080
+    },
+    {
+      "name": "citadel-backend",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000", "--app-dir", "backend"],
+      "port": 8000
+    }
+  ]
+}
