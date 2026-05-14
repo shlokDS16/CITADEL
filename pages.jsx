@@ -3147,6 +3147,7 @@ const TrafficViolations = ({ onBack }) => {
     { key: 'challans',  label: 'CHALLANS' },
     { key: 'offenders', label: 'REPEAT OFFENDERS' },
     { key: 'analytics', label: 'ANALYTICS' },
+    { key: 'settings',  label: 'SETTINGS' },
   ];
   return (
     <div className="subpage fade-in">
@@ -3172,6 +3173,7 @@ const TrafficViolations = ({ onBack }) => {
       {tab === 'challans'  && <TrafficChallans />}
       {tab === 'offenders' && <TrafficOffenders />}
       {tab === 'analytics' && <TrafficAnalytics />}
+      {tab === 'settings'  && <TrafficSettings />}
     </div>
   );
 };
@@ -4473,6 +4475,228 @@ const TrafficAnalytics = () => {
           <div className="widget-title">TOP HOTSPOT ZONES</div>
           <div style={{ padding: 40, textAlign: 'center', fontSize: 11, opacity: 0.4, fontFamily: 'var(--font-mono)' }}>
             Hotspot ranking by camera location (Phase 6).
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ====================================================================
+// Phase C — Settings tab
+// Live-tune the detection thresholds + manage Telegram webhook + show
+// recognised violation taxonomy.
+// ====================================================================
+const TRAFFIC_FIELD_LABELS = {
+  live_pipeline_enabled:      ['Live pipeline enabled',     'Master switch — toggle to pause/resume the auto-detection loop.'],
+  vision_provider:            ['Vision provider',           '"ollama" runs Gemma 4 locally (default). "groq" uses Llama-4-Scout cloud. "auto" tries local first then cloud.'],
+  groq_cooldown_secs:         ['Per-cam vision cooldown',   'Min seconds between Vision-API calls on the same camera. Higher = fewer dupes / lower cost.'],
+  incident_cooldown_secs:     ['Per (cam, type) cooldown',  'Min seconds before the same violation type can re-fire on the same cam.'],
+  label_ttl_secs:             ['Tile label TTL',            'How long a violation badge stays on a live tile after detection.'],
+  groq_budget_per_cycle:      ['Vision calls per cycle',    'Hard cap per 30 s detect cycle. Ollama: 2 is safe. Groq: 4 is safe.'],
+  stationary_lifetime_heavy:  ['Stationary frames (heavy)', 'Cycles a truck/bus must persist before triggering Vision (accident candidate).'],
+  stationary_lifetime_moto:   ['Stationary frames (moto)',  'Cycles a motorcycle must persist before triggering Vision (helmet check).'],
+  density_suspicious:         ['Density threshold',         'Vehicle count above which we treat the frame as a congestion / pile-up candidate.'],
+  clip_frames_after:          ['Clip frames after',         'How many cycles of "after" snapshots get stitched into the evidence slideshow.'],
+  clip_fps:                   ['Evidence clip FPS',         'Playback fps of the stitched slideshow mp4. 2 fps = 5 s of playback for 10 frames.'],
+  frame_buffer_size:          ['Frame buffer size',         'How many recent JPGs per cam we keep in memory for "before" context.'],
+  detect_cache_ttl_secs:      ['Detect cache TTL',          'How long YOLO + Groq results stay cached before the next compute cycle.'],
+  track_iou_threshold:        ['Track IoU threshold',       'Min IoU to consider two bboxes the same vehicle across snapshots (0..1).'],
+};
+
+const TrafficSettings = () => {
+  const [config, setConfig] = React.useState(null);
+  const [schema, setSchema] = React.useState({});
+  const [violationTypes, setViolationTypes] = React.useState({});
+  const [draft, setDraft] = React.useState({});
+  const [busy, setBusy] = React.useState(false);
+  const [toast, setToast] = React.useState('');
+  const [whStatus, setWhStatus] = React.useState(null);
+  const [whBusy, setWhBusy] = React.useState(false);
+
+  const load = React.useCallback(() => {
+    apiFetch('/api/traffic-violations/config', TRAFFIC_AUTH)
+      .then(d => {
+        setConfig(d.config || {});
+        setSchema(d.schema || {});
+        setViolationTypes(d.violation_types || {});
+        setDraft(d.config || {});
+      })
+      .catch(() => setToast('Failed to load config'));
+    apiFetch('/api/traffic-violations/telegram/webhook-status', TRAFFIC_AUTH)
+      .then(setWhStatus)
+      .catch(() => {});
+  }, []);
+  React.useEffect(load, [load]);
+
+  const flash = (msg) => { setToast(msg); setTimeout(() => setToast(''), 4500); };
+
+  const save = async () => {
+    if (!config) return;
+    const patch = {};
+    Object.keys(draft).forEach(k => {
+      if (draft[k] !== config[k]) patch[k] = draft[k];
+    });
+    if (Object.keys(patch).length === 0) { flash('No changes to save'); return; }
+    setBusy(true);
+    try {
+      const r = await apiFetch('/api/traffic-violations/config', {
+        ...TRAFFIC_AUTH, method: 'PUT', json: patch,
+      });
+      setConfig(r.config || {});
+      setDraft(r.config || {});
+      const appliedKeys = Object.keys(r.applied || {});
+      const rejectedKeys = Object.keys(r.rejected || {});
+      let msg = `Saved: ${appliedKeys.join(', ') || '(none)'}`;
+      if (rejectedKeys.length) msg += ` · Rejected: ${rejectedKeys.join(', ')}`;
+      flash(msg);
+    } catch (e) {
+      flash(`Save failed: ${e.message || e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const reset = () => setDraft({ ...config });
+
+  const setupWebhook = async () => {
+    setWhBusy(true);
+    try {
+      const r = await apiFetch('/api/traffic-violations/telegram/setup-webhook', { ...TRAFFIC_AUTH, json: {} });
+      flash(`Webhook live: ${r.public_url}`);
+      setWhStatus(await apiFetch('/api/traffic-violations/telegram/webhook-status', TRAFFIC_AUTH));
+    } catch (e) {
+      flash(`Setup failed: ${e.message || e}`);
+    } finally {
+      setWhBusy(false);
+    }
+  };
+  const teardownWebhook = async () => {
+    setWhBusy(true);
+    try {
+      await apiFetch('/api/traffic-violations/telegram/teardown-webhook', { ...TRAFFIC_AUTH, json: {} });
+      flash('Webhook torn down');
+      setWhStatus(await apiFetch('/api/traffic-violations/telegram/webhook-status', TRAFFIC_AUTH));
+    } catch (e) {
+      flash(`Teardown failed: ${e.message || e}`);
+    } finally {
+      setWhBusy(false);
+    }
+  };
+
+  if (!config) {
+    return <div className="tab-pane"><div style={{ padding: 30, opacity: 0.55, fontFamily: 'var(--font-mono)' }}>Loading config…</div></div>;
+  }
+
+  const dirty = Object.keys(draft).some(k => draft[k] !== config[k]);
+  const updateField = (k, raw) => {
+    const t = schema[k];
+    let v = raw;
+    if (t === 'bool') v = !!raw;
+    else if (t === 'int') v = raw === '' ? '' : parseInt(raw, 10);
+    else if (t === 'float') v = raw === '' ? '' : parseFloat(raw);
+    setDraft(d => ({ ...d, [k]: v }));
+  };
+
+  return (
+    <div className="tab-pane">
+      {toast && (
+        <div style={{
+          position: 'fixed', top: 80, right: 20, zIndex: 9999,
+          background: 'var(--cyan)', color: '#000', padding: '10px 16px',
+          fontFamily: 'var(--font-mono)', fontSize: 12, letterSpacing: 1,
+          border: '2px solid #000', boxShadow: '4px 4px 0 #000',
+        }}>{toast}</div>
+      )}
+
+      <div className="widgets-grid">
+        <div className="widget-card">
+          <div className="widget-title">DETECTION PIPELINE THRESHOLDS</div>
+          <div style={{ padding: 14, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+            {Object.keys(schema).map(k => {
+              const [label, hint] = TRAFFIC_FIELD_LABELS[k] || [k, ''];
+              const t = schema[k];
+              const v = draft[k] ?? config[k];
+              const changed = draft[k] !== config[k];
+              const baseStyle = {
+                width: '100%', padding: '6px 10px', fontFamily: 'var(--font-mono)', fontSize: 12,
+                border: changed ? '2px solid var(--gold)' : '2px solid #000', background: '#fff', color: '#000',
+              };
+              return (
+                <div key={k} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <label style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1, fontFamily: 'var(--font-mono)' }}>
+                    {label.toUpperCase()}
+                    {changed && <span style={{ color: 'var(--gold)', marginLeft: 8 }}>● modified</span>}
+                  </label>
+                  {t === 'bool' ? (
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: 'var(--font-mono)', fontSize: 12, padding: 6, border: changed ? '2px solid var(--gold)' : '2px solid #000', background: '#fff', color: '#000' }}>
+                      <input type="checkbox" checked={!!v} onChange={e => updateField(k, e.target.checked)} />
+                      {v ? 'ENABLED' : 'DISABLED'}
+                    </label>
+                  ) : t === 'str' && k === 'vision_provider' ? (
+                    <select value={v ?? ''} onChange={e => updateField(k, e.target.value)} style={baseStyle}>
+                      <option value="ollama">ollama (Gemma 4 local)</option>
+                      <option value="groq">groq (Llama-4-Scout cloud)</option>
+                      <option value="auto">auto (Ollama then Groq)</option>
+                    </select>
+                  ) : (
+                    <input
+                      type={t === 'int' || t === 'float' ? 'number' : 'text'}
+                      step={t === 'float' ? '0.01' : '1'}
+                      value={v ?? ''}
+                      onChange={e => updateField(k, e.target.value)}
+                      style={baseStyle}
+                    />
+                  )}
+                  {hint && <div style={{ fontSize: 10, opacity: 0.55, fontFamily: 'var(--font-mono)', lineHeight: 1.45 }}>{hint}</div>}
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ display: 'flex', gap: 8, padding: '12px 14px', borderTop: '2px solid #000' }}>
+            <button className="btn-brutal" disabled={!dirty || busy} onClick={save}
+              style={{ background: dirty ? 'var(--cyan)' : '#ddd', color: '#000', fontSize: 12 }}>
+              {busy ? 'SAVING…' : 'SAVE CHANGES'}
+            </button>
+            <button className="btn-brutal" disabled={!dirty || busy} onClick={reset} style={{ fontSize: 12 }}>RESET</button>
+            <div style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 10, opacity: 0.55, alignSelf: 'center' }}>
+              Edits apply live to the running pipeline. Server restart resets to env defaults.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="widgets-grid mt-20">
+        <div className="widget-card">
+          <div className="widget-title">TELEGRAM WEBHOOK (ngrok)</div>
+          <div style={{ padding: 14, fontFamily: 'var(--font-mono)', fontSize: 11, lineHeight: 1.7 }}>
+            <div><strong>Tunnel:</strong> {whStatus?.tunnel_open ? '◉ OPEN' : '○ CLOSED'}</div>
+            <div><strong>Public URL:</strong> {whStatus?.public_url || '—'}</div>
+            <div><strong>Registered:</strong> {whStatus?.registered_webhook || '—'}</div>
+            <div><strong>Telegram pending updates:</strong> {whStatus?.telegram_getWebhookInfo?.result?.pending_update_count ?? '—'}</div>
+            <div><strong>Telegram url-on-record:</strong> {whStatus?.telegram_getWebhookInfo?.result?.url || '—'}</div>
+          </div>
+          <div style={{ display: 'flex', gap: 8, padding: '12px 14px', borderTop: '2px solid #000' }}>
+            <button className="btn-brutal" disabled={whBusy} onClick={setupWebhook} style={{ background: 'var(--green)', color: '#000', fontSize: 12 }}>
+              {whBusy ? '…' : (whStatus?.tunnel_open ? 'REFRESH TUNNEL' : 'START TUNNEL + REGISTER')}
+            </button>
+            <button className="btn-brutal" disabled={whBusy || !whStatus?.tunnel_open} onClick={teardownWebhook} style={{ fontSize: 12 }}>TEARDOWN</button>
+            <button className="btn-brutal" onClick={() => apiFetch('/api/traffic-violations/telegram/webhook-status', TRAFFIC_AUTH).then(setWhStatus)} style={{ fontSize: 12, marginLeft: 'auto' }}>REFRESH STATUS</button>
+          </div>
+        </div>
+
+        <div className="widget-card">
+          <div className="widget-title">RECOGNISED VIOLATION TYPES</div>
+          <div style={{ padding: 14, fontFamily: 'var(--font-mono)', fontSize: 11, lineHeight: 1.9 }}>
+            {Object.entries(violationTypes).map(([k, v]) => (
+              <div key={k} style={{ display: 'grid', gridTemplateColumns: '160px 1fr', gap: 12, padding: '2px 0' }}>
+                <span style={{ opacity: 0.55 }}>{k}</span>
+                <strong>{v}</strong>
+              </div>
+            ))}
+            <div style={{ marginTop: 12, fontSize: 10, opacity: 0.55 }}>
+              Vision returns one of these as <code>violation_type</code>. Anything else is dropped before insert.
+            </div>
           </div>
         </div>
       </div>

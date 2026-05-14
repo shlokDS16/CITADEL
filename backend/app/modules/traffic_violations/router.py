@@ -506,3 +506,29 @@ async def telegram_webhook_status():
     except Exception as e:
         log.exception("telegram webhook-status failed")
         raise HTTPException(status_code=500, detail=f"Status failed: {e}")
+
+
+# ============================================================
+# Phase C — Runtime-mutable violation config
+# Officers can read + edit live thresholds via the Settings UI.
+# ============================================================
+@router.get("/traffic-violations/config", tags=["traffic-violations"])
+async def get_violation_config():
+    try:
+        return {
+            "config": service.get_live_config(),
+            "schema": {k: v.__name__ for k, v in service.TV_LIVE_CONFIG_SCHEMA.items()},
+            "violation_types": service.VIOLATION_LABEL,
+        }
+    except Exception as e:
+        log.exception("get_violation_config failed")
+        raise HTTPException(status_code=500, detail=f"Config read failed: {e}")
+
+
+@router.put("/traffic-violations/config", tags=["traffic-violations"])
+async def update_violation_config(patch: dict):
+    try:
+        return service.update_live_config(patch)
+    except Exception as e:
+        log.exception("update_violation_config failed")
+        raise HTTPException(status_code=500, detail=f"Config update failed: {e}")

@@ -58,7 +58,7 @@ _VIOLATION_LABEL = {
 }
 
 
-# COCO class ids that interest us (yolov8n.pt is COCO-pretrained)
+# COCO class ids that interest us (YOLOv11n is COCO-pretrained, same as v8n)
 _COCO_CAR = 2
 _COCO_MOTORCYCLE = 3
 _COCO_BUS = 5
@@ -76,7 +76,8 @@ def _get_yolo():
     global _yolo
     if _yolo is None:
         from ultralytics import YOLO
-        weights = os.getenv("YOLO_WEIGHTS", "yolov8n.pt")
+        # Phase B.2 — YOLOv11n default. Auto-downloaded by ultralytics on first run.
+        weights = os.getenv("YOLO_WEIGHTS", "yolo11n.pt")
         log.info("Loading YOLO weights: %s", weights)
         _yolo = YOLO(weights)
     return _yolo

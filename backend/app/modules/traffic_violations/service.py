@@ -726,7 +726,9 @@ def _get_yolo_snap():
     global _YOLO_SNAP
     if _YOLO_SNAP is None:
         from ultralytics import YOLO
-        weights = os.getenv("YOLO_WEIGHTS_SNAP", "yolov8s.pt")
+        # Phase B.2 — YOLOv11s default (Sep 2024 release). 5-10% mAP gain over
+        # v8s at near-identical latency. Drop-in: ultralytics auto-downloads.
+        weights = os.getenv("YOLO_WEIGHTS_SNAP", "yolo11s.pt")
         log.info("Loading snapshot YOLO weights: %s", weights)
         _YOLO_SNAP = YOLO(weights)
     return _YOLO_SNAP
@@ -801,7 +803,11 @@ def _assign_track_ids(cam_id: str, new_boxes: list[dict[str, Any]]) -> list[dict
     used = set()
     for nb in new_boxes:
         best_idx = -1
-        best_iou = _TRACK_IOU_THRESHOLD
+        # Read live so officers can re-tune via Settings UI without restart.
+        try:
+            best_iou = float(TV_LIVE_CONFIG.get("track_iou_threshold", _TRACK_IOU_THRESHOLD))
+        except (TypeError, ValueError):
+            best_iou = _TRACK_IOU_THRESHOLD
         for i, pb in enumerate(prev):
             if i in used or pb["cls"] != nb["cls"]:
                 continue
@@ -953,32 +959,101 @@ _LIVE_GROQ_COOLDOWN: dict[str, float] = {}
 # cam_id -> [{type, severity, label, at}]  — rolling list shown on UI tile chips
 _LIVE_LABELS_RECENT: dict[str, list[dict[str, Any]]] = {}
 
-# Cooldown windows (seconds) — tune via env in Phase C
-_LIVE_GROQ_COOLDOWN_SECS = int(os.getenv("TV_LIVE_GROQ_COOLDOWN", "180"))
-_LIVE_INCIDENT_COOLDOWN_SECS = int(os.getenv("TV_LIVE_INCIDENT_COOLDOWN", "300"))
-_LIVE_LABEL_TTL_SECS = int(os.getenv("TV_LIVE_LABEL_TTL", "120"))
-# Hard cap on vision calls per detect_snapshots cycle.
-# - Groq:   1 call ≈ 1 s. 4 calls leaves headroom in a 30 s cycle.
-# - Gemma:  1 call ≈ 6-30 s on CPU. 2 calls keeps cycles from slipping badly.
-# Use TV_LIVE_GROQ_BUDGET to override.
+# ---------- Phase C — Runtime-mutable config ----------
+# All tunables live here. Officers can change them live via Settings UI
+# (PUT /api/traffic-violations/config). Env vars seed the initial defaults
+# so docker / prod can still bake in their preferred values.
 _DEFAULT_BUDGET = 2 if os.getenv("TV_VISION_PROVIDER", "ollama").lower() != "groq" else 4
-_LIVE_GROQ_PER_CYCLE_BUDGET = int(os.getenv("TV_LIVE_GROQ_BUDGET", str(_DEFAULT_BUDGET)))
+
+TV_LIVE_CONFIG: dict[str, Any] = {
+    "live_pipeline_enabled":   os.getenv("TV_LIVE_PIPELINE", "1") not in ("0", "false", "False"),
+    "vision_provider":         os.getenv("TV_VISION_PROVIDER", "ollama"),
+    "groq_cooldown_secs":      int(os.getenv("TV_LIVE_GROQ_COOLDOWN", "180")),
+    "incident_cooldown_secs":  int(os.getenv("TV_LIVE_INCIDENT_COOLDOWN", "300")),
+    "label_ttl_secs":          int(os.getenv("TV_LIVE_LABEL_TTL", "120")),
+    "groq_budget_per_cycle":   int(os.getenv("TV_LIVE_GROQ_BUDGET", str(_DEFAULT_BUDGET))),
+    "stationary_lifetime_heavy": 3,   # truck/bus persistence
+    "stationary_lifetime_moto":  2,   # motorcycle persistence (helmet candidate)
+    "density_suspicious":      14,    # vehicle count above which we flag congestion
+    "clip_frames_after":       int(os.getenv("TV_LIVE_CLIP_FRAMES_AFTER", "5")),
+    "clip_fps":                int(os.getenv("TV_LIVE_CLIP_FPS", "2")),
+    "frame_buffer_size":       5,
+    "detect_cache_ttl_secs":   30,
+    "track_iou_threshold":     0.25,
+}
+
+# Allowed keys + their value types (used for PUT validation)
+TV_LIVE_CONFIG_SCHEMA: dict[str, type] = {
+    "live_pipeline_enabled":    bool,
+    "vision_provider":          str,
+    "groq_cooldown_secs":       int,
+    "incident_cooldown_secs":   int,
+    "label_ttl_secs":           int,
+    "groq_budget_per_cycle":    int,
+    "stationary_lifetime_heavy": int,
+    "stationary_lifetime_moto":  int,
+    "density_suspicious":       int,
+    "clip_frames_after":        int,
+    "clip_fps":                 int,
+    "frame_buffer_size":        int,
+    "detect_cache_ttl_secs":    int,
+    "track_iou_threshold":      float,
+}
+
 # Global backoff window in seconds when Groq returns 429 (set dynamically)
 _GROQ_BACKOFF_UNTIL: float = 0.0
-
-# How many frames a track must persist to count as "stationary" suspicious.
-# Higher = stricter (fewer false-positive Groq calls on busy urban cams).
-_STATIONARY_LIFETIME_HEAVY = 3   # truck/bus
-_STATIONARY_LIFETIME_MOTO  = 2   # motorcycle (catches "stopped at light without helmet")
-# Total vehicles in one frame above which we suspect congestion
-_DENSITY_SUSPICIOUS = 14
 # Reset per-cycle counter (mutated by detect_snapshots)
 _GROQ_CYCLE_COUNTER: dict[str, int] = {"calls": 0}
 
 
+def get_live_config() -> dict[str, Any]:
+    return dict(TV_LIVE_CONFIG)
+
+
+def update_live_config(patch: dict[str, Any]) -> dict[str, Any]:
+    """Validate + apply a patch to the live config. Returns the new full dict."""
+    if not isinstance(patch, dict):
+        raise ValueError("patch must be an object")
+    rejected: dict[str, str] = {}
+    applied: dict[str, Any] = {}
+    for k, v in patch.items():
+        if k not in TV_LIVE_CONFIG_SCHEMA:
+            rejected[k] = "unknown key"
+            continue
+        want = TV_LIVE_CONFIG_SCHEMA[k]
+        # bool is a subclass of int — special-case before the int path.
+        try:
+            if want is bool:
+                if isinstance(v, bool):
+                    coerced = v
+                elif isinstance(v, (int, float)):
+                    coerced = bool(v)
+                elif isinstance(v, str):
+                    coerced = v.strip().lower() in ("1", "true", "yes", "on")
+                else:
+                    raise ValueError("bool expected")
+            elif want is int:
+                coerced = int(v)
+            elif want is float:
+                coerced = float(v)
+            elif want is str:
+                coerced = str(v).strip()
+                if k == "vision_provider" and coerced not in ("ollama", "groq", "auto"):
+                    rejected[k] = f"invalid vision_provider: {coerced!r}"
+                    continue
+            else:
+                rejected[k] = f"unsupported type {want.__name__}"
+                continue
+            TV_LIVE_CONFIG[k] = coerced
+            applied[k] = coerced
+        except Exception as e:
+            rejected[k] = f"coercion failed: {e}"
+    return {"config": dict(TV_LIVE_CONFIG), "applied": applied, "rejected": rejected}
+
+
 def _live_pipeline_enabled() -> bool:
-    """Master kill-switch — set TV_LIVE_PIPELINE=0 to disable in case of quota burn."""
-    return os.getenv("TV_LIVE_PIPELINE", "1") not in ("0", "false", "False")
+    """Master kill-switch — toggle live config.live_pipeline_enabled."""
+    return bool(TV_LIVE_CONFIG.get("live_pipeline_enabled", True))
 
 
 def _should_classify_with_groq(cam_id: str, boxes: list[dict[str, Any]]) -> tuple[bool, str]:
@@ -990,19 +1065,20 @@ def _should_classify_with_groq(cam_id: str, boxes: list[dict[str, Any]]) -> tupl
     Groq call when something *unusual* persists across cycles or violates an
     obvious rule (pedestrian on road, stalled heavy vehicle, sudden crowd).
     """
+    cfg = TV_LIVE_CONFIG
     now = _time.time()
 
     # Global 429 backoff — pause everyone for ~60 s after a rate-limit hit.
     if now < _GROQ_BACKOFF_UNTIL:
         return False, f"backoff_{int(_GROQ_BACKOFF_UNTIL - now)}s"
 
-    # Per-cycle budget — at most N Groq calls per detect_snapshots cycle.
-    if _GROQ_CYCLE_COUNTER["calls"] >= _LIVE_GROQ_PER_CYCLE_BUDGET:
+    # Per-cycle budget — at most N vision calls per detect_snapshots cycle.
+    if _GROQ_CYCLE_COUNTER["calls"] >= cfg["groq_budget_per_cycle"]:
         return False, "cycle_budget"
 
-    # Per-cam cooldown — same cam can't burn Groq more than once per window.
+    # Per-cam cooldown — same cam can't burn vision more than once per window.
     last = _LIVE_GROQ_COOLDOWN.get(cam_id, 0)
-    if now - last < _LIVE_GROQ_COOLDOWN_SECS:
+    if now - last < cfg["groq_cooldown_secs"]:
         return False, "cam_cooldown"
     if not boxes:
         return False, "no_boxes"
@@ -1012,7 +1088,7 @@ def _should_classify_with_groq(cam_id: str, boxes: list[dict[str, Any]]) -> tupl
     stationary_motorcycles = [
         b for b in boxes
         if b["cls"] == "motorcycle"
-        and (b.get("lifetime") or 0) >= _STATIONARY_LIFETIME_MOTO
+        and (b.get("lifetime") or 0) >= cfg["stationary_lifetime_moto"]
         and b.get("conf", 0) >= 0.50
     ]
     if stationary_motorcycles:
@@ -1034,14 +1110,14 @@ def _should_classify_with_groq(cam_id: str, boxes: list[dict[str, Any]]) -> tupl
     stationary_heavy = [
         b for b in boxes
         if b["cls"] in ("truck", "bus")
-        and (b.get("lifetime") or 0) >= _STATIONARY_LIFETIME_HEAVY
+        and (b.get("lifetime") or 0) >= cfg["stationary_lifetime_heavy"]
         and b.get("y", 0) > 0.20 and b.get("y", 0) < 0.85
     ]
     if stationary_heavy:
         return True, f"stationary_heavy({len(stationary_heavy)})"
 
     # Sudden very high density — possible congestion / pile-up
-    if len(boxes) >= _DENSITY_SUSPICIOUS:
+    if len(boxes) >= cfg["density_suspicious"]:
         return True, f"density({len(boxes)})"
 
     return False, "below_threshold"
@@ -1064,26 +1140,25 @@ def _save_live_evidence_jpg(jpg_bytes: bytes, inc_id: str) -> Optional[str]:
 # into .tv_clips/{inc_id}.mp4 at 2 fps (≈10 s of "before + after" context
 # compressed from real time so officers see what led up to the violation).
 _CAM_FRAME_BUFFER: dict[str, list[bytes]] = {}
-_CAM_FRAME_BUFFER_SIZE = 5
 _PENDING_CLIP_CAPTURES: dict[str, dict[str, Any]] = {}
-_CLIP_FRAMES_AFTER = 5     # how many additional cycles to capture
-_CLIP_FPS = 2              # output fps in the stitched mp4
 
 
 def _push_cam_frame(cam_id: str, jpg_bytes: bytes) -> None:
     buf = _CAM_FRAME_BUFFER.setdefault(cam_id, [])
     buf.append(jpg_bytes)
-    if len(buf) > _CAM_FRAME_BUFFER_SIZE:
+    cap = TV_LIVE_CONFIG.get("frame_buffer_size", 5)
+    while len(buf) > cap:
         buf.pop(0)
 
 
 def _queue_clip_capture(inc_id: str, cam_id: str) -> None:
     """Capture starts NOW — seed with whatever's in the rolling buffer."""
+    cap = TV_LIVE_CONFIG.get("frame_buffer_size", 5)
     pre = list(_CAM_FRAME_BUFFER.get(cam_id, []))
     _PENDING_CLIP_CAPTURES[inc_id] = {
         "cam_id": cam_id,
-        "frames": pre[-_CAM_FRAME_BUFFER_SIZE:],
-        "remaining": _CLIP_FRAMES_AFTER,
+        "frames": pre[-cap:],
+        "remaining": TV_LIVE_CONFIG.get("clip_frames_after", 5),
         "started_at": _time.time(),
     }
 
@@ -1132,7 +1207,8 @@ def _finalise_live_clip(inc_id: str, frame_jpgs: list[bytes]) -> Optional[str]:
             return None
         out_path = CLIPS_DIR / f"{inc_id}.mp4"
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(str(out_path), fourcc, _CLIP_FPS, (w, h))
+        fps = TV_LIVE_CONFIG.get("clip_fps", 2)
+        writer = cv2.VideoWriter(str(out_path), fourcc, fps, (w, h))
         if not writer.isOpened():
             log.warning("VideoWriter failed to open for %s", inc_id)
             return None
@@ -1144,7 +1220,7 @@ def _finalise_live_clip(inc_id: str, frame_jpgs: list[bytes]) -> Optional[str]:
             sb = get_supabase()
             sb.table("tv_incidents").update({
                 "video_clip_path": str(out_path),
-                "duration_seconds": len(frames) / max(1, _CLIP_FPS),
+                "duration_seconds": len(frames) / max(1, fps),
             }).eq("inc_id", inc_id).execute()
         except Exception as e:
             log.debug("update tv_incidents.video_clip_path failed for %s: %s", inc_id, e)
@@ -1221,7 +1297,7 @@ def _merge_violation_labels(rolling: dict[str, list[dict[str, Any]]],
     out: dict[str, list[dict[str, Any]]] = {}
     # Prune stale entries from rolling first
     for cam, items in (rolling or {}).items():
-        kept = [it for it in items if (now - (it.get("ts") or 0)) < _LIVE_LABEL_TTL_SECS]
+        kept = [it for it in items if (now - (it.get("ts") or 0)) < TV_LIVE_CONFIG.get("label_ttl_secs", 120)]
         if kept:
             out[cam] = kept
     # Merge fresh entries on top
@@ -1296,7 +1372,7 @@ def _maybe_create_live_incidents_for_cam(
         # Cooldown per (cam_id, violation_type) — don't spam dupes
         ck = (cam_id, vtype)
         last_at = _LIVE_VIOLATION_COOLDOWN.get(ck, 0)
-        if _time.time() - last_at < _LIVE_INCIDENT_COOLDOWN_SECS:
+        if _time.time() - last_at < TV_LIVE_CONFIG["incident_cooldown_secs"]:
             violation_labels.append({
                 "type": vtype, "severity": severity,
                 "label": VIOLATION_LABEL.get(vtype, vtype.upper()),
