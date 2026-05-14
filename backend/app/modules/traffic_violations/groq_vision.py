@@ -1,15 +1,22 @@
 """
-Groq Vision pass for traffic-violation classification.
+Vision pass for traffic-violation classification.
 
 Pretrained YOLO localizes vehicles/persons but can't recognize semantic events
-(accidents, lane violations, red-light running). Groq's Llama-4-Scout (17B
-multimodal) understands the scene and labels violations from JPEG frames.
+(accidents, lane violations, red-light running). A multimodal LLM understands
+the scene and labels violations from JPEG frames.
 
-Per uploaded video: sample 4-8 evenly-spaced keyframes → ship each to
-Llama-4-Scout with a structured JSON prompt → merge results with the YOLO+tracker
-detections in `pipeline.detect_in_video()`.
+Provider selection (TV_VISION_PROVIDER env):
+  - "ollama"  → local Gemma 4 (default) — zero quota, ~5-10 s/frame on CPU
+  - "groq"    → Groq Llama-4-Scout — ~1 s/frame, has rate limits
+  - "auto"    → try Ollama first, fall back to Groq if Ollama unavailable
 
-Latency: ~1 s per frame on Groq. 6 keyframes ≈ 6 s extra per upload.
+Latency comparison (per frame):
+  Gemma 4 (8B, Q4) on CPU:  ~6-10 s
+  Gemma 4 (8B, Q4) on GPU:  ~1-2 s
+  Groq Llama-4-Scout:       ~1 s   (subject to quota)
+
+Module name kept as `groq_vision.py` for backwards-compat with the upload
+pipeline imports — but the primary classifier is now local Gemma 4.
 """
 from __future__ import annotations
 
@@ -27,6 +34,13 @@ log = logging.getLogger("citadel.traffic_violations.groq_vision")
 
 VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
 GROQ_CHAT_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
+
+# Phase B.1 — Gemma 4 (Ollama) is the new default. Released April 2026, natively
+# multimodal, no quota, runs entirely on the local host (Ollama service on :11434).
+OLLAMA_MODEL = os.getenv("OLLAMA_VISION_MODEL", "gemma4:latest")
+OLLAMA_HOST = os.getenv("LLM_BASE_URL", "http://localhost:11434")
+# Provider order: "ollama" (default, fastest path on local hardware), "groq", or "auto"
+VISION_PROVIDER = os.getenv("TV_VISION_PROVIDER", "ollama").strip().lower()
 
 _SYSTEM_PROMPT = (
     "You are a traffic enforcement vision assistant analyzing a road camera frame. "
@@ -72,22 +86,24 @@ def _is_quota_or_auth_error(exc: Exception) -> bool:
     return False
 
 
-def _classify_with_ollama(jpeg_bytes: bytes) -> dict[str, Any]:
+def _classify_with_ollama(jpeg_bytes: bytes, timeout: float = 90.0) -> dict[str, Any]:
     """
-    Local-LLM fallback via Ollama LLaVa-style multimodal models.
-    Slower (~5-10s per frame on CPU) but free + offline.
-    Requires `ollama pull llava` (or llama3.2-vision) on the host.
+    Local multimodal classification via Ollama. Default model is Gemma 4
+    (gemma4:latest, 8B, multimodal). Latency varies with hardware: ~6-10 s/frame
+    on CPU, ~1-2 s on a GPU host. Zero quota, runs offline.
+
+    Requires the Ollama service running on `LLM_BASE_URL` and the model pulled
+    (e.g. `ollama pull gemma4:latest`).
     """
     try:
         import ollama  # lazy import
     except Exception:
-        return {"violations": [], "scene": "(ollama not installed)"}
+        return {"violations": [], "scene": "(ollama python client not installed)"}
 
-    model = os.getenv("OLLAMA_VISION_MODEL", "llava")
     try:
-        client = ollama.Client(host=os.getenv("LLM_BASE_URL", "http://localhost:11434"))
+        client = ollama.Client(host=OLLAMA_HOST, timeout=timeout)
         resp = client.chat(
-            model=model,
+            model=OLLAMA_MODEL,
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": _USER_PROMPT, "images": [jpeg_bytes]},
@@ -102,19 +118,14 @@ def _classify_with_ollama(jpeg_bytes: bytes) -> dict[str, Any]:
             log.warning("Ollama vision returned non-JSON: %s", content[:200])
             return {"violations": [], "scene": "(ollama unparseable)"}
     except Exception as e:
-        log.warning("Ollama vision fallback failed: %s", e)
+        log.warning("Ollama vision call failed: %s", e)
         return {"violations": [], "scene": f"(ollama error: {e})"}
 
 
-def classify_frame(jpeg_bytes: bytes, timeout: float = 30.0) -> dict[str, Any]:
-    """
-    Send one frame to Groq Vision. Returns parsed dict matching the JSON schema.
-    On quota/auth errors → fall back to local Ollama LLaVa.
-    On any other error → return empty payload (never raises).
-    """
+def _classify_with_groq(jpeg_bytes: bytes, timeout: float = 30.0) -> dict[str, Any]:
+    """Send one frame to Groq Vision (Llama-4-Scout). Returns parsed JSON dict."""
     if not settings.GROQ_API_KEY:
-        # No Groq key at all → try Ollama directly
-        return _classify_with_ollama(jpeg_bytes)
+        return {"violations": [], "scene": "(no groq api key)"}
 
     payload = {
         "model": VISION_MODEL,
@@ -150,16 +161,39 @@ def classify_frame(jpeg_bytes: bytes, timeout: float = 30.0) -> dict[str, Any]:
             return json.loads(content)
         except json.JSONDecodeError:
             log.warning("Groq Vision returned non-JSON: %s", (content or "")[:200])
-            return {"violations": [], "scene": "(unparseable response)"}
+            return {"violations": [], "scene": "(groq unparseable)"}
     except httpx.HTTPStatusError as e:
         if _is_quota_or_auth_error(e):
-            log.warning("Groq Vision quota/auth error (HTTP %s) → falling back to Ollama", e.response.status_code)
-            return _classify_with_ollama(jpeg_bytes)
+            log.warning("Groq Vision quota/auth error (HTTP %s)", e.response.status_code)
+            return {"violations": [], "scene": f"(http error: {e.response.status_code})"}
         log.warning("Groq Vision call failed: HTTP %s — %s", e.response.status_code, (e.response.text or "")[:200])
         return {"violations": [], "scene": f"(http error: {e.response.status_code})"}
     except Exception as e:
         log.warning("Groq Vision call failed: %s", e)
         return {"violations": [], "scene": f"(error: {e})"}
+
+
+def classify_frame(jpeg_bytes: bytes, timeout: float = 90.0) -> dict[str, Any]:
+    """
+    Classify one frame. Provider order is driven by TV_VISION_PROVIDER env:
+      - "ollama" (default): Gemma 4 only. If Gemma fails, returns empty payload.
+      - "groq":             Groq only. If Groq fails (e.g. 429), returns empty.
+      - "auto":             try Gemma 4 first; on local error fall back to Groq.
+
+    Returns a dict matching the JSON schema in _USER_PROMPT. Never raises.
+    """
+    provider = VISION_PROVIDER
+    if provider == "groq":
+        return _classify_with_groq(jpeg_bytes, timeout=30.0)
+    if provider == "auto":
+        local = _classify_with_ollama(jpeg_bytes, timeout=timeout)
+        scene = (local or {}).get("scene") or ""
+        if "(ollama" in scene or "error:" in scene:
+            log.info("Vision: Ollama unavailable, falling back to Groq")
+            return _classify_with_groq(jpeg_bytes, timeout=30.0)
+        return local
+    # default — "ollama"
+    return _classify_with_ollama(jpeg_bytes, timeout=timeout)
 
 
 def classify_keyframes(

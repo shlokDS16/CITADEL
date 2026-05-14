@@ -475,3 +475,34 @@ async def telegram_webhook(update: dict):
         log.exception("telegram_webhook failed")
         # always 200 to Telegram so it doesn't retry forever
         return {"ok": False, "error": str(e)}
+
+
+# Phase D — Auto-setup the public webhook via ngrok.
+@router.post("/traffic-violations/telegram/setup-webhook", tags=["traffic-violations"])
+async def telegram_setup_webhook():
+    try:
+        from app.modules.traffic_violations import telegram_setup
+        return telegram_setup.setup_webhook(local_port=8000)
+    except Exception as e:
+        log.exception("telegram setup-webhook failed")
+        raise HTTPException(status_code=500, detail=f"Setup failed: {e}")
+
+
+@router.post("/traffic-violations/telegram/teardown-webhook", tags=["traffic-violations"])
+async def telegram_teardown_webhook():
+    try:
+        from app.modules.traffic_violations import telegram_setup
+        return telegram_setup.teardown_webhook()
+    except Exception as e:
+        log.exception("telegram teardown-webhook failed")
+        raise HTTPException(status_code=500, detail=f"Teardown failed: {e}")
+
+
+@router.get("/traffic-violations/telegram/webhook-status", tags=["traffic-violations"])
+async def telegram_webhook_status():
+    try:
+        from app.modules.traffic_violations import telegram_setup
+        return telegram_setup.webhook_status()
+    except Exception as e:
+        log.exception("telegram webhook-status failed")
+        raise HTTPException(status_code=500, detail=f"Status failed: {e}")

@@ -957,9 +957,12 @@ _LIVE_LABELS_RECENT: dict[str, list[dict[str, Any]]] = {}
 _LIVE_GROQ_COOLDOWN_SECS = int(os.getenv("TV_LIVE_GROQ_COOLDOWN", "180"))
 _LIVE_INCIDENT_COOLDOWN_SECS = int(os.getenv("TV_LIVE_INCIDENT_COOLDOWN", "300"))
 _LIVE_LABEL_TTL_SECS = int(os.getenv("TV_LIVE_LABEL_TTL", "120"))
-# Hard cap on Groq Vision calls per detect_snapshots cycle (30 s).
-# Free tier allows ~30 calls/min — we stay well under by capping at 4/cycle.
-_LIVE_GROQ_PER_CYCLE_BUDGET = int(os.getenv("TV_LIVE_GROQ_BUDGET", "4"))
+# Hard cap on vision calls per detect_snapshots cycle.
+# - Groq:   1 call ≈ 1 s. 4 calls leaves headroom in a 30 s cycle.
+# - Gemma:  1 call ≈ 6-30 s on CPU. 2 calls keeps cycles from slipping badly.
+# Use TV_LIVE_GROQ_BUDGET to override.
+_DEFAULT_BUDGET = 2 if os.getenv("TV_VISION_PROVIDER", "ollama").lower() != "groq" else 4
+_LIVE_GROQ_PER_CYCLE_BUDGET = int(os.getenv("TV_LIVE_GROQ_BUDGET", str(_DEFAULT_BUDGET)))
 # Global backoff window in seconds when Groq returns 429 (set dynamically)
 _GROQ_BACKOFF_UNTIL: float = 0.0
 
@@ -1265,11 +1268,15 @@ def _maybe_create_live_incidents_for_cam(
         log.warning("groq_vision.classify_frame failed for %s: %s", cam_id, e)
         return None
 
-    # Detect 429 / fallback signatures so we globally pause Groq for a minute.
+    # Provider-specific error detection. Groq quota errors trigger a global
+    # backoff. Local Ollama errors are per-frame transient — don't back off.
     scene_marker = (result or {}).get("scene") or ""
-    if "(http error: 429" in scene_marker or "(ollama" in scene_marker or "(error:" in scene_marker:
+    if "(http error: 429" in scene_marker or "(http error: 4" in scene_marker:
         _GROQ_BACKOFF_UNTIL = _time.time() + 60
-        log.warning("Groq 429/fallback for %s — backing off all live Groq calls for 60s", cam_id)
+        log.warning("Vision (Groq) 429/auth for %s — backing off cloud calls for 60s", cam_id)
+        return None
+    if "(ollama" in scene_marker or "(error:" in scene_marker:
+        log.info("Vision (Ollama) transient error for %s: %s", cam_id, scene_marker)
         return None
 
     violations = (result or {}).get("violations") or []
