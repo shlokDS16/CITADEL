@@ -3206,7 +3206,7 @@ function tvLoadTracks(loop_id, tracks_url) {
   return p;
 }
 
-const CameraTile = ({ cam, index, snapshot, detections }) => {
+const CameraTile = ({ cam, index, snapshot, detections, violationLabels = [] }) => {
   const videoRef = React.useRef(null);
   const hlsRef = React.useRef(null);
   const [playing, setPlaying] = React.useState(false);
@@ -3435,6 +3435,37 @@ const CameraTile = ({ cam, index, snapshot, detections }) => {
             DETECTED · {boxes.length} ◉
           </div>
         )}
+        {/* Phase A.2 — Violation-label ribbon stacked top-center */}
+        {violationLabels.length > 0 && (
+          <div style={{
+            position: 'absolute', top: 36, left: '50%', transform: 'translateX(-50%)',
+            display: 'flex', flexDirection: 'column', gap: 3, alignItems: 'center',
+            pointerEvents: 'none', maxWidth: '85%',
+          }}>
+            {violationLabels.slice(0, 3).map((v, i) => {
+              const sev = (v.severity || 'MEDIUM').toUpperCase();
+              const bg = sev === 'CRITICAL' ? 'var(--red)'
+                       : sev === 'HIGH'     ? 'var(--red)'
+                       : sev === 'MEDIUM'   ? 'var(--gold)'
+                                            : 'var(--cyan)';
+              return (
+                <div key={i} style={{
+                  background: bg, color: '#000',
+                  padding: '2px 8px', fontFamily: 'var(--font-mono, monospace)',
+                  fontSize: 9, fontWeight: 800, letterSpacing: 1.2,
+                  border: '2px solid #000', boxShadow: '2px 2px 0 #000',
+                  textTransform: 'uppercase',
+                  animation: v.cooled ? 'none' : 'tvBoxPulse 1.4s ease-in-out infinite',
+                  opacity: v.cooled ? 0.65 : 1,
+                  whiteSpace: 'nowrap',
+                }}>
+                  ⚠ {v.label || (v.type || '').replace(/_/g, ' ').toUpperCase()}
+                  {v.inc_id ? ` · ${v.inc_id}` : ''}
+                </div>
+              );
+            })}
+          </div>
+        )}
         {err && (
           <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--red)', background: 'rgba(0,0,0,0.6)' }}>
             STREAM ERROR
@@ -3467,6 +3498,9 @@ const TrafficLive = () => {
   const [snapshots, setSnapshots] = React.useState({});
   const [detections, setDetections] = React.useState({});
   const [detectSummary, setDetectSummary] = React.useState(null);
+  // Phase A.2 — per-cam violation badges from the live pipeline
+  const [liveLabels, setLiveLabels] = React.useState({});
+  const [liveIncidentsRecent, setLiveIncidentsRecent] = React.useState([]);
 
   React.useEffect(() => {
     apiFetch('/api/traffic-violations/cameras', TRAFFIC_AUTH)
@@ -3480,7 +3514,18 @@ const TrafficLive = () => {
     const loadSnaps = () => apiFetch('/api/traffic-violations/snapshots', TRAFFIC_AUTH)
       .then(d => setSnapshots(d.snapshots || {})).catch(() => {});
     const loadDetect = () => apiFetch('/api/traffic-violations/snapshots/detect', TRAFFIC_AUTH)
-      .then(d => { setDetections(d.detections || {}); setDetectSummary(d.summary || null); })
+      .then(d => {
+        setDetections(d.detections || {});
+        setDetectSummary(d.summary || null);
+        setLiveLabels(d.live_violation_labels || {});
+        if (Array.isArray(d.live_incidents_created_recent) && d.live_incidents_created_recent.length) {
+          setLiveIncidentsRecent(d.live_incidents_created_recent);
+          // Refresh the recent-incidents list so the bottom ticker reflects new auto-creates
+          apiFetch('/api/traffic-violations/incidents', { ...TRAFFIC_AUTH, params: { limit: 20 } })
+            .then(r => setRecent(r.incidents || []))
+            .catch(() => {});
+        }
+      })
       .catch(() => {});
     loadSnaps();
     loadDetect();
@@ -3547,6 +3592,7 @@ const TrafficLive = () => {
             index={i}
             snapshot={snapshots[c.id]}
             detections={detections[c.id]}
+            violationLabels={liveLabels[c.id] || []}
           />
         ))}
           </div>
@@ -3566,10 +3612,14 @@ const TrafficLive = () => {
 // Falls back to a friendly message if the clip wasn't generated.
 // ====================================================================
 const IncidentClipModal = ({ inc, onClose }) => {
-  const [err, setErr] = React.useState(false);
-  React.useEffect(() => { setErr(false); }, [inc?.id]);
+  // Two evidence types: live-pipeline incidents save a JPG snapshot, upload-pipeline
+  // incidents save a 3s mp4 clip. Try JPG first via img.onerror fallback; if that
+  // fails too, show a message.
+  const [mode, setMode] = React.useState('jpg');   // 'jpg' | 'mp4' | 'none'
+  React.useEffect(() => { setMode('jpg'); }, [inc?.id]);
   if (!inc) return null;
-  const clipUrl = `${API_BASE || ''}/api/traffic-violations/incidents/${inc.id}/clip.mp4`;
+  const jpgUrl = `${API_BASE || ''}/api/traffic-violations/incidents/${inc.id}/evidence.jpg`;
+  const mp4Url = `${API_BASE || ''}/api/traffic-violations/incidents/${inc.id}/clip.mp4`;
   return (
     <div className="tv-modal-backdrop" onClick={onClose}>
       <div className="tv-modal" style={{ maxWidth: 800 }} onClick={e => e.stopPropagation()}>
@@ -3585,19 +3635,33 @@ const IncidentClipModal = ({ inc, onClose }) => {
           <button className="btn-brutal" onClick={onClose} style={{ fontSize: 10, padding: '4px 10px', marginLeft: 'auto' }}>✕ CLOSE</button>
         </div>
         <div style={{ padding: 18 }}>
-          {!err ? (
+          {mode === 'jpg' && (
+            <div style={{ position: 'relative' }}>
+              <img
+                src={jpgUrl}
+                alt={`Evidence for ${inc.id}`}
+                onError={() => setMode('mp4')}
+                style={{ width: '100%', maxHeight: '60vh', objectFit: 'contain', background: '#000', border: '3px solid #000', display: 'block' }}
+              />
+              <div style={{
+                position: 'absolute', top: 8, left: 8,
+                background: 'var(--gold)', color: '#000', padding: '2px 8px',
+                fontFamily: 'var(--font-mono)', fontSize: 10, fontWeight: 700, letterSpacing: 1,
+                border: '2px solid #000',
+              }}>LIVE-CAM SNAPSHOT</div>
+            </div>
+          )}
+          {mode === 'mp4' && (
             <video
-              src={clipUrl}
-              controls
-              autoPlay
-              muted
-              loop
-              onError={() => setErr(true)}
+              src={mp4Url}
+              controls autoPlay muted loop
+              onError={() => setMode('none')}
               style={{ width: '100%', maxHeight: '60vh', background: '#000', border: '3px solid #000' }}
             />
-          ) : (
+          )}
+          {mode === 'none' && (
             <div style={{ padding: 30, textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 12, opacity: 0.7 }}>
-              Clip extraction failed for this incident (codec issue). The detection metadata is still valid below.
+              No evidence file saved for this incident. The detection metadata is still valid below.
             </div>
           )}
           <div style={{ marginTop: 12, fontFamily: 'var(--font-mono)', fontSize: 11, opacity: 0.7, lineHeight: 1.7 }}>
@@ -3843,6 +3907,20 @@ const TrafficIncidents = () => {
       .then(d => { setIncidents(d.incidents || []); setLoading(false); })
       .catch(() => { setIncidents([]); setLoading(false); });
   }, [filters, refreshKey]);
+
+  // Phase A.1 — auto-poll for new live-pipeline incidents every 15s.
+  // Silent (no loading flag) so the user's interaction isn't interrupted.
+  React.useEffect(() => {
+    const tick = () => {
+      const params = { limit: 50 };
+      Object.entries(filters).forEach(([k, v]) => { if (v) params[k] = v; });
+      apiFetch('/api/traffic-violations/incidents', { ...TRAFFIC_AUTH, params })
+        .then(d => setIncidents(d.incidents || []))
+        .catch(() => {});
+    };
+    const id = setInterval(tick, 15000);
+    return () => clearInterval(id);
+  }, [filters]);
 
   const toggleSelected = (id) => {
     setSelectedIds(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]);

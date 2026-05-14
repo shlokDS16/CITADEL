@@ -286,6 +286,19 @@ async def incident_clip(inc_id: str):
     return FileResponse(str(p), media_type="video/mp4")
 
 
+# Phase A.1 — Live-pipeline incidents save a JPG snapshot (not video).
+# Frontend calls this first; if it 404s, it falls back to /clip.mp4.
+@router.get("/traffic-violations/incidents/{inc_id}/evidence.jpg", tags=["traffic-violations"])
+async def incident_evidence_jpg(inc_id: str):
+    safe = "".join(c for c in inc_id if c.isalnum() or c == "-")
+    if safe != inc_id:
+        raise HTTPException(status_code=400, detail="Invalid inc_id")
+    p = service.CLIPS_DIR / f"{safe}.jpg"
+    if not p.exists():
+        raise HTTPException(status_code=404, detail=f"Evidence image for {inc_id} not found")
+    return FileResponse(str(p), media_type="image/jpeg")
+
+
 # ============================================================
 # Phase 4 — Manual mark-paid / mark-disputed (no Telegram webhook needed)
 # ============================================================

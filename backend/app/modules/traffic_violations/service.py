@@ -702,6 +702,10 @@ def live_snapshots() -> dict[str, Any]:
 
 _DETECT_CACHE: dict[str, Any] = {"ts": 0, "data": None, "snapshot_signature": None}
 _DETECT_TTL = 30
+# Phase A.1 — serialise compute across the bg thread + HTTP requests so we don't
+# burst 2x Groq calls on cache misses.
+import threading as _threading_detect
+_DETECT_COMPUTE_LOCK = _threading_detect.Lock()
 
 _COCO_LABEL_MAP = {
     0: "person",
@@ -823,6 +827,11 @@ def detect_snapshots() -> dict[str, Any]:
     """
     Run YOLO across all 24 mapped Singapore snapshots and return per-camera bboxes.
     Cached for 30 s + invalidated when the snapshot signature changes.
+
+    Phase A.1: after the YOLO pass on each cam, the heuristic gate decides whether
+    to spend a Groq Vision call to semantically classify the frame. If Groq reports
+    a violation, we synthesise a tv_incidents row in PENDING_REVIEW status and save
+    the JPG as evidence. Cooldowns prevent duplicate incidents on the same cam.
     """
     import time as _t
     snaps_body = live_snapshots()
@@ -837,8 +846,28 @@ def detect_snapshots() -> dict[str, Any]:
     ):
         return _DETECT_CACHE["data"]
 
+    # Serialise compute across threads — without this, the bg thread and an HTTP
+    # request can both miss the cache and run TWO Groq cycles in parallel.
+    with _DETECT_COMPUTE_LOCK:
+        # Re-check cache (another thread may have computed while we waited).
+        if (
+            _DETECT_CACHE["data"] is not None
+            and _DETECT_CACHE["snapshot_signature"] == sig
+            and (_t.time() - _DETECT_CACHE["ts"]) < _DETECT_TTL
+        ):
+            return _DETECT_CACHE["data"]
+        return _compute_detect_payload(snaps, sig)
+
+
+def _compute_detect_payload(snaps: dict[str, Any], sig: str) -> dict[str, Any]:
+    """Inner: the actual compute. Caller must hold _DETECT_COMPUTE_LOCK."""
+    import time as _t
     per_cam: dict[str, list[dict[str, Any]]] = {}
     summary = {"cars": 0, "motorcycles": 0, "buses": 0, "trucks": 0, "persons": 0, "bicycles": 0, "total": 0}
+    live_incidents_created: list[str] = []
+    live_violation_labels: dict[str, list[dict[str, Any]]] = {}
+    # Reset per-cycle Groq budget so we don't carry over from the prior cycle
+    _GROQ_CYCLE_COUNTER["calls"] = 0
 
     try:
         with httpx.Client(timeout=8.0) as client:
@@ -847,13 +876,14 @@ def detect_snapshots() -> dict[str, Any]:
                 if not url:
                     per_cam[cam_id] = []
                     continue
+                jpg_bytes: Optional[bytes] = None
                 try:
                     r = client.get(url)
                     if r.status_code != 200:
                         per_cam[cam_id] = []
                         continue
-                    raw_boxes = _detect_in_jpg_bytes(r.content)
-                    # OTVision-equivalent IoU tracking across snapshots → stable track_ids
+                    jpg_bytes = r.content
+                    raw_boxes = _detect_in_jpg_bytes(jpg_bytes)
                     boxes = _assign_track_ids(cam_id, raw_boxes)
                 except Exception as e:
                     log.debug("detect fetch failed for %s: %s", cam_id, e)
@@ -867,6 +897,19 @@ def detect_snapshots() -> dict[str, Any]:
                     elif b["cls"] == "person":     summary["persons"] += 1
                     elif b["cls"] == "bicycle":    summary["bicycles"] += 1
                     summary["total"] += 1
+
+                # Phase A.1: live-incident auto-pipeline (Smart Groq Vision gate)
+                if jpg_bytes and boxes and _live_pipeline_enabled():
+                    try:
+                        result = _maybe_create_live_incidents_for_cam(
+                            cam_id=cam_id, jpg_bytes=jpg_bytes, boxes=boxes, snapshot_info=info,
+                        )
+                        if result:
+                            live_incidents_created.extend(result.get("incident_ids") or [])
+                            if result.get("violation_labels"):
+                                live_violation_labels[cam_id] = result["violation_labels"]
+                    except Exception as e:
+                        log.warning("live-pipeline failed for %s: %s", cam_id, e)
     except Exception as e:
         log.exception("detect_snapshots failed: %s", e)
 
@@ -875,11 +918,351 @@ def detect_snapshots() -> dict[str, Any]:
         "cached_for_seconds": _DETECT_TTL,
         "summary": summary,
         "detections": per_cam,
+        # Phase A.1 surfacing:
+        "live_violation_labels": _merge_violation_labels(_LIVE_LABELS_RECENT, live_violation_labels),
+        "live_incidents_created_recent": live_incidents_created,
     }
     _DETECT_CACHE["data"] = payload
-    _DETECT_CACHE["ts"] = now
+    _DETECT_CACHE["ts"] = _t.time()
     _DETECT_CACHE["snapshot_signature"] = sig
     return payload
+
+
+# ============================================================
+# Phase A.1 — Live → Auto-Incident pipeline (Smart Groq Vision gate)
+# ============================================================
+# The heuristic gate runs free per-cycle. Only frames that look "suspicious"
+# (motorcycle present, possible pedestrian on road, stationary truck/bus,
+#  high vehicle density, sudden track vanish) spend a Groq Vision call.
+# Groq returns semantic violations (accident, no_helmet, lane_violation, ...).
+# On confirmed violation we insert a tv_incidents row in PENDING_REVIEW and
+# save the JPG as evidence. Cooldowns prevent duplicate incidents per cam.
+
+import time as _time
+# CLIPS_DIR (.tv_clips) is created once near the upload-pipeline section below;
+# we just reference the directory from there at write-time.
+
+# (cam_id, violation_type) -> last_created_at epoch
+_LIVE_VIOLATION_COOLDOWN: dict[tuple[str, str], float] = {}
+# cam_id -> last_groq_call_at epoch
+_LIVE_GROQ_COOLDOWN: dict[str, float] = {}
+# cam_id -> [{type, severity, label, at}]  — rolling list shown on UI tile chips
+_LIVE_LABELS_RECENT: dict[str, list[dict[str, Any]]] = {}
+
+# Cooldown windows (seconds) — tune via env in Phase C
+_LIVE_GROQ_COOLDOWN_SECS = int(os.getenv("TV_LIVE_GROQ_COOLDOWN", "180"))
+_LIVE_INCIDENT_COOLDOWN_SECS = int(os.getenv("TV_LIVE_INCIDENT_COOLDOWN", "300"))
+_LIVE_LABEL_TTL_SECS = int(os.getenv("TV_LIVE_LABEL_TTL", "120"))
+# Hard cap on Groq Vision calls per detect_snapshots cycle (30 s).
+# Free tier allows ~30 calls/min — we stay well under by capping at 4/cycle.
+_LIVE_GROQ_PER_CYCLE_BUDGET = int(os.getenv("TV_LIVE_GROQ_BUDGET", "4"))
+# Global backoff window in seconds when Groq returns 429 (set dynamically)
+_GROQ_BACKOFF_UNTIL: float = 0.0
+
+# How many frames a track must persist to count as "stationary" suspicious.
+# Higher = stricter (fewer false-positive Groq calls on busy urban cams).
+_STATIONARY_LIFETIME_HEAVY = 3   # truck/bus
+_STATIONARY_LIFETIME_MOTO  = 2   # motorcycle (catches "stopped at light without helmet")
+# Total vehicles in one frame above which we suspect congestion
+_DENSITY_SUSPICIOUS = 14
+# Reset per-cycle counter (mutated by detect_snapshots)
+_GROQ_CYCLE_COUNTER: dict[str, int] = {"calls": 0}
+
+
+def _live_pipeline_enabled() -> bool:
+    """Master kill-switch — set TV_LIVE_PIPELINE=0 to disable in case of quota burn."""
+    return os.getenv("TV_LIVE_PIPELINE", "1") not in ("0", "false", "False")
+
+
+def _should_classify_with_groq(cam_id: str, boxes: list[dict[str, Any]]) -> tuple[bool, str]:
+    """
+    Cheap heuristic gate. Returns (should_classify, reason).
+    Reason is logged for explainability ("why did this cam get a Groq call?").
+
+    Tight by design — urban Singapore cams have constant flow; we only spend a
+    Groq call when something *unusual* persists across cycles or violates an
+    obvious rule (pedestrian on road, stalled heavy vehicle, sudden crowd).
+    """
+    now = _time.time()
+
+    # Global 429 backoff — pause everyone for ~60 s after a rate-limit hit.
+    if now < _GROQ_BACKOFF_UNTIL:
+        return False, f"backoff_{int(_GROQ_BACKOFF_UNTIL - now)}s"
+
+    # Per-cycle budget — at most N Groq calls per detect_snapshots cycle.
+    if _GROQ_CYCLE_COUNTER["calls"] >= _LIVE_GROQ_PER_CYCLE_BUDGET:
+        return False, "cycle_budget"
+
+    # Per-cam cooldown — same cam can't burn Groq more than once per window.
+    last = _LIVE_GROQ_COOLDOWN.get(cam_id, 0)
+    if now - last < _LIVE_GROQ_COOLDOWN_SECS:
+        return False, "cam_cooldown"
+    if not boxes:
+        return False, "no_boxes"
+
+    # Stationary motorcycle — must persist across cycles. Stops the "every flow
+    # of bikes triggers a helmet check" blowout we hit on the first run.
+    stationary_motorcycles = [
+        b for b in boxes
+        if b["cls"] == "motorcycle"
+        and (b.get("lifetime") or 0) >= _STATIONARY_LIFETIME_MOTO
+        and b.get("conf", 0) >= 0.50
+    ]
+    if stationary_motorcycles:
+        return True, f"stationary_moto({len(stationary_motorcycles)})"
+
+    # Person standing in the road (lower 60% of frame, not on shoulder)
+    person_on_road = [
+        b for b in boxes
+        if b["cls"] == "person"
+        and b.get("y", 0) > 0.30
+        and b.get("w", 0) > 0.04
+        and (b.get("lifetime") or 0) >= 2
+        and b.get("conf", 0) >= 0.50
+    ]
+    if person_on_road:
+        return True, f"person_on_road({len(person_on_road)})"
+
+    # Stationary truck or bus mid-frame — accident candidate
+    stationary_heavy = [
+        b for b in boxes
+        if b["cls"] in ("truck", "bus")
+        and (b.get("lifetime") or 0) >= _STATIONARY_LIFETIME_HEAVY
+        and b.get("y", 0) > 0.20 and b.get("y", 0) < 0.85
+    ]
+    if stationary_heavy:
+        return True, f"stationary_heavy({len(stationary_heavy)})"
+
+    # Sudden very high density — possible congestion / pile-up
+    if len(boxes) >= _DENSITY_SUSPICIOUS:
+        return True, f"density({len(boxes)})"
+
+    return False, "below_threshold"
+
+
+def _save_live_evidence_jpg(jpg_bytes: bytes, inc_id: str) -> Optional[str]:
+    """Save raw JPG to .tv_clips/{inc_id}.jpg. Return the absolute path."""
+    try:
+        out = CLIPS_DIR / f"{inc_id}.jpg"
+        out.write_bytes(jpg_bytes)
+        return str(out)
+    except Exception as e:
+        log.warning("evidence save failed for %s: %s", inc_id, e)
+        return None
+
+
+# Phase A.3 — plate OCR on the largest vehicle bbox in the live snapshot.
+# Uses OCR.Space via the existing plate_ocr.py. Cached per-cam track_id so we
+# don't re-OCR the same vehicle across cycles.
+_LIVE_PLATE_CACHE: dict[tuple[str, int], tuple[str, float, float]] = {}
+_LIVE_PLATE_CACHE_TTL = 600  # 10 minutes per (cam, track_id)
+
+
+def _largest_vehicle_box(boxes: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Find the largest vehicle (car/truck/bus/motorcycle) bbox by area."""
+    cands = [b for b in boxes if b.get("cls") in ("car", "truck", "bus", "motorcycle")]
+    if not cands:
+        return None
+    return max(cands, key=lambda b: (b.get("w") or 0) * (b.get("h") or 0))
+
+
+def _extract_plate_for_live(jpg_bytes: bytes, cam_id: str, boxes: list[dict[str, Any]]) -> tuple[Optional[str], float]:
+    """
+    Attempt to OCR the license plate from the largest vehicle bbox in the frame.
+    Returns (plate_text, confidence). Cached per (cam, track_id).
+    """
+    box = _largest_vehicle_box(boxes)
+    if not box:
+        return None, 0.0
+    track_id = box.get("track_id")
+    if track_id is not None:
+        cache_key = (cam_id, int(track_id))
+        cached = _LIVE_PLATE_CACHE.get(cache_key)
+        now = _time.time()
+        if cached and (now - cached[2]) < _LIVE_PLATE_CACHE_TTL:
+            return cached[0], cached[1]
+    try:
+        import cv2
+        import numpy as np
+        from app.modules.traffic_violations import plate_ocr
+
+        arr = np.frombuffer(jpg_bytes, dtype=np.uint8)
+        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if frame is None:
+            return None, 0.0
+        h, w = frame.shape[:2]
+        # Convert normalized bbox (0..1) back to pixel coords for plate_ocr
+        x1 = int(max(0, box["x"] * w))
+        y1 = int(max(0, box["y"] * h))
+        x2 = int(min(w, (box["x"] + box["w"]) * w))
+        y2 = int(min(h, (box["y"] + box["h"]) * h))
+        plate, conf = plate_ocr.read_plate_from_bbox(frame, (x1, y1, x2, y2))
+        if track_id is not None:
+            _LIVE_PLATE_CACHE[(cam_id, int(track_id))] = (plate, conf, _time.time())
+        return plate, conf
+    except Exception as e:
+        log.debug("plate OCR failed for %s: %s", cam_id, e)
+        return None, 0.0
+
+
+def _severity_to_label(sev: str) -> str:
+    s = (sev or "").strip().lower()
+    return {"critical": "CRITICAL", "high": "HIGH", "medium": "MEDIUM", "low": "LOW"}.get(s, "MEDIUM")
+
+
+def _merge_violation_labels(rolling: dict[str, list[dict[str, Any]]],
+                            fresh: dict[str, list[dict[str, Any]]]) -> dict[str, list[dict[str, Any]]]:
+    """Maintain a rolling per-cam list of violation labels (TTL-pruned) for the UI tile chips."""
+    now = _time.time()
+    out: dict[str, list[dict[str, Any]]] = {}
+    # Prune stale entries from rolling first
+    for cam, items in (rolling or {}).items():
+        kept = [it for it in items if (now - (it.get("ts") or 0)) < _LIVE_LABEL_TTL_SECS]
+        if kept:
+            out[cam] = kept
+    # Merge fresh entries on top
+    for cam, items in (fresh or {}).items():
+        if not items:
+            continue
+        existing = out.setdefault(cam, [])
+        for it in items:
+            it = dict(it)
+            it["ts"] = now
+            existing.insert(0, it)
+        out[cam] = existing[:5]  # keep last 5 per cam
+    # Persist back
+    rolling.clear()
+    rolling.update(out)
+    return out
+
+
+def _maybe_create_live_incidents_for_cam(
+    cam_id: str,
+    jpg_bytes: bytes,
+    boxes: list[dict[str, Any]],
+    snapshot_info: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+    """
+    Heuristic gate -> Groq Vision -> per-violation cooldown -> DB insert.
+    Returns {incident_ids: [...], violation_labels: [{type, severity, label, reason}]}.
+    """
+    global _GROQ_BACKOFF_UNTIL
+
+    should, reason = _should_classify_with_groq(cam_id, boxes)
+    if not should:
+        return None
+
+    _LIVE_GROQ_COOLDOWN[cam_id] = _time.time()
+    _GROQ_CYCLE_COUNTER["calls"] = _GROQ_CYCLE_COUNTER.get("calls", 0) + 1
+
+    # Lazy import — keeps service.py importable without the optional groq dep
+    from app.modules.traffic_violations import groq_vision
+
+    try:
+        result = groq_vision.classify_frame(jpg_bytes)
+    except Exception as e:
+        log.warning("groq_vision.classify_frame failed for %s: %s", cam_id, e)
+        return None
+
+    # Detect 429 / fallback signatures so we globally pause Groq for a minute.
+    scene_marker = (result or {}).get("scene") or ""
+    if "(http error: 429" in scene_marker or "(ollama" in scene_marker or "(error:" in scene_marker:
+        _GROQ_BACKOFF_UNTIL = _time.time() + 60
+        log.warning("Groq 429/fallback for %s — backing off all live Groq calls for 60s", cam_id)
+        return None
+
+    violations = (result or {}).get("violations") or []
+    if not violations:
+        return None
+
+    sb = get_supabase()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    incident_ids: list[str] = []
+    violation_labels: list[dict[str, Any]] = []
+
+    for v in violations:
+        vtype = (v.get("type") or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if not vtype or vtype not in VIOLATION_LABEL:
+            continue
+        severity = _severity_to_label(v.get("severity") or "medium")
+        # Cooldown per (cam_id, violation_type) — don't spam dupes
+        ck = (cam_id, vtype)
+        last_at = _LIVE_VIOLATION_COOLDOWN.get(ck, 0)
+        if _time.time() - last_at < _LIVE_INCIDENT_COOLDOWN_SECS:
+            violation_labels.append({
+                "type": vtype, "severity": severity,
+                "label": VIOLATION_LABEL.get(vtype, vtype.upper()),
+                "reason": reason, "cooled": True,
+            })
+            continue
+
+        inc_id = _next_human_inc_id()
+        evidence_path = _save_live_evidence_jpg(jpg_bytes, inc_id)
+        description = (v.get("description") or "")[:240]
+
+        # Phase A.3 — extract plate from the largest vehicle bbox before insert.
+        plate_text, plate_conf = _extract_plate_for_live(jpg_bytes, cam_id, boxes)
+
+        row = {
+            "inc_id": inc_id,
+            "cam_id": cam_id,
+            "upload_filename": None,
+            "video_clip_path": None,
+            "full_video_path": None,
+            "violation_type": vtype,
+            "severity": severity,
+            "plate": plate_text,
+            "plate_confidence": plate_conf if plate_text else None,
+            "detection_confidence": 0.85,
+            "detected_at": now_iso,
+            "status": "PENDING_REVIEW",
+            "frame_metadata": {
+                "source":        "live_snapshot",
+                "groq_reason":   reason,
+                "groq_scene":    (result.get("scene") or "")[:240],
+                "description":   description,
+                "evidence_jpg":  evidence_path,
+                "image_url":     snapshot_info.get("image_url"),
+                "source_cam_id": snapshot_info.get("source_cam_id"),
+                "lat":           snapshot_info.get("lat"),
+                "lng":           snapshot_info.get("lng"),
+                "plate_visible": bool(v.get("plate_visible")),
+                "box_count":     len(boxes),
+            },
+            "duration_seconds": 0.0,
+        }
+        try:
+            sb.table("tv_incidents").insert(row).execute()
+            incident_ids.append(inc_id)
+            _LIVE_VIOLATION_COOLDOWN[ck] = _time.time()
+            violation_labels.append({
+                "type": vtype, "severity": severity,
+                "label": VIOLATION_LABEL.get(vtype, vtype.upper()),
+                "reason": reason, "inc_id": inc_id,
+            })
+            # Best-effort audit
+            try:
+                sb.table("tv_audit_log").insert({
+                    "entity_type": "incident",
+                    "entity_id": inc_id,
+                    "action": "detected_live",
+                    "actor": "live_pipeline",
+                    "payload": {
+                        "cam_id":       cam_id,
+                        "violation":    vtype,
+                        "severity":     severity,
+                        "groq_reason":  reason,
+                        "groq_scene":   result.get("scene"),
+                    },
+                }).execute()
+            except Exception:
+                pass
+        except Exception as e:
+            log.warning("live incident insert failed for %s on %s: %s", vtype, cam_id, e)
+
+    if not incident_ids and not violation_labels:
+        return None
+    return {"incident_ids": incident_ids, "violation_labels": violation_labels}
 
 
 # ============================================================

@@ -201,11 +201,24 @@ class DetectionSummary(BaseModel):
     total: int = 0
 
 
+class LiveViolationLabel(BaseModel):
+    type: str
+    severity: str
+    label: str
+    reason: Optional[str] = None
+    inc_id: Optional[str] = None
+    cooled: Optional[bool] = None
+    ts: Optional[float] = None
+
+
 class DetectionMap(BaseModel):
     computed_at: str
     cached_for_seconds: int
     summary: DetectionSummary
     detections: dict[str, list[DetectionBox]]
+    # Phase A.1 — auto-pipeline surfacing
+    live_violation_labels: dict[str, list[LiveViolationLabel]] = {}
+    live_incidents_created_recent: list[str] = []
 
 
 # ---------- Phase 1+: Plate history ----------
