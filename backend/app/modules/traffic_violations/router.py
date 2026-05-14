@@ -171,6 +171,62 @@ async def analytics_summary():
 
 
 # ============================================================
+# Phase 6 — Comprehensive analytics + exports
+# ============================================================
+@router.get("/traffic-violations/analytics/full", tags=["traffic-violations"])
+async def analytics_full(days: int = Query(30, ge=1, le=365)):
+    try:
+        return service.analytics_full(days=days)
+    except Exception as e:
+        log.exception("analytics_full failed")
+        raise HTTPException(status_code=500, detail=f"Analytics failed: {e}")
+
+
+@router.get("/traffic-violations/analytics/export.csv", tags=["traffic-violations"])
+async def analytics_export_csv(days: int = Query(30, ge=1, le=365)):
+    from fastapi.responses import Response
+    try:
+        body = service.export_incidents_csv(days=days)
+        return Response(
+            content=body,
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="citadel-traffic-{days}d.csv"'},
+        )
+    except Exception as e:
+        log.exception("analytics_export_csv failed")
+        raise HTTPException(status_code=500, detail=f"CSV export failed: {e}")
+
+
+@router.get("/traffic-violations/analytics/export.json", tags=["traffic-violations"])
+async def analytics_export_json(days: int = Query(30, ge=1, le=365)):
+    from fastapi.responses import Response
+    import json as _json
+    try:
+        data = service.analytics_full(days=days)
+        return Response(
+            content=_json.dumps(data, indent=2, default=str),
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="citadel-analytics-{days}d.json"'},
+        )
+    except Exception as e:
+        log.exception("analytics_export_json failed")
+        raise HTTPException(status_code=500, detail=f"JSON export failed: {e}")
+
+
+@router.get("/traffic-violations/analytics/report.html", tags=["traffic-violations"])
+async def analytics_report_html(days: int = Query(30, ge=1, le=365)):
+    from fastapi.responses import Response
+    try:
+        html = service.export_analytics_html(days=days)
+        # NOTE: not an attachment — opens in a new browser tab so the user
+        # can hit Print -> Save as PDF directly from the report.
+        return Response(content=html, media_type="text/html; charset=utf-8")
+    except Exception as e:
+        log.exception("analytics_report_html failed")
+        raise HTTPException(status_code=500, detail=f"Report failed: {e}")
+
+
+# ============================================================
 # Fines (lookup)
 # ============================================================
 @router.get("/traffic-violations/fines", response_model=list[schemas.FineRow], tags=["traffic-violations"])

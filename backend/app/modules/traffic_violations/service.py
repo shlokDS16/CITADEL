@@ -527,6 +527,364 @@ def analytics_summary() -> dict[str, Any]:
 
 
 # ============================================================
+# Phase 6 — Comprehensive analytics rollup
+# Used by the redesigned Analytics tab. One trip to Supabase, fan out
+# in-Python to KPIs / heatmap / breakdown / hotspots / trend / funnel /
+# revenue / recent activity. Optional `days` window (1..365).
+# ============================================================
+
+def _bucket_iso(iso: str) -> tuple[int, int, str]:
+    """ISO string -> (weekday 0=Mon, hour 0-23, YYYY-MM-DD)."""
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00")) if isinstance(iso, str) else None
+    except Exception:
+        return -1, -1, ""
+    if not dt:
+        return -1, -1, ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.weekday(), dt.hour, dt.date().isoformat()
+
+
+def analytics_full(days: int = 30) -> dict[str, Any]:
+    """
+    Single-shot snapshot powering the Analytics tab.
+    All rollups are in-Python — volumes are small enough today that doing
+    this in SQL would be premature optimisation. When volumes grow, swap
+    each section to a materialised view (cron-refreshed) without touching
+    the API contract.
+    """
+    sb = get_supabase()
+    now = datetime.now(timezone.utc)
+    since = (now - timedelta(days=int(days))).isoformat()
+    since_24h = (now - timedelta(hours=24)).isoformat()
+    since_7d = (now - timedelta(days=7)).isoformat()
+
+    # ---- pull base data ----
+    incidents = (
+        sb.table("tv_incidents")
+        .select("inc_id, cam_id, violation_type, severity, status, plate, "
+                "detection_confidence, detected_at, frame_metadata")
+        .gte("detected_at", since)
+        .order("detected_at", desc=True)
+        .execute()
+    ).data or []
+    challans = (
+        sb.table("tv_challans")
+        .select("challan_id, plate, violation_type, amount, status, "
+                "issued_at, paid_at, due_by")
+        .gte("issued_at", since)
+        .order("issued_at", desc=True)
+        .execute()
+    ).data or []
+    cameras = sb.table("tv_cameras").select("id, name, status, lat, lng").execute().data or []
+    cam_name_map = {c["id"]: c.get("name") for c in cameras}
+
+    # ---- KPI tiles ----
+    total = len(incidents)
+    inc_24h = [r for r in incidents if (r.get("detected_at") or "") >= since_24h]
+    inc_7d = [r for r in incidents if (r.get("detected_at") or "") >= since_7d]
+    detections_24h = len(inc_24h)
+
+    confs = [r.get("detection_confidence") or 0 for r in incidents]
+    if confs:
+        scale = 100 if max(confs) <= 1 else 1
+        avg_conf = round(sum(confs) / len(confs) * scale, 1)
+    else:
+        avg_conf = 0.0
+
+    rejected = sum(1 for r in incidents if (r.get("status") or "").upper() == "REJECTED")
+    fp_pct = round(rejected / total * 100, 1) if total else 0.0
+
+    active_cams = sum(1 for c in cameras if (c.get("status") or "") == "active")
+    cam_uptime_pct = round(active_cams / len(cameras) * 100, 1) if cameras else 0.0
+
+    total_revenue = sum(c.get("amount") or 0 for c in challans if (c.get("status") or "").upper() == "PAID")
+    outstanding = sum(c.get("amount") or 0 for c in challans if (c.get("status") or "").upper() == "UNPAID")
+    disputed_amt = sum(c.get("amount") or 0 for c in challans if (c.get("status") or "").upper() == "DISPUTED")
+    issued_30d = len(challans)
+    paid_count = sum(1 for c in challans if (c.get("status") or "").upper() == "PAID")
+    collection_rate = round(paid_count / issued_30d * 100, 1) if issued_30d else 0.0
+
+    kpis = {
+        "detections_window":   total,
+        "detections_24h":      detections_24h,
+        "detections_7d":       len(inc_7d),
+        "avg_confidence":      avg_conf,
+        "false_positive_pct":  fp_pct,
+        "cam_uptime_pct":      cam_uptime_pct,
+        "total_revenue":       total_revenue,
+        "total_outstanding":   outstanding,
+        "total_disputed":      disputed_amt,
+        "challans_issued":     issued_30d,
+        "collection_rate":     collection_rate,
+        "window_days":         days,
+    }
+
+    # ---- Heatmap: 7 (Mon..Sun) x 24 hours ----
+    heatmap = [[0] * 24 for _ in range(7)]
+    for r in incidents:
+        dow, hr, _ = _bucket_iso(r.get("detected_at") or "")
+        if 0 <= dow < 7 and 0 <= hr < 24:
+            heatmap[dow][hr] += 1
+
+    # ---- Donut: violation-type breakdown ----
+    type_counts: dict[str, int] = {}
+    for r in incidents:
+        t = (r.get("violation_type") or "unknown").lower()
+        type_counts[t] = type_counts.get(t, 0) + 1
+    donut = sorted(
+        [{
+            "type":  t,
+            "label": VIOLATION_LABEL.get(t, t.replace("_", " ").upper()),
+            "count": n,
+            "pct":   round(n / total * 100, 1) if total else 0,
+        } for t, n in type_counts.items()],
+        key=lambda x: -x["count"],
+    )
+
+    # ---- Severity breakdown ----
+    sev_counts: dict[str, int] = {}
+    for r in incidents:
+        sev = (r.get("severity") or "MEDIUM").upper()
+        sev_counts[sev] = sev_counts.get(sev, 0) + 1
+    severity = [
+        {"level": s, "count": sev_counts.get(s, 0)}
+        for s in ("CRITICAL", "HIGH", "MEDIUM", "LOW")
+    ]
+
+    # ---- Hotspot cameras (top 10 by incident count) ----
+    cam_counts: dict[str, int] = {}
+    for r in incidents:
+        cid = r.get("cam_id") or "—"
+        cam_counts[cid] = cam_counts.get(cid, 0) + 1
+    hotspots = sorted(
+        [{
+            "cam_id": cid,
+            "name":   cam_name_map.get(cid) or cid,
+            "count":  n,
+        } for cid, n in cam_counts.items()],
+        key=lambda x: -x["count"],
+    )[:10]
+
+    # ---- Time series (per-day incidents + per-day revenue, last `days`) ----
+    by_day: dict[str, dict[str, Any]] = {}
+    for i in range(int(days)):
+        d = (now - timedelta(days=int(days) - 1 - i)).date().isoformat()
+        by_day[d] = {"date": d, "incidents": 0, "approved": 0, "rejected": 0,
+                     "issued": 0, "collected": 0}
+    for r in incidents:
+        _, _, d = _bucket_iso(r.get("detected_at") or "")
+        if d in by_day:
+            by_day[d]["incidents"] += 1
+            status = (r.get("status") or "").upper()
+            if status == "APPROVED": by_day[d]["approved"] += 1
+            elif status == "REJECTED": by_day[d]["rejected"] += 1
+    for c in challans:
+        _, _, d = _bucket_iso(c.get("issued_at") or "")
+        if d in by_day:
+            by_day[d]["issued"] += 1
+        _, _, d_paid = _bucket_iso(c.get("paid_at") or "")
+        if d_paid in by_day and (c.get("status") or "").upper() == "PAID":
+            by_day[d_paid]["collected"] += c.get("amount") or 0
+    trend = list(by_day.values())
+
+    # ---- Status funnel ----
+    inc_pending = sum(1 for r in incidents if (r.get("status") or "").upper() == "PENDING_REVIEW")
+    inc_approved = sum(1 for r in incidents if (r.get("status") or "").upper() == "APPROVED")
+    inc_rejected = rejected
+    ch_unpaid = sum(1 for c in challans if (c.get("status") or "").upper() == "UNPAID")
+    ch_disputed = sum(1 for c in challans if (c.get("status") or "").upper() == "DISPUTED")
+    ch_paid = paid_count
+    funnel = [
+        {"stage": "Detected",        "count": total,            "color": "cyan"},
+        {"stage": "Pending Review",  "count": inc_pending,      "color": "gold"},
+        {"stage": "Approved",        "count": inc_approved,     "color": "green"},
+        {"stage": "Rejected",        "count": inc_rejected,     "color": "red"},
+        {"stage": "Challans Issued", "count": issued_30d,       "color": "cyan"},
+        {"stage": "Paid",            "count": ch_paid,          "color": "green"},
+        {"stage": "Disputed",        "count": ch_disputed,      "color": "gold"},
+        {"stage": "Unpaid",          "count": ch_unpaid,        "color": "red"},
+    ]
+
+    # ---- Repeat offenders (top 5) — cross-link to Offenders tab ----
+    top_off = top_offenders(days=int(days), limit=5)
+
+    # ---- Recent activity (last 12 audit entries) ----
+    recent_audit: list[dict[str, Any]] = []
+    try:
+        recent_audit = (
+            sb.table("tv_audit_log")
+            .select("entity_type, entity_id, action, actor, created_at")
+            .order("created_at", desc=True)
+            .limit(12)
+            .execute()
+        ).data or []
+    except Exception:
+        recent_audit = []
+
+    return {
+        "generated_at": now.isoformat(),
+        "window_days": int(days),
+        "kpis": kpis,
+        "heatmap": {
+            "rows": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+            "cols": list(range(24)),
+            "data": heatmap,
+            "max": max((max(r) for r in heatmap), default=0),
+        },
+        "type_breakdown": donut,
+        "severity_breakdown": severity,
+        "hotspot_cameras": hotspots,
+        "trend": trend,
+        "funnel": funnel,
+        "top_offenders": top_off,
+        "recent_audit": recent_audit,
+    }
+
+
+def export_incidents_csv(days: int = 30) -> str:
+    """Flat CSV — one row per incident with the columns an officer / auditor
+    would want when handing data to a different system."""
+    sb = get_supabase()
+    since = (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
+    incidents = (
+        sb.table("tv_incidents")
+        .select("inc_id, cam_id, violation_type, severity, plate, "
+                "detection_confidence, detected_at, status, approved_at, "
+                "rejected_at, approved_by, rejected_by, video_clip_path")
+        .gte("detected_at", since)
+        .order("detected_at", desc=True)
+        .execute()
+    ).data or []
+    # join challan info per incident_id
+    inc_ids = [r.get("inc_id") for r in incidents if r.get("inc_id")]
+    chmap: dict[str, dict[str, Any]] = {}
+    if incidents:
+        ch_rows = (
+            sb.table("tv_challans")
+            .select("incident_id, challan_id, amount, status, issued_at, "
+                    "paid_at, due_by, telegram_message_id")
+            .execute()
+        ).data or []
+        # Tie challan.incident_id (FK to tv_incidents.id) back via lookup — we
+        # have inc_id (human) not pk. Re-fetch the pk mapping cheaply.
+        pks = (
+            sb.table("tv_incidents")
+            .select("id, inc_id")
+            .in_("inc_id", inc_ids)
+            .execute()
+        ).data or []
+        pk_to_inc = {r["id"]: r["inc_id"] for r in pks}
+        for c in ch_rows:
+            inc_human = pk_to_inc.get(c.get("incident_id"))
+            if inc_human and inc_human not in chmap:
+                chmap[inc_human] = c
+
+    import csv as _csv
+    import io
+    buf = io.StringIO()
+    w = _csv.writer(buf)
+    w.writerow([
+        "inc_id", "cam_id", "violation_type", "severity", "plate",
+        "confidence_pct", "detected_at", "status",
+        "approved_by", "approved_at", "rejected_by", "rejected_at",
+        "challan_id", "challan_amount", "challan_status",
+        "challan_issued_at", "challan_paid_at", "challan_due_by",
+        "telegram_message_id", "evidence_clip_path",
+    ])
+    for r in incidents:
+        c = chmap.get(r.get("inc_id"), {})
+        conf = r.get("detection_confidence") or 0
+        conf_pct = int(round(conf * 100)) if conf <= 1 else int(conf)
+        w.writerow([
+            r.get("inc_id"), r.get("cam_id"), r.get("violation_type"),
+            r.get("severity"), r.get("plate") or "",
+            conf_pct, r.get("detected_at"), (r.get("status") or "").upper(),
+            r.get("approved_by") or "", r.get("approved_at") or "",
+            r.get("rejected_by") or "", r.get("rejected_at") or "",
+            c.get("challan_id") or "", c.get("amount") or "",
+            (c.get("status") or "").upper(),
+            c.get("issued_at") or "", c.get("paid_at") or "",
+            c.get("due_by") or "", c.get("telegram_message_id") or "",
+            r.get("video_clip_path") or "",
+        ])
+    return buf.getvalue()
+
+
+def export_analytics_html(days: int = 30) -> str:
+    """
+    Standalone, print-friendly HTML report for the current analytics
+    window. Renders KPIs, tables, and stat blocks — designed to be saved
+    as PDF via browser's Print -> Save as PDF, without requiring any
+    headless-browser dependency on the server.
+    """
+    a = analytics_full(days=days)
+    kpis = a["kpis"]
+    rows_html = "".join(
+        f"<tr><td>{t['label']}</td><td>{t['count']}</td><td>{t['pct']}%</td></tr>"
+        for t in a["type_breakdown"]
+    )
+    hot_html = "".join(
+        f"<tr><td>{h['cam_id']}</td><td>{h['name']}</td><td>{h['count']}</td></tr>"
+        for h in a["hotspot_cameras"]
+    )
+    funnel_html = "".join(
+        f"<tr><td>{f['stage']}</td><td>{f['count']}</td></tr>"
+        for f in a["funnel"]
+    )
+    off_html = "".join(
+        f"<tr><td>#{o['rank']}</td><td>{o['plate']}</td><td>{o['driver']}</td>"
+        f"<td>{o['offenses']}</td><td>{o['risk']}</td>"
+        f"<td>₹{(o.get('total') or 0):,}</td></tr>"
+        for o in a["top_offenders"]
+    )
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>CITADEL Traffic Violations — Analytics Report ({days}-day)</title>
+<style>
+  body {{ font-family: -apple-system,Segoe UI,sans-serif; margin: 24px; color: #111; }}
+  h1 {{ font-size: 24px; border-bottom: 4px solid #000; padding-bottom: 8px; }}
+  h2 {{ font-size: 16px; margin: 28px 0 8px; letter-spacing: 2px; }}
+  .meta {{ font-family: monospace; font-size: 11px; color: #666; }}
+  .kpi-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 16px 0; }}
+  .kpi {{ border: 2px solid #000; padding: 12px; }}
+  .kpi .label {{ font-size: 10px; letter-spacing: 1px; color: #666; }}
+  .kpi .value {{ font-size: 24px; font-weight: 700; margin-top: 4px; }}
+  table {{ border-collapse: collapse; width: 100%; font-size: 12px; margin-top: 8px; }}
+  th, td {{ border: 1px solid #ccc; padding: 6px 10px; text-align: left; }}
+  th {{ background: #f4f4f4; font-size: 11px; letter-spacing: 1px; }}
+  @media print {{ body {{ margin: 0; }} .no-print {{ display: none; }} }}
+</style>
+</head><body>
+  <h1>CITADEL Traffic Violations · Analytics Report</h1>
+  <div class="meta">Window: last {days} days · Generated {a['generated_at']}</div>
+  <h2>KEY METRICS</h2>
+  <div class="kpi-grid">
+    <div class="kpi"><div class="label">DETECTIONS (24H)</div><div class="value">{kpis['detections_24h']:,}</div></div>
+    <div class="kpi"><div class="label">DETECTIONS (7D)</div><div class="value">{kpis['detections_7d']:,}</div></div>
+    <div class="kpi"><div class="label">DETECTIONS ({days}D)</div><div class="value">{kpis['detections_window']:,}</div></div>
+    <div class="kpi"><div class="label">AVG CONFIDENCE</div><div class="value">{kpis['avg_confidence']}%</div></div>
+    <div class="kpi"><div class="label">FALSE POSITIVES</div><div class="value">{kpis['false_positive_pct']}%</div></div>
+    <div class="kpi"><div class="label">CAM UPTIME</div><div class="value">{kpis['cam_uptime_pct']}%</div></div>
+    <div class="kpi"><div class="label">REVENUE COLLECTED</div><div class="value">₹{kpis['total_revenue']:,}</div></div>
+    <div class="kpi"><div class="label">OUTSTANDING</div><div class="value">₹{kpis['total_outstanding']:,}</div></div>
+    <div class="kpi"><div class="label">CHALLANS ISSUED</div><div class="value">{kpis['challans_issued']:,}</div></div>
+    <div class="kpi"><div class="label">COLLECTION RATE</div><div class="value">{kpis['collection_rate']}%</div></div>
+  </div>
+  <h2>VIOLATION BREAKDOWN</h2>
+  <table><thead><tr><th>Type</th><th>Count</th><th>Share</th></tr></thead><tbody>{rows_html}</tbody></table>
+  <h2>HOTSPOT CAMERAS</h2>
+  <table><thead><tr><th>Cam</th><th>Name</th><th>Incidents</th></tr></thead><tbody>{hot_html}</tbody></table>
+  <h2>STATUS FUNNEL</h2>
+  <table><thead><tr><th>Stage</th><th>Count</th></tr></thead><tbody>{funnel_html}</tbody></table>
+  <h2>TOP REPEAT OFFENDERS</h2>
+  <table><thead><tr><th>Rank</th><th>Plate</th><th>Driver</th><th>Offenses</th><th>Risk</th><th>Pending</th></tr></thead><tbody>{off_html}</tbody></table>
+  <p class="meta">CITADEL · Government Module 3 · Auto-generated. Use browser Print → Save as PDF for archival.</p>
+</body></html>"""
+
+
+# ============================================================
 # Fines lookup
 # ============================================================
 

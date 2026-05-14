@@ -3129,6 +3129,8 @@ const TrafficViolations = ({ onBack }) => {
   const [pendingCount, setPendingCount] = React.useState(0);
   const [uploadOpen, setUploadOpen] = React.useState(false);
   const [refreshKey, setRefreshKey] = React.useState(0);
+  // Phase 6 — cross-module navigation request from Analytics clicks
+  const [navHint, setNavHint] = React.useState(null);
 
   React.useEffect(() => {
     apiFetch('/api/traffic-violations/header-stats', TRAFFIC_AUTH).then(setHdr).catch(() => {});
@@ -3140,6 +3142,12 @@ const TrafficViolations = ({ onBack }) => {
     setRefreshKey(k => k + 1);
     setTab('incidents');
   };
+
+  // Cross-module navigation handler — Analytics widgets call this on click
+  const handleNavigate = React.useCallback((targetTab, hint) => {
+    setNavHint({ tab: targetTab, ...hint, at: Date.now() });
+    setTab(targetTab);
+  }, []);
 
   const tabs = [
     { key: 'live',      label: 'LIVE FEED' },
@@ -3168,11 +3176,11 @@ const TrafficViolations = ({ onBack }) => {
       <UploadFootageModal open={uploadOpen} onClose={() => setUploadOpen(false)} onComplete={onUploadComplete} />
       <SystemStatusBar />
       <Tabs tabs={tabs} active={tab} onChange={setTab} accent="var(--cyan)" />
-      {tab === 'live'      && <TrafficLive />}
-      {tab === 'incidents' && <TrafficIncidents />}
-      {tab === 'challans'  && <TrafficChallans />}
-      {tab === 'offenders' && <TrafficOffenders />}
-      {tab === 'analytics' && <TrafficAnalytics />}
+      {tab === 'live'      && <TrafficLive navHint={navHint} />}
+      {tab === 'incidents' && <TrafficIncidents navHint={navHint} />}
+      {tab === 'challans'  && <TrafficChallans  navHint={navHint} />}
+      {tab === 'offenders' && <TrafficOffenders navHint={navHint} />}
+      {tab === 'analytics' && <TrafficAnalytics onNavigate={handleNavigate} />}
       {tab === 'settings'  && <TrafficSettings />}
     </div>
   );
@@ -3505,7 +3513,7 @@ const CameraTile = ({ cam, index, snapshot, detections, violationLabels = [] }) 
   );
 };
 
-const TrafficLive = () => {
+const TrafficLive = ({ navHint }) => {
   // Chip label → incident.type token mapping (backend returns the right column)
   const CHIP_TO_TYPE = {
     'RED LIGHT VIOLATION': 'RED LIGHT',
@@ -3971,11 +3979,26 @@ const tvSortIncidents = (rows, sortKey) => {
   }
 };
 
-const TrafficIncidents = () => {
+const TrafficIncidents = ({ navHint }) => {
   const [selected, setSelected] = React.useState([]);  // chip filter state (unused — legacy)
   const [incidents, setIncidents] = React.useState([]);
-  const [filters, setFilters] = React.useState({});
+  const [filters, setFilters] = React.useState(() => {
+    if (!navHint) return {};
+    const f = {};
+    if (navHint.type)     f.type = navHint.type;
+    if (navHint.status)   f.status = navHint.status;
+    if (navHint.severity) f.severity = navHint.severity;
+    return f;
+  });
   const [sortKey, setSortKey] = React.useState('newest');
+  React.useEffect(() => {
+    if (!navHint) return;
+    const f = {};
+    if (navHint.type)     f.type = navHint.type;
+    if (navHint.status)   f.status = navHint.status;
+    if (navHint.severity) f.severity = navHint.severity;
+    if (Object.keys(f).length) setFilters(f);
+  }, [navHint?.at]);
   const [loading, setLoading] = React.useState(true);
   const [refreshKey, setRefreshKey] = React.useState(0);
   const [selectedIds, setSelectedIds] = React.useState([]);   // bulk-select inc_id list
@@ -4285,13 +4308,16 @@ const tvSortChallans = (rows, sortKey) => {
   }
 };
 
-const TrafficChallans = () => {
+const TrafficChallans = ({ navHint }) => {
   const [challans, setChallans] = React.useState([]);
   const [kpis, setKpis] = React.useState({ issued_30d: 0, total_collected: 0, collection_rate: 0, disputed_pct: 0 });
   const [openChallan, setOpenChallan] = React.useState(null);
   const [refreshKey, setRefreshKey] = React.useState(0);
-  const [statusFilter, setStatusFilter] = React.useState('');
+  const [statusFilter, setStatusFilter] = React.useState(navHint?.status || '');
   const [sortKey, setSortKey] = React.useState('newest');
+  React.useEffect(() => {
+    if (navHint && typeof navHint.status === 'string') setStatusFilter(navHint.status);
+  }, [navHint?.at]);
 
   React.useEffect(() => {
     const params = statusFilter ? { status: statusFilter } : {};
@@ -4504,15 +4530,18 @@ const tvSortOffenders = (rows, sortKey) => {
   }
 };
 
-const TrafficOffenders = () => {
+const TrafficOffenders = ({ navHint }) => {
   const [offenders, setOffenders] = React.useState([]);
   const [loading, setLoading] = React.useState(true);
-  const [openPlate, setOpenPlate] = React.useState(null);
+  const [openPlate, setOpenPlate] = React.useState(navHint?.plate || null);
   const [notifyBusy, setNotifyBusy] = React.useState('');
   const [toast, setToast] = React.useState('');
   const [days, setDays] = React.useState(90);
   const [limit, setLimit] = React.useState(10);
   const [sortKey, setSortKey] = React.useState('rank');
+  React.useEffect(() => {
+    if (navHint?.plate) setOpenPlate(navHint.plate);
+  }, [navHint?.at]);
 
   const load = React.useCallback(() => {
     apiFetch('/api/traffic-violations/offenders/top', { ...TRAFFIC_AUTH, params: { days, limit } })
@@ -4634,49 +4663,421 @@ const TrafficOffenders = () => {
   );
 };
 
-const TrafficAnalytics = () => {
-  const [summary, setSummary] = React.useState({ detections_24h: 0, avg_confidence: 0, false_positive_pct: 0, cam_uptime_pct: 0 });
+// ====================================================================
+// Phase 6 — Comprehensive Analytics Board
+// One-shot fetch of /analytics/full powers the entire tab:
+//   - 8-tile KPI strip   (detections / FP / uptime / revenue ...)
+//   - Heatmap            (7×24, real data, sequential cyan scale)
+//   - Donut chart        (violation type breakdown, click → Incidents filter)
+//   - Hotspot bar list   (top cams by incident count, click → Live focus)
+//   - Trend line/bars    (per-day incidents + revenue)
+//   - Status funnel      (Detected → Pending → Approved → Challan → Paid)
+//   - Mini top-offenders (cross-link to Offenders tab)
+//   - Recent audit feed  (live audit trail across modules)
+// Period selector: 24h / 7d / 30d / 90d
+// Exports: CSV / JSON / printable HTML report
+// ====================================================================
+const TV_DONUT_COLORS = ['var(--cyan)','var(--gold)','var(--red)','var(--green)','#a78bfa','#ec4899','#fb923c','#22d3ee','#facc15','#34d399','#f472b6','#60a5fa'];
 
+const TVDonut = ({ items, total, onSlice }) => {
+  // svg pie with cumulative offset, sized 220x220
+  const R = 90, CX = 110, CY = 110;
+  let cum = 0;
+  const arcs = items.map((it, i) => {
+    const frac = total ? it.count / total : 0;
+    const a0 = cum * 2 * Math.PI;
+    const a1 = (cum + frac) * 2 * Math.PI;
+    cum += frac;
+    const x0 = CX + R * Math.sin(a0), y0 = CY - R * Math.cos(a0);
+    const x1 = CX + R * Math.sin(a1), y1 = CY - R * Math.cos(a1);
+    const large = (a1 - a0) > Math.PI ? 1 : 0;
+    const path = frac >= 1
+      ? `M ${CX} ${CY - R} A ${R} ${R} 0 1 1 ${CX - 0.01} ${CY - R} Z`
+      : `M ${CX} ${CY} L ${x0} ${y0} A ${R} ${R} 0 ${large} 1 ${x1} ${y1} Z`;
+    return { ...it, path, color: TV_DONUT_COLORS[i % TV_DONUT_COLORS.length] };
+  });
+  if (!total) {
+    return (
+      <div style={{ padding: 30, textAlign: 'center', opacity: 0.4, fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+        No incidents yet in this window.
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '220px 1fr', gap: 16, alignItems: 'center' }}>
+      <svg viewBox="0 0 220 220" style={{ width: 220, height: 220 }}>
+        {arcs.map(a => (
+          <path
+            key={a.type}
+            d={a.path}
+            fill={a.color}
+            stroke="#000"
+            strokeWidth="2"
+            style={{ cursor: onSlice ? 'pointer' : 'default' }}
+            onClick={onSlice ? () => onSlice(a) : undefined}
+          >
+            <title>{a.label} · {a.count} ({a.pct}%)</title>
+          </path>
+        ))}
+        <circle cx={CX} cy={CY} r="34" fill="#fff" stroke="#000" strokeWidth="2" />
+        <text x={CX} y={CY - 2} textAnchor="middle" fontSize="18" fontWeight="800" fill="#000">{total}</text>
+        <text x={CX} y={CY + 14} textAnchor="middle" fontSize="9" fill="#666" fontFamily="monospace">INCIDENTS</text>
+      </svg>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+        {arcs.map(a => (
+          <div
+            key={a.type}
+            onClick={onSlice ? () => onSlice(a) : undefined}
+            style={{ display: 'grid', gridTemplateColumns: '12px 1fr auto auto', gap: 8, alignItems: 'center', cursor: onSlice ? 'pointer' : 'default', padding: '2px 4px' }}
+            title={`Click to filter Incidents by ${a.label}`}
+          >
+            <span style={{ width: 12, height: 12, background: a.color, border: '1px solid #000' }}></span>
+            <span>{a.label}</span>
+            <span style={{ opacity: 0.6 }}>{a.count}</span>
+            <span style={{ minWidth: 40, textAlign: 'right' }}>{a.pct}%</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const TVBarList = ({ items, label, valueKey = 'count', onClick, accent = 'var(--cyan)' }) => {
+  const max = items.reduce((m, x) => Math.max(m, x[valueKey] || 0), 0) || 1;
+  if (!items.length) {
+    return <div style={{ padding: 30, textAlign: 'center', opacity: 0.4, fontFamily: 'var(--font-mono)', fontSize: 11 }}>No data yet.</div>;
+  }
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: 4 }}>
+      {items.map((it, i) => {
+        const pct = ((it[valueKey] || 0) / max) * 100;
+        return (
+          <div
+            key={(it.cam_id || it.label || i) + '-' + i}
+            onClick={onClick ? () => onClick(it) : undefined}
+            style={{ display: 'grid', gridTemplateColumns: '80px 1fr auto', gap: 8, alignItems: 'center', cursor: onClick ? 'pointer' : 'default' }}
+          >
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, opacity: 0.8 }}>{it.cam_id || it.label}</span>
+            <div style={{ background: '#eee', height: 14, border: '2px solid #000', position: 'relative' }}>
+              <div style={{ width: `${pct}%`, height: '100%', background: accent }}></div>
+              <span style={{ position: 'absolute', left: 6, top: 0, fontSize: 9, lineHeight: '14px', fontFamily: 'var(--font-mono)', color: '#000', mixBlendMode: 'difference', filter: 'invert(1)' }}>{it.name || ''}</span>
+            </div>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 700, minWidth: 32, textAlign: 'right' }}>{it[valueKey] || 0}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+const TVFunnel = ({ stages, onStage }) => {
+  const max = stages.reduce((m, s) => Math.max(m, s.count || 0), 0) || 1;
+  const colorMap = { cyan: 'var(--cyan)', gold: 'var(--gold)', red: 'var(--red)', green: 'var(--green)' };
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: 4 }}>
+      {stages.map((s, i) => {
+        const w = ((s.count || 0) / max) * 100;
+        return (
+          <div
+            key={s.stage}
+            onClick={onStage ? () => onStage(s) : undefined}
+            style={{ display: 'grid', gridTemplateColumns: '140px 1fr auto', gap: 10, alignItems: 'center', cursor: onStage ? 'pointer' : 'default' }}
+          >
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 700 }}>{s.stage}</span>
+            <div style={{ background: '#eee', height: 22, border: '2px solid #000' }}>
+              <div style={{ width: `${Math.max(2, w)}%`, height: '100%', background: colorMap[s.color] || 'var(--cyan)' }}></div>
+            </div>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 800, minWidth: 48, textAlign: 'right' }}>{s.count}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+const TVTrend = ({ trend, metric = 'incidents' }) => {
+  // bar chart, height 120, one bar per day
+  if (!trend || !trend.length) {
+    return <div style={{ padding: 30, textAlign: 'center', opacity: 0.4, fontFamily: 'var(--font-mono)', fontSize: 11 }}>No trend data.</div>;
+  }
+  const max = trend.reduce((m, d) => Math.max(m, d[metric] || 0), 0) || 1;
+  const barW = 100 / trend.length;
+  return (
+    <div style={{ padding: 8 }}>
+      <svg viewBox="0 0 100 60" preserveAspectRatio="none" style={{ width: '100%', height: 140, background: '#fafafa', border: '2px solid #000' }}>
+        {trend.map((d, i) => {
+          const h = ((d[metric] || 0) / max) * 56;
+          return (
+            <g key={d.date}>
+              <rect
+                x={i * barW + barW * 0.1}
+                y={60 - h - 2}
+                width={barW * 0.8}
+                height={Math.max(0.3, h)}
+                fill="var(--cyan)"
+                stroke="#000"
+                strokeWidth="0.15"
+              >
+                <title>{d.date}: {d[metric]}</title>
+              </rect>
+            </g>
+          );
+        })}
+      </svg>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: 'var(--font-mono)', fontSize: 9, opacity: 0.55, marginTop: 4 }}>
+        <span>{trend[0]?.date}</span>
+        <span>max {max}</span>
+        <span>{trend[trend.length - 1]?.date}</span>
+      </div>
+    </div>
+  );
+};
+
+const TVHeatmap = ({ heatmap }) => {
+  const max = heatmap?.max || 0;
+  if (!heatmap || !max) {
+    return <div style={{ padding: 30, textAlign: 'center', opacity: 0.4, fontFamily: 'var(--font-mono)', fontSize: 11 }}>No data — heatmap fills as the live pipeline accumulates detections.</div>;
+  }
+  const cell = (v) => {
+    const intensity = v / max;
+    return `rgba(0, 230, 255, ${0.05 + intensity * 0.95})`;
+  };
+  return (
+    <div style={{ padding: 8 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '32px repeat(24, 1fr)', gap: 1, fontFamily: 'var(--font-mono)', fontSize: 9 }}>
+        <div></div>
+        {heatmap.cols.map(h => <div key={h} style={{ textAlign: 'center', opacity: 0.55 }}>{h}</div>)}
+        {heatmap.rows.map((day, ri) => (
+          <React.Fragment key={day}>
+            <div style={{ alignSelf: 'center', opacity: 0.55, fontWeight: 700 }}>{day}</div>
+            {heatmap.data[ri].map((v, ci) => (
+              <div key={ci} title={`${day} ${ci}:00 — ${v} incidents`}
+                style={{ aspectRatio: '1/1', background: v ? cell(v) : '#f4f4f4', border: '1px solid #ddd', display: 'flex', alignItems: 'center', justifyContent: 'center', color: v / max > 0.5 ? '#000' : '#555', fontSize: 8 }}>
+                {v || ''}
+              </div>
+            ))}
+          </React.Fragment>
+        ))}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, fontFamily: 'var(--font-mono)', fontSize: 9, opacity: 0.6 }}>
+        <span>0</span>
+        <div style={{ flex: 1, height: 8, background: 'linear-gradient(90deg, rgba(0,230,255,0.05), rgba(0,230,255,1))', border: '1px solid #000' }}></div>
+        <span>{max}</span>
+        <span style={{ marginLeft: 'auto' }}>HOUR OF DAY × WEEKDAY</span>
+      </div>
+    </div>
+  );
+};
+
+const TrafficAnalytics = ({ onNavigate }) => {
+  const [data, setData] = React.useState(null);
+  const [days, setDays] = React.useState(30);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState(null);
+  const [lastFetch, setLastFetch] = React.useState(null);
+
+  const load = React.useCallback(() => {
+    setLoading(true); setError(null);
+    apiFetch('/api/traffic-violations/analytics/full', { ...TRAFFIC_AUTH, params: { days } })
+      .then(d => { setData(d); setLastFetch(new Date()); setLoading(false); })
+      .catch(e => { setError(e?.message || 'fetch failed'); setLoading(false); });
+  }, [days]);
+  React.useEffect(load, [load]);
+
+  // Auto-refresh every 60s (keeps cross-module reflection live)
   React.useEffect(() => {
-    apiFetch('/api/traffic-violations/analytics/summary', TRAFFIC_AUTH)
-      .then(setSummary)
-      .catch(() => {});
-  }, []);
+    const t = setInterval(load, 60000);
+    return () => clearInterval(t);
+  }, [load]);
 
-  // Heatmap/donut/hotspot/trend become real in Phase 6. For Phase 1 we render
-  // zeroed-out shells so the layout stays intact and nothing fakes the data.
-  const emptyHeatmap = Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => 0));
+  const exportUrl = (kind) => `${API_BASE || ''}/api/traffic-violations/analytics/${kind}?days=${days}`;
+
+  if (loading && !data) {
+    return <div className="tab-pane"><div style={{ padding: 40, textAlign: 'center', opacity: 0.5, fontFamily: 'var(--font-mono)' }}>Loading analytics…</div></div>;
+  }
+  if (error && !data) {
+    return <div className="tab-pane"><div style={{ padding: 40, textAlign: 'center', color: 'var(--red)', fontFamily: 'var(--font-mono)' }}>Analytics fetch failed: {error}</div></div>;
+  }
+  if (!data) return null;
+
+  const k = data.kpis;
+  const fmtMoney = (n) => `₹${(n || 0).toLocaleString()}`;
+  const lastFetchStr = lastFetch ? `Updated ${lastFetch.toLocaleTimeString()}` : '';
+
+  // Cross-module navigation helpers
+  const goToIncidentsByType = (slice) => {
+    if (onNavigate) onNavigate('incidents', { type: slice.label });
+  };
+  const goToFunnelStage = (s) => {
+    if (!onNavigate) return;
+    const m = { 'Pending Review': ['incidents', { status: 'pending' }],
+                'Approved':       ['incidents', { status: 'approved' }],
+                'Rejected':       ['incidents', { status: 'rejected' }],
+                'Challans Issued':['challans',  { status: '' }],
+                'Paid':           ['challans',  { status: 'PAID' }],
+                'Disputed':       ['challans',  { status: 'DISPUTED' }],
+                'Unpaid':         ['challans',  { status: 'UNPAID' }] }[s.stage];
+    if (m) onNavigate(m[0], m[1]);
+  };
 
   return (
     <div className="tab-pane">
-      <div className="kpi-grid-4">
-        <KPICard label="DETECTIONS (24H)" value={summary.detections_24h.toLocaleString()} color="var(--cyan)" />
-        <KPICard label="AVG CONFIDENCE"   value={`${summary.avg_confidence}%`}            color="var(--green)" />
-        <KPICard label="FALSE POSITIVES"  value={`${summary.false_positive_pct}%`}        color="var(--red)" />
-        <KPICard label="CAM UPTIME"       value={`${summary.cam_uptime_pct}%`}            color="var(--gold)" />
+      {/* Header strip: period selector + export buttons + freshness */}
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 700, letterSpacing: 1 }}>WINDOW:</span>
+        <SegmentedControl options={['1d', '7d', '30d', '90d', '180d', '365d']}
+          value={days === 1 ? '1d' : days === 7 ? '7d' : days === 30 ? '30d' : days === 90 ? '90d' : days === 180 ? '180d' : '365d'}
+          onChange={(v) => setDays(parseInt(v, 10))}
+          accent="var(--cyan)" />
+        <button className="btn-brutal" onClick={load} disabled={loading} style={{ fontSize: 10, padding: '4px 10px' }}>
+          {loading ? '⟳ REFRESHING' : '⟳ REFRESH'}
+        </button>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, opacity: 0.55 }}>{lastFetchStr}</span>
+          <a href={exportUrl('export.csv')} className="btn-brutal" style={{ fontSize: 10, padding: '4px 10px', textDecoration: 'none', color: '#000' }} download>⤓ CSV</a>
+          <a href={exportUrl('export.json')} className="btn-brutal" style={{ fontSize: 10, padding: '4px 10px', textDecoration: 'none', color: '#000' }} download>⤓ JSON</a>
+          <a href={exportUrl('report.html')} target="_blank" rel="noopener noreferrer" className="btn-brutal" style={{ fontSize: 10, padding: '4px 10px', textDecoration: 'none', color: '#000', background: 'var(--gold)' }}>⤓ PDF REPORT</a>
+        </div>
       </div>
+
+      {/* 8-tile KPI strip */}
+      <div className="kpi-grid-4" style={{ gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+        <KPICard label="DETECTIONS (24H)" value={k.detections_24h.toLocaleString()}   color="var(--cyan)"  />
+        <KPICard label="DETECTIONS (7D)"  value={k.detections_7d.toLocaleString()}    color="var(--cyan)"  />
+        <KPICard label={`DETECTIONS (${days}D)`} value={k.detections_window.toLocaleString()} color="var(--cyan)" />
+        <KPICard label="AVG CONFIDENCE"   value={`${k.avg_confidence}%`}              color="var(--green)" />
+        <KPICard label="FALSE POSITIVES"  value={`${k.false_positive_pct}%`}          color="var(--red)"   />
+        <KPICard label="CAM UPTIME"       value={`${k.cam_uptime_pct}%`}              color="var(--gold)"  />
+        <KPICard label="REVENUE COLLECTED" value={fmtMoney(k.total_revenue)}          color="var(--green)" />
+        <KPICard label="OUTSTANDING"      value={fmtMoney(k.total_outstanding)}        color="var(--red)"   />
+      </div>
+
+      {/* Heatmap + Donut */}
       <div className="widgets-grid mt-20">
-        <Heatmap data={emptyHeatmap} title="VIOLATIONS BY HOUR × DAY" />
+        <div className="widget-card">
+          <div className="widget-title">VIOLATIONS BY HOUR × DAY</div>
+          <TVHeatmap heatmap={data.heatmap} />
+        </div>
         <div className="widget-card">
           <div className="widget-title">VIOLATION BREAKDOWN</div>
-          <div style={{ padding: 40, textAlign: 'center', fontSize: 11, opacity: 0.4, fontFamily: 'var(--font-mono)' }}>
-            Donut populates once detections exist (Phase 6).
+          <div style={{ padding: 14 }}>
+            <TVDonut items={data.type_breakdown} total={k.detections_window} onSlice={goToIncidentsByType} />
           </div>
         </div>
       </div>
+
+      {/* Trend + Hotspots */}
       <div className="widgets-grid mt-20">
         <div className="widget-card">
-          <div className="widget-title">7-DAY TREND</div>
-          <div style={{ padding: 40, textAlign: 'center', fontSize: 11, opacity: 0.4, fontFamily: 'var(--font-mono)' }}>
-            Trend chart fills as daily detections accumulate (Phase 6).
+          <div className="widget-title">{days}-DAY INCIDENT TREND</div>
+          <TVTrend trend={data.trend} metric="incidents" />
+        </div>
+        <div className="widget-card">
+          <div className="widget-title">TOP HOTSPOT CAMERAS</div>
+          <TVBarList
+            items={data.hotspot_cameras}
+            accent="var(--gold)"
+            onClick={(it) => onNavigate && onNavigate('live', { focus: it.cam_id })}
+          />
+        </div>
+      </div>
+
+      {/* Funnel + Severity + Revenue summary */}
+      <div className="widgets-grid mt-20">
+        <div className="widget-card">
+          <div className="widget-title">ENFORCEMENT FUNNEL</div>
+          <TVFunnel stages={data.funnel} onStage={goToFunnelStage} />
+        </div>
+        <div className="widget-card">
+          <div className="widget-title">SEVERITY MIX</div>
+          <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {data.severity_breakdown.map(s => {
+              const max = Math.max(1, ...data.severity_breakdown.map(x => x.count));
+              const pct = (s.count / max) * 100;
+              const c = { CRITICAL: 'var(--red)', HIGH: '#fb923c', MEDIUM: 'var(--gold)', LOW: 'var(--cyan)' }[s.level] || 'var(--cyan)';
+              return (
+                <div key={s.level} style={{ display: 'grid', gridTemplateColumns: '90px 1fr 50px', gap: 10, alignItems: 'center' }}>
+                  <strong style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{s.level}</strong>
+                  <div style={{ background: '#eee', height: 18, border: '2px solid #000' }}>
+                    <div style={{ width: `${Math.max(2, pct)}%`, height: '100%', background: c }}></div>
+                  </div>
+                  <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, textAlign: 'right' }}>{s.count}</span>
+                </div>
+              );
+            })}
+            <div style={{ marginTop: 10, paddingTop: 10, borderTop: '2px solid #000', fontFamily: 'var(--font-mono)', fontSize: 11, lineHeight: 1.7 }}>
+              <div>Total challans issued: <strong>{k.challans_issued}</strong></div>
+              <div>Collection rate: <strong>{k.collection_rate}%</strong></div>
+              <div>Disputed pool: <strong>{fmtMoney(k.total_disputed)}</strong></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Top Offenders mini + Recent Audit */}
+      <div className="widgets-grid mt-20">
+        <div className="widget-card">
+          <div className="widget-title">TOP REPEAT OFFENDERS · {days}D</div>
+          <div style={{ padding: 8 }}>
+            {!data.top_offenders.length ? (
+              <div style={{ padding: 30, textAlign: 'center', opacity: 0.4, fontFamily: 'var(--font-mono)', fontSize: 11 }}>No repeat offenders yet.</div>
+            ) : (
+              data.top_offenders.map(o => (
+                <div key={o.rank}
+                  onClick={() => onNavigate && onNavigate('offenders', { plate: o.plate })}
+                  style={{ display: 'grid', gridTemplateColumns: '32px 1fr auto auto', gap: 10, alignItems: 'center', padding: '6px 4px', borderBottom: '1px dashed #ccc', cursor: 'pointer' }}>
+                  <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 800 }}>#{o.rank}</span>
+                  <div>
+                    <div style={{ fontFamily: 'var(--font-mono)', fontWeight: 700 }}>{o.plate}</div>
+                    <div style={{ fontSize: 10, opacity: 0.55 }}>{o.driver}</div>
+                  </div>
+                  <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                    <div><strong>{o.offenses}</strong> off.</div>
+                    <div style={{ opacity: 0.6 }}>{fmtMoney(o.total)}</div>
+                  </div>
+                  <SeverityBadge level={o.risk} />
+                </div>
+              ))
+            )}
           </div>
         </div>
         <div className="widget-card">
-          <div className="widget-title">TOP HOTSPOT ZONES</div>
-          <div style={{ padding: 40, textAlign: 'center', fontSize: 11, opacity: 0.4, fontFamily: 'var(--font-mono)' }}>
-            Hotspot ranking by camera location (Phase 6).
+          <div className="widget-title">RECENT ACTIVITY · AUDIT TRAIL</div>
+          <div style={{ padding: 8, maxHeight: 280, overflowY: 'auto', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+            {!data.recent_audit.length ? (
+              <div style={{ padding: 30, textAlign: 'center', opacity: 0.4 }}>No activity yet.</div>
+            ) : (
+              data.recent_audit.map((a, i) => {
+                const at = (a.created_at || '').replace('T', ' ').slice(0, 19);
+                const actionMap = {
+                  approved: ['✓', 'var(--green)'],
+                  rejected: ['✕', 'var(--red)'],
+                  challan_issued: ['€', 'var(--gold)'],
+                  telegram_sent: ['✈', 'var(--cyan)'],
+                  telegram_failed: ['⚠', 'var(--red)'],
+                  marked_paid: ['✓', 'var(--green)'],
+                  marked_disputed: ['⚠', 'var(--gold)'],
+                  offender_notified: ['◉', 'var(--gold)'],
+                }[a.action] || ['•', 'var(--cyan)'];
+                return (
+                  <div key={i} style={{ display: 'grid', gridTemplateColumns: '24px 1fr auto', gap: 8, padding: '5px 2px', borderBottom: '1px dashed #ddd' }}>
+                    <span style={{ color: actionMap[1], fontWeight: 800 }}>{actionMap[0]}</span>
+                    <span>
+                      <strong>{a.action.replace(/_/g, ' ')}</strong> on <em>{a.entity_id}</em>
+                      <span style={{ opacity: 0.55 }}> · by {a.actor}</span>
+                    </span>
+                    <span style={{ opacity: 0.5, fontSize: 10 }}>{at}</span>
+                  </div>
+                );
+              })
+            )}
           </div>
         </div>
+      </div>
+
+      {/* Footer note */}
+      <div style={{ marginTop: 18, fontFamily: 'var(--font-mono)', fontSize: 10, opacity: 0.55, textAlign: 'center' }}>
+        Analytics auto-refresh every 60s · {data.recent_audit?.length || 0} audit events · last fetched {lastFetchStr}
       </div>
     </div>
   );
