@@ -63,6 +63,21 @@ async def ack_alert(alert_id: str, body: Optional[schemas.ActionRequest] = None)
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/anomaly/alerts/{alert_id}/resolve", tags=["anomaly-monitoring"])
+async def resolve_alert(alert_id: str, body: Optional[schemas.ActionRequest] = None):
+    try:
+        return service.resolve_alert(
+            alert_id,
+            actor=(body.actor if body else "rsd") or "rsd",
+            note=(body.note if body else None),
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=404, detail=str(ve))
+    except Exception as e:
+        log.exception("resolve failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/anomaly/alerts/{alert_id}/work-order", response_model=schemas.WorkOrder, tags=["anomaly-monitoring"])
 async def create_work_order(alert_id: str, body: Optional[schemas.ActionRequest] = None):
     try:

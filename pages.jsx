@@ -5319,24 +5319,44 @@ const fmtNum = (n) => (typeof n === 'number' ? n.toLocaleString('en-IN') : (n ??
 // ====================================================================
 // Anomaly detail modal — full impact brief + actions + Telegram dispatch
 // ====================================================================
+const ANM_STATUS_META = {
+  open:       { label: 'OPEN',          variant: 'red' },
+  acked:      { label: 'ACKNOWLEDGED',  variant: 'gold' },
+  work_order: { label: 'WORK ORDER',    variant: 'gold' },
+  resolved:   { label: 'RESOLVED',      variant: 'green' },
+};
+
 const AnomalyDetailModal = ({ alert, onClose, onChanged }) => {
   const [busy, setBusy] = React.useState('');
   const [toast, setToast] = React.useState('');
-  if (!alert) return null;
-  const imp = alert.impact || {};
+  // Local optimistic copy so the modal reacts instantly to actions
+  // (the prop is a snapshot from the list — it won't mutate on its own).
+  const [cur, setCur] = React.useState(alert);
+  React.useEffect(() => { setCur(alert); }, [alert && alert.id]);
+  if (!alert || !cur) return null;
+  const imp = cur.impact || {};
   const flash = (m) => { setToast(m); setTimeout(() => setToast(''), 4500); };
+  const st = ANM_STATUS_META[cur.status] || ANM_STATUS_META.open;
 
   const act = async (kind) => {
     setBusy(kind);
     try {
       if (kind === 'ack') {
-        await apiFetch(`/api/anomaly/alerts/${alert.id}/ack`, { ...ANOMALY_AUTH, json: { actor: 'rsd' } });
-        flash(`✓ ${alert.id} acknowledged`);
+        await apiFetch(`/api/anomaly/alerts/${cur.id}/ack`, { ...ANOMALY_AUTH, json: { actor: 'rsd' } });
+        setCur(c => ({ ...c, acked: true, status: 'acked' }));
+        flash(`✓ ${cur.id} acknowledged`);
+      } else if (kind === 'resolve') {
+        await apiFetch(`/api/anomaly/alerts/${cur.id}/resolve`, { ...ANOMALY_AUTH, json: { actor: 'rsd' } });
+        setCur(c => ({ ...c, acked: true, status: 'resolved' }));
+        flash(`✓ ${cur.id} resolved — cleared from the active board`);
+        setTimeout(() => { onChanged && onChanged(); onClose && onClose(); }, 1100);
+        return;
       } else if (kind === 'wo') {
-        const r = await apiFetch(`/api/anomaly/alerts/${alert.id}/work-order`, { ...ANOMALY_AUTH, json: { actor: 'rsd' } });
-        flash(`✓ Work order ${r.id} created · ${r.department}`);
+        const r = await apiFetch(`/api/anomaly/alerts/${cur.id}/work-order`, { ...ANOMALY_AUTH, json: { actor: 'rsd' } });
+        setCur(c => ({ ...c, acked: true, status: 'work_order' }));
+        flash(`✓ Work order ${r.id} created · ${r.department} · SLA set by severity`);
       } else if (kind === 'tg') {
-        const r = await apiFetch(`/api/anomaly/alerts/${alert.id}/notify`, { ...ANOMALY_AUTH, json: { actor: 'rsd' } });
+        const r = await apiFetch(`/api/anomaly/alerts/${cur.id}/notify`, { ...ANOMALY_AUTH, json: { actor: 'rsd' } });
         flash(r.notified ? `✈ Telegram sent · msg #${r.telegram_message_id}` : `⚠ Telegram: ${r.error || 'failed'}`);
       }
       onChanged && onChanged();
@@ -5361,7 +5381,8 @@ const AnomalyDetailModal = ({ alert, onClose, onChanged }) => {
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <SeverityBadge level={alert.severity} />
+            <Badge variant={st.variant}>{st.label}</Badge>
+            <SeverityBadge level={cur.severity} />
             <button className="btn-brutal" onClick={onClose} style={{ fontSize: 11, padding: '4px 10px' }}>✕ CLOSE</button>
           </div>
         </div>
@@ -5414,19 +5435,31 @@ const AnomalyDetailModal = ({ alert, onClose, onChanged }) => {
           </div>
         </div>
 
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <button className="btn-brutal" disabled={busy === 'ack' || alert.acked} onClick={() => act('ack')}
-            style={{ fontSize: 12, padding: '8px 16px', background: alert.acked ? '#ddd' : 'var(--gold)', color: '#000' }}>
-            {alert.acked ? '✓ ACKNOWLEDGED' : busy === 'ack' ? 'ACKING…' : '✓ ACKNOWLEDGE'}
-          </button>
-          <button className="btn-brutal" disabled={busy === 'wo'} onClick={() => act('wo')}
-            style={{ fontSize: 12, padding: '8px 16px', background: 'var(--red)', color: '#fff' }}>
-            {busy === 'wo' ? 'CREATING…' : '🛠 CREATE WORK ORDER'}
-          </button>
-          <button className="btn-brutal" disabled={busy === 'tg'} onClick={() => act('tg')}
-            style={{ fontSize: 12, padding: '8px 16px', background: 'var(--cyan)', color: '#000' }}>
-            {busy === 'tg' ? 'SENDING…' : '✈ SEND TELEGRAM ALERT'}
-          </button>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          {cur.status === 'resolved' ? (
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 700, color: 'var(--green)', padding: '8px 4px' }}>
+              ✓ This alert is RESOLVED — removed from the active board, map zone & analytics.
+            </div>
+          ) : (
+            <>
+              <button className="btn-brutal" disabled={busy === 'ack' || cur.acked} onClick={() => act('ack')}
+                style={{ fontSize: 12, padding: '8px 16px', background: cur.acked ? '#cfcfcf' : 'var(--gold)', color: '#000' }}>
+                {cur.acked ? '✓ ACKNOWLEDGED' : busy === 'ack' ? 'ACKING…' : '✓ ACKNOWLEDGE'}
+              </button>
+              <button className="btn-brutal" disabled={busy === 'wo'} onClick={() => act('wo')}
+                style={{ fontSize: 12, padding: '8px 16px', background: 'var(--red)', color: '#fff' }}>
+                {busy === 'wo' ? 'CREATING…' : (cur.status === 'work_order' ? '🛠 WORK ORDER RAISED' : '🛠 CREATE WORK ORDER')}
+              </button>
+              <button className="btn-brutal" disabled={busy === 'tg'} onClick={() => act('tg')}
+                style={{ fontSize: 12, padding: '8px 16px', background: 'var(--cyan)', color: '#000' }}>
+                {busy === 'tg' ? 'SENDING…' : '✈ SEND TELEGRAM ALERT'}
+              </button>
+              <button className="btn-brutal" disabled={busy === 'resolve'} onClick={() => act('resolve')}
+                style={{ fontSize: 12, padding: '8px 16px', background: 'var(--green)', color: '#000', marginLeft: 'auto' }}>
+                {busy === 'resolve' ? 'RESOLVING…' : '✓✓ RESOLVE & CLEAR'}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -5436,7 +5469,7 @@ const AnomalyDetailModal = ({ alert, onClose, onChanged }) => {
 // ====================================================================
 // ALERTS tab
 // ====================================================================
-const AnomalyAlerts = ({ navHint }) => {
+const AnomalyAlerts = ({ navHint, refreshKey }) => {
   const [data, setData] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
   const [sev, setSev] = React.useState('');
@@ -5449,10 +5482,15 @@ const AnomalyAlerts = ({ navHint }) => {
     if (sev) params.severity = sev;
     if (cat) params.category = cat;
     apiFetch('/api/anomaly/alerts', { ...ANOMALY_AUTH, params })
-      .then(d => { setData(d); setLoading(false); })
+      .then(d => {
+        setData(d);
+        setLoading(false);
+        // keep an open modal's alert in sync after a refetch
+        setOpen(o => (o ? (d.alerts || []).find(a => a.id === o.id) || o : o));
+      })
       .catch(() => { setData(null); setLoading(false); });
   }, [sev, cat]);
-  React.useEffect(load, [load, tick]);
+  React.useEffect(load, [load, tick, refreshKey]);
   React.useEffect(() => { const t = setInterval(() => setTick(x => x + 1), 60000); return () => clearInterval(t); }, []);
 
   const counts = data?.counts || {};
@@ -5536,11 +5574,11 @@ const AnomalyAlerts = ({ navHint }) => {
 // ====================================================================
 // SENSOR FLEET tab
 // ====================================================================
-const AnomalySensors = () => {
+const AnomalySensors = ({ refreshKey }) => {
   const [data, setData] = React.useState(null);
   React.useEffect(() => {
     apiFetch('/api/anomaly/sensors', ANOMALY_AUTH).then(setData).catch(() => setData(null));
-  }, []);
+  }, [refreshKey]);
   const s = data || { total: 0, online: 0, warning: 0, offline: 0, sensors: [] };
   return (
     <div className="tab-pane">
@@ -5582,7 +5620,7 @@ const AnomalySensors = () => {
 const ANOMALY_TILE_URL = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
 const ANOMALY_TILE_ATTR = '© OpenStreetMap';
 
-const AnomalyCityMap = () => {
+const AnomalyCityMap = ({ refreshKey }) => {
   const mapRef = React.useRef(null);
   const mapObj = React.useRef(null);
   const layerRef = React.useRef(null);
@@ -5593,7 +5631,7 @@ const AnomalyCityMap = () => {
 
   React.useEffect(() => {
     apiFetch('/api/anomaly/map', ANOMALY_AUTH).then(d => setZones(d.zones || [])).catch(() => setZones([]));
-  }, []);
+  }, [refreshKey]);
 
   React.useEffect(() => {
     if (!window.L || !mapRef.current || mapObj.current) return;
@@ -5705,12 +5743,12 @@ const AnomalyCityMap = () => {
 // ====================================================================
 // WORK ORDERS tab
 // ====================================================================
-const AnomalyWorkOrders = () => {
+const AnomalyWorkOrders = ({ refreshKey }) => {
   const [data, setData] = React.useState(null);
   const [tick, setTick] = React.useState(0);
   React.useEffect(() => {
     apiFetch('/api/anomaly/work-orders', ANOMALY_AUTH).then(setData).catch(() => setData(null));
-  }, [tick]);
+  }, [tick, refreshKey]);
   React.useEffect(() => { const t = setInterval(() => setTick(x => x + 1), 30000); return () => clearInterval(t); }, []);
   const orders = data?.orders || [];
   return (
@@ -5746,11 +5784,11 @@ const AnomalyWorkOrders = () => {
 // ====================================================================
 // ANALYTICS tab
 // ====================================================================
-const AnomalyAnalytics = () => {
+const AnomalyAnalytics = ({ refreshKey }) => {
   const [a, setA] = React.useState(null);
   React.useEffect(() => {
     apiFetch('/api/anomaly/analytics', ANOMALY_AUTH).then(setA).catch(() => setA(null));
-  }, []);
+  }, [refreshKey]);
   if (!a) return <div className="tab-pane"><div style={{ padding: 40, textAlign: 'center', opacity: 0.5, fontFamily: 'var(--font-mono)' }}>Loading analytics…</div></div>;
   const k = a.kpis || {};
   const maxCat = Math.max(1, ...(a.by_category || []).map(c => c.count));
@@ -5829,18 +5867,31 @@ const AnomalyMonitoring = ({ onBack }) => {
   const [tab, setTab] = React.useState('alerts');
   const [hdr, setHdr] = React.useState({ total: 0, critical: 0, stations: 16 });
   const [refreshing, setRefreshing] = React.useState(false);
+  const [scanKey, setScanKey] = React.useState(0);   // bumped after a scan → all tabs refetch
+  const [scanToast, setScanToast] = React.useState('');
 
-  React.useEffect(() => {
+  const loadHdr = React.useCallback(() => {
     apiFetch('/api/anomaly/analytics', ANOMALY_AUTH)
       .then(d => setHdr({ total: d.kpis.active_alerts, critical: d.kpis.critical, stations: d.kpis.stations_monitored }))
       .catch(() => {});
-  }, [tab]);
+  }, []);
+  React.useEffect(() => { loadHdr(); }, [tab, scanKey, loadHdr]);
 
   const fullScan = async () => {
     setRefreshing(true);
-    try { await apiFetch('/api/anomaly/refresh', { ...ANOMALY_AUTH, json: {} }); }
-    catch (e) { /* noop */ }
-    finally { setRefreshing(false); setTab(t => t); }
+    setScanToast('');
+    try {
+      const r = await apiFetch('/api/anomaly/refresh', { ...ANOMALY_AUTH, json: {} });
+      const when = r.generated_at ? new Date(r.generated_at).toLocaleTimeString() : new Date().toLocaleTimeString();
+      setScanToast(`✓ Scan complete · ${r.alerts ?? '—'} active anomalies · re-polled all live feeds at ${when}`);
+      setScanKey(k => k + 1);          // force every mounted tab to refetch
+      loadHdr();
+    } catch (e) {
+      setScanToast(`✕ Scan failed: ${e.message || e}`);
+    } finally {
+      setRefreshing(false);
+      setTimeout(() => setScanToast(''), 6000);
+    }
   };
 
   const tabs = [
@@ -5865,12 +5916,21 @@ const AnomalyMonitoring = ({ onBack }) => {
           </button>
         }
       />
+      {scanToast && (
+        <div style={{
+          margin: '0 0 10px', padding: '10px 14px',
+          background: scanToast.startsWith('✓') ? '#0a3d1f' : '#3d0a0a',
+          color: scanToast.startsWith('✓') ? 'var(--green)' : 'var(--red)',
+          border: `2px solid ${scanToast.startsWith('✓') ? 'var(--green)' : 'var(--red)'}`,
+          fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600,
+        }}>{scanToast}</div>
+      )}
       <Tabs tabs={tabs} active={tab} onChange={setTab} accent="var(--red)" />
-      {tab === 'alerts' && <AnomalyAlerts />}
-      {tab === 'sensors' && <AnomalySensors />}
-      {tab === 'map' && <AnomalyCityMap />}
-      {tab === 'workorders' && <AnomalyWorkOrders />}
-      {tab === 'analytics' && <AnomalyAnalytics />}
+      {tab === 'alerts' && <AnomalyAlerts refreshKey={scanKey} />}
+      {tab === 'sensors' && <AnomalySensors refreshKey={scanKey} />}
+      {tab === 'map' && <AnomalyCityMap refreshKey={scanKey} />}
+      {tab === 'workorders' && <AnomalyWorkOrders refreshKey={scanKey} />}
+      {tab === 'analytics' && <AnomalyAnalytics refreshKey={scanKey} />}
     </div>
   );
 };

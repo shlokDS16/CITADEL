@@ -221,16 +221,24 @@ def _alerts_snapshot() -> tuple[list[dict[str, Any]], str]:
 def list_alerts(severity: Optional[str] = None, category: Optional[str] = None,
                 status: Optional[str] = None) -> dict[str, Any]:
     alerts, gen = _alerts_snapshot()
+    # Resolved alerts are off the active board unless explicitly requested.
+    if (status or "").lower() != "resolved":
+        alerts = [a for a in alerts if a["status"] != "resolved"]
     if severity:
         alerts = [a for a in alerts if a["severity"] == severity.upper()]
     if category:
         alerts = [a for a in alerts if a["category"].lower() == category.lower()]
     if status:
         alerts = [a for a in alerts if a["status"] == status.lower()]
-    counts = {"total": len(alerts), "CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "unacked": 0}
+    counts = {"total": len(alerts), "CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0,
+              "unacked": 0, "acked": 0, "resolved": 0}
     for a in alerts:
         counts[a["severity"]] = counts.get(a["severity"], 0) + 1
-        if not a["acked"]:
+        if a["status"] == "resolved":
+            counts["resolved"] += 1
+        elif a["acked"]:
+            counts["acked"] += 1
+        else:
             counts["unacked"] += 1
     return {"total": len(alerts), "counts": counts, "generated_at": gen, "alerts": alerts}
 
@@ -279,6 +287,7 @@ def list_sensors() -> dict[str, Any]:
 
 def map_data() -> dict[str, Any]:
     alerts, gen = _alerts_snapshot()
+    alerts = [a for a in alerts if a["status"] != "resolved"]
     by_station: dict[str, list[dict[str, Any]]] = {}
     for a in alerts:
         by_station.setdefault(a["station_id"], []).append(a)
@@ -316,6 +325,7 @@ def map_data() -> dict[str, Any]:
 
 def analytics_summary(window_hours: int = 24) -> dict[str, Any]:
     alerts, gen = _alerts_snapshot()
+    alerts = [a for a in alerts if a["status"] != "resolved"]
     total = len(alerts)
     sev_rank = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
     by_sev = [{"level": s, "count": sum(1 for a in alerts if a["severity"] == s)} for s in sev_rank]
@@ -369,6 +379,27 @@ def ack_alert(alert_id: str, actor: str = "rsd") -> dict[str, Any]:
     a["status"] = "acked"
     _audit("acknowledged", alert_id, actor, {"category": a["category"], "severity": a["severity"]})
     return {"alert_id": alert_id, "acked": True, "status": "acked"}
+
+
+def resolve_alert(alert_id: str, actor: str = "rsd", note: Optional[str] = None) -> dict[str, Any]:
+    """
+    Close an alert out. Resolved alerts leave the active board — they drop
+    out of the alert list, the severity counts, the map zone colouring and
+    the analytics rollups. State is keyed by the stable fingerprint so the
+    resolution survives the 120 s recompute (until the live reading itself
+    clears, at which point the anomaly stops being generated anyway).
+    """
+    a = get_alert(alert_id)
+    if not a:
+        raise ValueError(f"Alert {alert_id} not found")
+    _ACK_STATE[alert_id] = {"acked": True, "status": "resolved",
+                            "actor": actor, "note": note,
+                            "at": datetime.now(timezone.utc).isoformat()}
+    a["acked"] = True
+    a["status"] = "resolved"
+    _audit("resolved", alert_id, actor,
+           {"category": a["category"], "severity": a["severity"], "note": note})
+    return {"alert_id": alert_id, "acked": True, "status": "resolved"}
 
 
 def create_work_order(alert_id: str, actor: str = "rsd") -> dict[str, Any]:
@@ -426,4 +457,10 @@ def notify_alert(alert_id: str, actor: str = "rsd") -> dict[str, Any]:
 def force_refresh() -> dict[str, Any]:
     _refresh_once()
     alerts, gen = _alerts_snapshot()
-    return {"refreshed": True, "alerts": len(alerts), "generated_at": gen}
+    active = [a for a in alerts if a["status"] != "resolved"]
+    return {
+        "refreshed": True,
+        "alerts": len(active),                 # active board count (matches UI)
+        "total_tracked": len(alerts),          # incl. resolved still pinned
+        "generated_at": gen,
+    }
