@@ -22,6 +22,7 @@ from app.config import settings
 from app.modules.document_intelligence import router as doc_intel_router
 from app.modules.resume import router as resume_router
 from app.modules.traffic_violations import router as traffic_router
+from app.modules.anomaly_monitoring import router as anomaly_router
 
 # ---- logging ----
 logging.basicConfig(
@@ -45,10 +46,22 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("Failed to start background detection: %s", e)
 
+    # Start the Anomaly Monitoring live-feed refresh loop (Module 4).
+    try:
+        from app.modules.anomaly_monitoring.service import start_background_refresh
+        start_background_refresh()
+    except Exception as e:
+        log.warning("Failed to start anomaly refresh: %s", e)
+
     yield
     try:
         from app.modules.traffic_violations.service import stop_background_detection
         stop_background_detection()
+    except Exception:
+        pass
+    try:
+        from app.modules.anomaly_monitoring.service import stop_background_refresh
+        stop_background_refresh()
     except Exception:
         pass
     log.info("CITADEL backend shutting down")
@@ -79,6 +92,7 @@ app.add_middleware(
 app.include_router(doc_intel_router, prefix="/api", tags=["document-intelligence"])
 app.include_router(resume_router,    prefix="/api", tags=["resume-screening"])
 app.include_router(traffic_router,   prefix="/api", tags=["traffic-violations"])
+app.include_router(anomaly_router,   prefix="/api", tags=["anomaly-monitoring"])
 
 
 # ---- root: friendly landing JSON so visiting `/` doesn't 404 ----

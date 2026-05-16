@@ -5309,13 +5309,545 @@ const TrafficSettings = () => {
    GOVERNMENT MODULE 4 — ANOMALY MONITORING
    Tabs: Alerts · Sensors · Map · Work Orders · Analytics
    ====================================================================== */
+const ANOMALY_AUTH = { headers: { 'x-user-role': 'government_official', 'x-user-id': 'rsd' } };
+
+const ANM_SEV_COLOR = { CRITICAL: 'var(--red)', HIGH: 'var(--gold)', MEDIUM: 'var(--cyan)', LOW: 'var(--green)' };
+const ANM_LEVEL_COLOR = { critical: '#ef4444', high: '#f59e0b', medium: '#06b6d4', nominal: '#22c55e' };
+
+const fmtNum = (n) => (typeof n === 'number' ? n.toLocaleString('en-IN') : (n ?? '—'));
+
+// ====================================================================
+// Anomaly detail modal — full impact brief + actions + Telegram dispatch
+// ====================================================================
+const AnomalyDetailModal = ({ alert, onClose, onChanged }) => {
+  const [busy, setBusy] = React.useState('');
+  const [toast, setToast] = React.useState('');
+  if (!alert) return null;
+  const imp = alert.impact || {};
+  const flash = (m) => { setToast(m); setTimeout(() => setToast(''), 4500); };
+
+  const act = async (kind) => {
+    setBusy(kind);
+    try {
+      if (kind === 'ack') {
+        await apiFetch(`/api/anomaly/alerts/${alert.id}/ack`, { ...ANOMALY_AUTH, json: { actor: 'rsd' } });
+        flash(`✓ ${alert.id} acknowledged`);
+      } else if (kind === 'wo') {
+        const r = await apiFetch(`/api/anomaly/alerts/${alert.id}/work-order`, { ...ANOMALY_AUTH, json: { actor: 'rsd' } });
+        flash(`✓ Work order ${r.id} created · ${r.department}`);
+      } else if (kind === 'tg') {
+        const r = await apiFetch(`/api/anomaly/alerts/${alert.id}/notify`, { ...ANOMALY_AUTH, json: { actor: 'rsd' } });
+        flash(r.notified ? `✈ Telegram sent · msg #${r.telegram_message_id}` : `⚠ Telegram: ${r.error || 'failed'}`);
+      }
+      onChanged && onChanged();
+    } catch (e) {
+      flash(`✕ ${e.message || e}`);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  return (
+    <div className="tv-modal-backdrop" onClick={onClose}>
+      <div className="tv-modal tv-modal-pad" style={{ maxWidth: 860 }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 }}>
+          <div>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, opacity: 0.55, letterSpacing: 1 }}>
+              {alert.id} · {alert.source === 'usgs' ? 'USGS' : 'Open-Meteo'} live feed
+            </div>
+            <div style={{ fontSize: 22, fontWeight: 800, marginTop: 4 }}>{alert.title}</div>
+            <div style={{ fontSize: 12, opacity: 0.7, marginTop: 2, fontFamily: 'var(--font-mono)' }}>
+              {alert.category} · {alert.city} · {alert.zone}
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <SeverityBadge level={alert.severity} />
+            <button className="btn-brutal" onClick={onClose} style={{ fontSize: 11, padding: '4px 10px' }}>✕ CLOSE</button>
+          </div>
+        </div>
+
+        {toast && (
+          <div style={{ marginBottom: 12, padding: '8px 12px', background: toast.startsWith('✓') || toast.startsWith('✈') ? '#0a3d1f' : '#3d0a0a',
+            color: toast.startsWith('✓') || toast.startsWith('✈') ? 'var(--green)' : 'var(--red)',
+            border: `2px solid ${toast.startsWith('✓') || toast.startsWith('✈') ? 'var(--green)' : 'var(--red)'}`,
+            fontFamily: 'var(--font-mono)', fontSize: 12 }}>{toast}</div>
+        )}
+
+        {/* Reading + impact KPI grid */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 16 }}>
+          <KPICard label={alert.metric.toUpperCase()} value={`${alert.value} ${alert.unit}`} color={ANM_SEV_COLOR[alert.severity]} />
+          <KPICard label="THRESHOLD" value={`${alert.threshold} ${alert.unit}`} color="var(--cyan)" />
+          <KPICard label="CONFIDENCE" value={`${alert.confidence}%`} color="var(--green)" />
+          <KPICard label="POP. AT RISK (EST.)" value={fmtNum(imp.population_at_risk_est)} color="var(--red)" />
+        </div>
+
+        <div style={{ background: '#0f0f0f', border: '2px solid #000', padding: 12, marginBottom: 16, fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.7, color: '#ddd' }}>
+          <strong style={{ color: ANM_SEV_COLOR[alert.severity] }}>WHY FLAGGED:</strong> {alert.why}
+        </div>
+
+        <div className="tv-grid-2col" style={{ marginBottom: 16 }}>
+          <div className="widget-card">
+            <div className="widget-title">PROJECTED IMPACT</div>
+            <div style={{ padding: 12, fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.9 }}>
+              <div>Radius: <strong>{imp.impact_radius_km} km</strong> (~{imp.impact_area_km2} km²)</div>
+              <div>Population at risk: <strong>{fmtNum(imp.population_at_risk_est)}</strong> <span style={{ opacity: 0.5 }}>(@ {fmtNum(imp.density_assumption)}/km²)</span></div>
+              <div>Owning dept: <strong>{imp.owning_department}</strong></div>
+              <div style={{ marginTop: 8, opacity: 0.7 }}>Affected zones:</div>
+              {(imp.affected_zones || []).map((z, i) => <div key={i} style={{ paddingLeft: 10 }}>• {z}</div>)}
+              <div style={{ marginTop: 8, opacity: 0.7 }}>Affected systems:</div>
+              {(imp.affected_systems || []).map((s, i) => <div key={i} style={{ paddingLeft: 10 }}>• {s}</div>)}
+            </div>
+          </div>
+          <div className="widget-card">
+            <div className="widget-title" style={{ color: 'var(--gold)' }}>IMMEDIATE ACTIONS · FIRST 60 MIN</div>
+            <div style={{ padding: 12, fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.7 }}>
+              {(imp.immediate_actions || []).map((a, i) => (
+                <div key={i} style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
+                  <span style={{ color: 'var(--gold)', fontWeight: 800 }}>{i + 1}.</span><span>{a}</span>
+                </div>
+              ))}
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: '2px solid #000', opacity: 0.75 }}>RECOMMENDED MITIGATION:</div>
+              {(imp.recommended_solutions || []).map((s, i) => (
+                <div key={i} style={{ paddingLeft: 6, marginTop: 4 }}>→ {s}</div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button className="btn-brutal" disabled={busy === 'ack' || alert.acked} onClick={() => act('ack')}
+            style={{ fontSize: 12, padding: '8px 16px', background: alert.acked ? '#ddd' : 'var(--gold)', color: '#000' }}>
+            {alert.acked ? '✓ ACKNOWLEDGED' : busy === 'ack' ? 'ACKING…' : '✓ ACKNOWLEDGE'}
+          </button>
+          <button className="btn-brutal" disabled={busy === 'wo'} onClick={() => act('wo')}
+            style={{ fontSize: 12, padding: '8px 16px', background: 'var(--red)', color: '#fff' }}>
+            {busy === 'wo' ? 'CREATING…' : '🛠 CREATE WORK ORDER'}
+          </button>
+          <button className="btn-brutal" disabled={busy === 'tg'} onClick={() => act('tg')}
+            style={{ fontSize: 12, padding: '8px 16px', background: 'var(--cyan)', color: '#000' }}>
+            {busy === 'tg' ? 'SENDING…' : '✈ SEND TELEGRAM ALERT'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ====================================================================
+// ALERTS tab
+// ====================================================================
+const AnomalyAlerts = ({ navHint }) => {
+  const [data, setData] = React.useState(null);
+  const [loading, setLoading] = React.useState(true);
+  const [sev, setSev] = React.useState('');
+  const [cat, setCat] = React.useState('');
+  const [open, setOpen] = React.useState(null);
+  const [tick, setTick] = React.useState(0);
+
+  const load = React.useCallback(() => {
+    const params = {};
+    if (sev) params.severity = sev;
+    if (cat) params.category = cat;
+    apiFetch('/api/anomaly/alerts', { ...ANOMALY_AUTH, params })
+      .then(d => { setData(d); setLoading(false); })
+      .catch(() => { setData(null); setLoading(false); });
+  }, [sev, cat]);
+  React.useEffect(load, [load, tick]);
+  React.useEffect(() => { const t = setInterval(() => setTick(x => x + 1), 60000); return () => clearInterval(t); }, []);
+
+  const counts = data?.counts || {};
+  const alerts = data?.alerts || [];
+  const cats = Array.from(new Set(alerts.map(a => a.category)));
+
+  return (
+    <div className="tab-pane">
+      <div className="anomaly-stats-row">
+        <div className="anomaly-stat"><div className="anomaly-stat-val">{counts.total ?? 0}</div><div className="anomaly-stat-lbl">ACTIVE</div></div>
+        <div className="anomaly-stat"><div className="anomaly-stat-val" style={{ color: 'var(--red)' }}>{counts.CRITICAL ?? 0}</div><div className="anomaly-stat-lbl">CRITICAL</div></div>
+        <div className="anomaly-stat"><div className="anomaly-stat-val" style={{ color: 'var(--gold)' }}>{counts.HIGH ?? 0}</div><div className="anomaly-stat-lbl">HIGH</div></div>
+        <div className="anomaly-stat"><div className="anomaly-stat-val" style={{ color: 'var(--cyan)' }}>{counts.MEDIUM ?? 0}</div><div className="anomaly-stat-lbl">MEDIUM</div></div>
+        <div className="anomaly-stat"><div className="anomaly-stat-val">{counts.unacked ?? 0}</div><div className="anomaly-stat-lbl">UNACKED</div></div>
+      </div>
+
+      <div className="toolbar" style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: 12 }}>
+        <div className="filter-group">
+          <label className="filter-label">Severity</label>
+          <select className="filter-select" value={sev} onChange={e => setSev(e.target.value)}>
+            <option value="">All</option><option value="CRITICAL">Critical</option><option value="HIGH">High</option>
+            <option value="MEDIUM">Medium</option><option value="LOW">Low</option>
+          </select>
+        </div>
+        <div className="filter-group">
+          <label className="filter-label">Category</label>
+          <select className="filter-select" value={cat} onChange={e => setCat(e.target.value)}>
+            <option value="">All</option>
+            {cats.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+        <div style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 10, opacity: 0.55 }}>
+          {data?.generated_at ? `Live · updated ${new Date(data.generated_at).toLocaleTimeString()}` : ''} · auto-refresh 60s
+        </div>
+      </div>
+
+      {loading ? (
+        <div style={{ padding: 40, textAlign: 'center', opacity: 0.5, fontFamily: 'var(--font-mono)' }}>Loading live feeds…</div>
+      ) : alerts.length === 0 ? (
+        <div className="widget-card" style={{ padding: 40, textAlign: 'center' }}>
+          <div style={{ fontSize: 14, opacity: 0.6 }}>NO ANOMALIES IN THIS FILTER</div>
+          <div style={{ fontSize: 11, opacity: 0.4, fontFamily: 'var(--font-mono)', marginTop: 6 }}>
+            Live readings are within nominal bands. Feeds re-poll every 2 min.
+          </div>
+        </div>
+      ) : (
+        <div className="alert-list">
+          {alerts.map((a, i) => (
+            <div key={a.id} className={`alert-card-lg ${a.severity.toLowerCase()} ${a.acked ? 'acked' : ''}`}
+              style={{ animationDelay: `${i * 0.04}s`, cursor: 'pointer' }} onClick={() => setOpen(a)}>
+              <div className="alert-left-bar" style={{ background: ANM_SEV_COLOR[a.severity] }}></div>
+              <div className="alert-body">
+                <div className="alert-header-row">
+                  <div style={{ flex: 1 }}>
+                    <div className="alert-title-lg">{a.title}</div>
+                    <div className="alert-meta-lg">{a.id} · {a.category} · {a.source === 'usgs' ? 'USGS' : 'Open-Meteo'}</div>
+                  </div>
+                  <SeverityBadge level={a.severity} />
+                  {a.acked && <Badge variant="green">{a.status === 'work_order' ? 'WORK ORDER' : 'ACKED'}</Badge>}
+                </div>
+                <div className="alert-loc-row">
+                  <span>📍 {a.city} · {a.zone}</span>
+                  <span>📊 {a.metric}: {a.value}{a.unit} (thr {a.threshold})</span>
+                  <span>👥 ~{fmtNum((a.impact || {}).population_at_risk_est)} at risk</span>
+                </div>
+                <ConfidenceBar value={a.confidence} />
+                <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, opacity: 0.7, marginTop: 6 }}>{a.why}</div>
+                <div className="action-row" onClick={e => e.stopPropagation()}>
+                  <button className="btn-brutal" style={{ fontSize: 11, padding: '6px 12px' }} onClick={() => setOpen(a)}>VIEW DETAIL & ACTIONS</button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {open && <AnomalyDetailModal alert={open} onClose={() => setOpen(null)} onChanged={() => setTick(x => x + 1)} />}
+    </div>
+  );
+};
+
+// ====================================================================
+// SENSOR FLEET tab
+// ====================================================================
+const AnomalySensors = () => {
+  const [data, setData] = React.useState(null);
+  React.useEffect(() => {
+    apiFetch('/api/anomaly/sensors', ANOMALY_AUTH).then(setData).catch(() => setData(null));
+  }, []);
+  const s = data || { total: 0, online: 0, warning: 0, offline: 0, sensors: [] };
+  return (
+    <div className="tab-pane">
+      <div className="kpi-grid-4">
+        <KPICard label="TOTAL PROBES" value={s.total} color="var(--gold)" />
+        <KPICard label="HEALTHY" value={s.online} color="var(--green)" />
+        <KPICard label="WARNING" value={s.warning} color="var(--gold)" />
+        <KPICard label="OFFLINE/STALE" value={s.offline} color="var(--red)" />
+      </div>
+      <div className="widget-card mt-20">
+        <div className="widget-title">SENSOR FLEET · {s.total} VIRTUAL PROBES ACROSS {Math.round(s.total / 3)} METRO STATIONS</div>
+        <DataTable
+          columns={[
+            { key: 'id', label: 'PROBE ID', width: 130 },
+            { key: 'city', label: 'CITY', width: 120 },
+            { key: 'zone', label: 'ZONE', width: 150 },
+            { key: 'type', label: 'TYPE', width: 130 },
+            { key: 'value', label: 'READING', width: 110, align: 'right', render: (v, r) => v == null ? <span style={{ color: 'var(--red)' }}>—</span> : `${v} ${r.unit}` },
+            { key: 'health', label: 'HEALTH', width: 120, render: v => <StatusPill status={v === 'healthy' ? 'online' : v === 'warning' ? 'busy' : 'alert'} label={v.toUpperCase()} /> },
+            { key: 'last_seen', label: 'LAST SEEN', width: 100, align: 'right' },
+          ]}
+          rows={s.sensors}
+        />
+      </div>
+    </div>
+  );
+};
+
+// ====================================================================
+// CITY MAP tab — Leaflet + OpenStreetMap, search + colored zones
+//
+// GOOGLE-READY: this map runs on free OpenStreetMap tiles (no key, no
+// billing). To switch the basemap to Google, set ANOMALY_TILE_URL to a
+// Google raster tile template and the rest of the component works
+// unchanged. See GOOGLE_MAPS_SETUP.md for the step-by-step key flow.
+//   e.g. 'https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}'  (needs a
+//   billing-enabled key proxied through your backend per Google ToS).
+// ====================================================================
+const ANOMALY_TILE_URL = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+const ANOMALY_TILE_ATTR = '© OpenStreetMap';
+
+const AnomalyCityMap = () => {
+  const mapRef = React.useRef(null);
+  const mapObj = React.useRef(null);
+  const layerRef = React.useRef(null);
+  const [zones, setZones] = React.useState([]);
+  const [q, setQ] = React.useState('');
+  const [searching, setSearching] = React.useState(false);
+  const [sel, setSel] = React.useState(null);
+
+  React.useEffect(() => {
+    apiFetch('/api/anomaly/map', ANOMALY_AUTH).then(d => setZones(d.zones || [])).catch(() => setZones([]));
+  }, []);
+
+  React.useEffect(() => {
+    if (!window.L || !mapRef.current || mapObj.current) return;
+    const map = window.L.map(mapRef.current, { zoomControl: true }).setView([22.0, 79.0], 5);
+    window.L.tileLayer(ANOMALY_TILE_URL, {
+      attribution: ANOMALY_TILE_ATTR, maxZoom: 18,
+    }).addTo(map);
+    mapObj.current = map;
+    layerRef.current = window.L.layerGroup().addTo(map);
+    setTimeout(() => map.invalidateSize(), 200);
+  }, []);
+
+  React.useEffect(() => {
+    const map = mapObj.current, lg = layerRef.current;
+    if (!map || !lg || !window.L) return;
+    lg.clearLayers();
+    zones.forEach(z => {
+      const color = ANM_LEVEL_COLOR[z.level] || '#22c55e';
+      const radius = z.level === 'critical' ? 38000 : z.level === 'high' ? 28000 : z.level === 'medium' ? 20000 : 12000;
+      window.L.circle([z.lat, z.lng], {
+        radius, color, fillColor: color, fillOpacity: 0.28, weight: 2,
+      }).addTo(lg).on('click', () => setSel(z));
+      const mk = window.L.circleMarker([z.lat, z.lng], {
+        radius: 7, color: '#000', weight: 2, fillColor: color, fillOpacity: 1,
+      }).addTo(lg);
+      mk.bindTooltip(`${z.city} · ${z.level.toUpperCase()}`, { permanent: false, direction: 'top' });
+      mk.bindPopup(
+        `<b>${z.city}</b> — ${z.zone}<br/>` +
+        `Level: <b style="color:${color}">${z.level.toUpperCase()}</b><br/>` +
+        `${z.summary}<br/><span style="font-size:11px;opacity:.7">${z.alert_count} active alert(s)</span>`
+      );
+      mk.on('click', () => setSel(z));
+    });
+  }, [zones]);
+
+  const doSearch = async (e) => {
+    e && e.preventDefault();
+    if (!q.trim()) return;
+    setSearching(true);
+    try {
+      const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`, {
+        headers: { 'Accept': 'application/json' },
+      });
+      const j = await r.json();
+      if (j && j[0] && mapObj.current) {
+        const { lat, lon, display_name } = j[0];
+        mapObj.current.setView([parseFloat(lat), parseFloat(lon)], 11);
+        window.L.popup().setLatLng([parseFloat(lat), parseFloat(lon)])
+          .setContent(`<b>${display_name.split(',').slice(0, 2).join(',')}</b>`).openOn(mapObj.current);
+      }
+    } catch (err) { /* silent */ }
+    finally { setSearching(false); }
+  };
+
+  const counts = zones.reduce((acc, z) => { acc[z.level] = (acc[z.level] || 0) + 1; return acc; }, {});
+
+  return (
+    <div className="tab-pane">
+      <div className="map-layout">
+        <div>
+          <form onSubmit={doSearch} style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+            <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search a location (city, area, landmark)…"
+              style={{ flex: 1, padding: '8px 12px', border: '2px solid #000', fontFamily: 'var(--font-mono)', fontSize: 13, background: '#fff', color: '#000' }} />
+            <button type="submit" className="btn-brutal" disabled={searching} style={{ fontSize: 12, padding: '8px 16px' }}>
+              {searching ? 'SEARCHING…' : '🔍 GO'}
+            </button>
+          </form>
+          <div ref={mapRef} style={{ height: 520, border: '3px solid #000', boxShadow: '6px 6px 0 #000', background: '#aadaff' }}></div>
+          <div className="map-legend" style={{ marginTop: 10 }}>
+            <span><span className="status-dot" style={{ background: ANM_LEVEL_COLOR.critical }}></span> Critical ({counts.critical || 0})</span>
+            <span><span className="status-dot" style={{ background: ANM_LEVEL_COLOR.high }}></span> High ({counts.high || 0})</span>
+            <span><span className="status-dot" style={{ background: ANM_LEVEL_COLOR.medium }}></span> Medium ({counts.medium || 0})</span>
+            <span><span className="status-dot" style={{ background: ANM_LEVEL_COLOR.nominal }}></span> Nominal ({counts.nominal || 0})</span>
+          </div>
+        </div>
+        <div className="map-sidebar">
+          <div className="widget-card">
+            <div className="widget-title">STATION ZONES · LIVE</div>
+            <div style={{ maxHeight: 480, overflowY: 'auto' }}>
+              {zones.filter(z => z.station_id !== 'USGS' || z.alert_count > 0).map(z => (
+                <div key={z.station_id} className="zone-row" style={{ cursor: 'pointer' }}
+                  onClick={() => { setSel(z); mapObj.current && mapObj.current.setView([z.lat, z.lng], 9); }}>
+                  <span className="status-dot" style={{ background: ANM_LEVEL_COLOR[z.level] }}></span>
+                  <span style={{ flex: 1, fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 500 }}>{z.city}</span>
+                  <Badge variant={z.level === 'critical' ? 'red' : z.level === 'high' ? 'gold' : z.level === 'medium' ? 'default' : 'green'}>
+                    {z.alert_count} alert{z.alert_count === 1 ? '' : 's'}
+                  </Badge>
+                </div>
+              ))}
+            </div>
+          </div>
+          {sel && (
+            <div className="widget-card mt-20">
+              <div className="widget-title" style={{ color: ANM_LEVEL_COLOR[sel.level] }}>{sel.city.toUpperCase()}</div>
+              <div style={{ padding: 12, fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.8 }}>
+                <div>Zone: <strong>{sel.zone}</strong></div>
+                <div>Level: <strong style={{ color: ANM_LEVEL_COLOR[sel.level] }}>{sel.level.toUpperCase()}</strong></div>
+                <div>Active alerts: <strong>{sel.alert_count}</strong></div>
+                <div style={{ marginTop: 6 }}>{sel.summary}</div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ====================================================================
+// WORK ORDERS tab
+// ====================================================================
+const AnomalyWorkOrders = () => {
+  const [data, setData] = React.useState(null);
+  const [tick, setTick] = React.useState(0);
+  React.useEffect(() => {
+    apiFetch('/api/anomaly/work-orders', ANOMALY_AUTH).then(setData).catch(() => setData(null));
+  }, [tick]);
+  React.useEffect(() => { const t = setInterval(() => setTick(x => x + 1), 30000); return () => clearInterval(t); }, []);
+  const orders = data?.orders || [];
+  return (
+    <div className="tab-pane">
+      <div className="widget-card">
+        <div className="widget-title">WORK ORDERS · RAISED FROM ANOMALY ALERTS</div>
+        {orders.length === 0 ? (
+          <div style={{ padding: 40, textAlign: 'center' }}>
+            <div style={{ fontSize: 14, opacity: 0.6 }}>NO WORK ORDERS YET</div>
+            <div style={{ fontSize: 11, opacity: 0.4, fontFamily: 'var(--font-mono)', marginTop: 6 }}>
+              Open an alert → CREATE WORK ORDER. SLA auto-set by severity (CRITICAL 4h · HIGH 12h · MEDIUM 48h).
+            </div>
+          </div>
+        ) : (
+          <DataTable
+            columns={[
+              { key: 'id', label: 'ORDER', width: 100 },
+              { key: 'alert_id', label: 'ALERT', width: 130 },
+              { key: 'title', label: 'TASK' },
+              { key: 'city', label: 'CITY', width: 110 },
+              { key: 'department', label: 'DEPARTMENT', width: 200 },
+              { key: 'severity', label: 'PRIORITY', width: 100, render: v => <Badge variant={v === 'CRITICAL' ? 'red' : v === 'HIGH' ? 'gold' : 'default'}>{v}</Badge> },
+              { key: 'status', label: 'STATUS', width: 130, render: v => <StatusPill status={v === 'resolved' ? 'online' : 'busy'} label={v.replace('_', ' ').toUpperCase()} /> },
+            ]}
+            rows={orders}
+          />
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ====================================================================
+// ANALYTICS tab
+// ====================================================================
+const AnomalyAnalytics = () => {
+  const [a, setA] = React.useState(null);
+  React.useEffect(() => {
+    apiFetch('/api/anomaly/analytics', ANOMALY_AUTH).then(setA).catch(() => setA(null));
+  }, []);
+  if (!a) return <div className="tab-pane"><div style={{ padding: 40, textAlign: 'center', opacity: 0.5, fontFamily: 'var(--font-mono)' }}>Loading analytics…</div></div>;
+  const k = a.kpis || {};
+  const maxCat = Math.max(1, ...(a.by_category || []).map(c => c.count));
+  const maxCity = Math.max(1, ...(a.by_city || []).map(c => c.count));
+  const donutSegs = (a.by_category || []).map((c, i) => ({
+    label: c.category, value: c.count,
+    color: ['var(--red)', 'var(--cyan)', 'var(--green)', 'var(--gold)', '#a78bfa'][i % 5],
+  }));
+  return (
+    <div className="tab-pane">
+      <div className="kpi-grid-4">
+        <KPICard label="ACTIVE ALERTS" value={fmtNum(k.active_alerts)} color="var(--cyan)" />
+        <KPICard label="CRITICAL" value={fmtNum(k.critical)} color="var(--red)" />
+        <KPICard label="POP. AT RISK (EST.)" value={fmtNum(k.population_at_risk_est)} color="var(--gold)" />
+        <KPICard label="STATIONS MONITORED" value={fmtNum(k.stations_monitored)} color="var(--green)" />
+      </div>
+      <div className="widgets-grid mt-20">
+        <div className="widget-card">
+          <div className="widget-title">ANOMALIES BY CATEGORY</div>
+          <div style={{ padding: 14 }}>
+            <Donut segments={donutSegs.length ? donutSegs : [{ label: 'None', value: 1, color: '#444' }]}
+              centerValue={fmtNum(k.active_alerts)} centerLabel="ACTIVE" />
+          </div>
+        </div>
+        <div className="widget-card">
+          <div className="widget-title">SEVERITY DISTRIBUTION</div>
+          <div style={{ padding: 14 }}>
+            {(a.by_severity || []).map(s => (
+              <div key={s.level} className="progress-row">
+                <span>{s.level}</span>
+                <div className="progress-bar"><div className="progress-fill" style={{ width: `${(s.count / Math.max(1, k.active_alerts)) * 100}%`, background: ANM_SEV_COLOR[s.level] }}></div></div>
+                <span className="progress-val">{s.count}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div className="widgets-grid mt-20">
+        <div className="widget-card">
+          <div className="widget-title">TOP AFFECTED CITIES</div>
+          <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {(a.by_city || []).map(c => (
+              <div key={c.city} style={{ display: 'grid', gridTemplateColumns: '110px 1fr 40px', gap: 10, alignItems: 'center' }}>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{c.city}</span>
+                <div style={{ background: '#eee', height: 16, border: '2px solid #000' }}>
+                  <div style={{ width: `${(c.count / maxCity) * 100}%`, height: '100%', background: 'var(--red)' }}></div>
+                </div>
+                <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, textAlign: 'right' }}>{c.count}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="widget-card">
+          <div className="widget-title">CATEGORY BREAKDOWN</div>
+          <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {(a.by_category || []).map(c => (
+              <div key={c.category} style={{ display: 'grid', gridTemplateColumns: '150px 1fr 40px', gap: 10, alignItems: 'center' }}>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{c.category}</span>
+                <div style={{ background: '#eee', height: 16, border: '2px solid #000' }}>
+                  <div style={{ width: `${(c.count / maxCat) * 100}%`, height: '100%', background: 'var(--cyan)' }}></div>
+                </div>
+                <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, textAlign: 'right' }}>{c.count}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div style={{ marginTop: 16, fontFamily: 'var(--font-mono)', fontSize: 10, opacity: 0.55, textAlign: 'center' }}>
+        Live from Open-Meteo (Copernicus CAMS) + USGS · generated {a.generated_at ? new Date(a.generated_at).toLocaleTimeString() : '—'}
+      </div>
+    </div>
+  );
+};
+
 const AnomalyMonitoring = ({ onBack }) => {
   const [tab, setTab] = React.useState('alerts');
+  const [hdr, setHdr] = React.useState({ total: 0, critical: 0, stations: 16 });
+  const [refreshing, setRefreshing] = React.useState(false);
+
+  React.useEffect(() => {
+    apiFetch('/api/anomaly/analytics', ANOMALY_AUTH)
+      .then(d => setHdr({ total: d.kpis.active_alerts, critical: d.kpis.critical, stations: d.kpis.stations_monitored }))
+      .catch(() => {});
+  }, [tab]);
+
+  const fullScan = async () => {
+    setRefreshing(true);
+    try { await apiFetch('/api/anomaly/refresh', { ...ANOMALY_AUTH, json: {} }); }
+    catch (e) { /* noop */ }
+    finally { setRefreshing(false); setTab(t => t); }
+  };
+
   const tabs = [
-    { key: 'alerts',    label: 'ALERTS', badge: 7 },
-    { key: 'sensors',   label: 'SENSOR FLEET' },
-    { key: 'map',       label: 'CITY MAP' },
-    { key: 'workorders',label: 'WORK ORDERS' },
+    { key: 'alerts', label: 'ALERTS', badge: hdr.total },
+    { key: 'sensors', label: 'SENSOR FLEET' },
+    { key: 'map', label: 'CITY MAP' },
+    { key: 'workorders', label: 'WORK ORDERS' },
     { key: 'analytics', label: 'ANALYTICS' },
   ];
   return (
@@ -5323,247 +5855,22 @@ const AnomalyMonitoring = ({ onBack }) => {
       <SubPageHeader
         title="ANOMALY MONITORING"
         gatewayId="GATEWAY_04"
-        subtitle="IOT FUSION · ISOLATION FOREST · 847 SENSORS · 7 OPEN ALERTS"
+        subtitle={`LIVE OPEN-METEO + USGS · ${hdr.stations} METRO STATIONS · ${hdr.total} ACTIVE · ${hdr.critical} CRITICAL`}
         accentColor="var(--red)"
         onBack={onBack}
         actions={
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button className="btn-brutal" style={{ padding: '8px 14px', fontSize: 12 }}>◉ AUTO-SCAN</button>
-            <button className="btn-brutal action-btn red" style={{ padding: '8px 14px', fontSize: 12, width: 'auto' }}>RUN FULL SCAN</button>
-          </div>
+          <button className="btn-brutal action-btn red" onClick={fullScan} disabled={refreshing}
+            style={{ padding: '8px 14px', fontSize: 12, width: 'auto' }}>
+            {refreshing ? '◉ SCANNING…' : '◉ RUN FULL SCAN'}
+          </button>
         }
       />
       <Tabs tabs={tabs} active={tab} onChange={setTab} accent="var(--red)" />
-      {tab === 'alerts'     && <AnomalyAlerts />}
-      {tab === 'sensors'    && <AnomalySensors />}
-      {tab === 'map'        && <AnomalyMap />}
+      {tab === 'alerts' && <AnomalyAlerts />}
+      {tab === 'sensors' && <AnomalySensors />}
+      {tab === 'map' && <AnomalyCityMap />}
       {tab === 'workorders' && <AnomalyWorkOrders />}
-      {tab === 'analytics'  && <AnomalyAnalytics />}
-    </div>
-  );
-};
-
-const AnomalyAlerts = () => {
-  const alerts = [
-    { id: 'ANM-244431', title: 'STRUCTURAL DEGRADATION',  cat: 'Bridge',     loc: 'Sector 12 · R4 Road Junction', time: '2026-04-22, 19:16', conf: 89, severity: 'CRITICAL', ack: false },
-    { id: 'ANM-302108', title: 'TRAFFIC SIGNAL MALFUNCTION', cat: 'Traffic', loc: 'Sector 13 · N6 Road Junction', time: '2026-04-24, 16:16', conf: 85, severity: 'HIGH',     ack: false },
-    { id: 'ANM-076235', title: 'SEWAGE SYSTEM BLOCKAGE',   cat: 'Drainage',  loc: 'Highway NH-14 · Km 34',        time: '2026-04-22, 23:15', conf: 78, severity: 'HIGH',     ack: true  },
-    { id: 'ANM-094172', title: 'BUILDING VIBRATION ANOMALY', cat: 'Structure', loc: 'Sector 23 · Power Substation', time: '2026-04-22, 12:10', conf: 96, severity: 'HIGH',   ack: false },
-    { id: 'ANM-187342', title: 'WATER PRESSURE DROP',      cat: 'Water',     loc: 'Zone B · Reservoir 2',         time: '2026-04-23, 09:22', conf: 82, severity: 'MEDIUM',  ack: false },
-    { id: 'ANM-201554', title: 'AIR QUALITY SPIKE',        cat: 'AQI',       loc: 'Sector 7 · Industrial',        time: '2026-04-23, 14:45', conf: 91, severity: 'MEDIUM',  ack: true },
-    { id: 'ANM-223678', title: 'POWER DRAW ANOMALY',       cat: 'Electric', loc: 'Sector 15 · Substation 3',      time: '2026-04-23, 18:33', conf: 74, severity: 'LOW',     ack: false },
-  ];
-  return (
-    <div className="tab-pane">
-      <div className="anomaly-stats-row">
-        <div className="anomaly-stat"><div className="anomaly-stat-val">7</div><div className="anomaly-stat-lbl">TOTAL OPEN</div></div>
-        <div className="anomaly-stat"><div className="anomaly-stat-val" style={{ color: 'var(--red)' }}>1</div><div className="anomaly-stat-lbl">CRITICAL</div></div>
-        <div className="anomaly-stat"><div className="anomaly-stat-val" style={{ color: 'var(--gold)' }}>3</div><div className="anomaly-stat-lbl">HIGH</div></div>
-        <div className="anomaly-stat"><div className="anomaly-stat-val" style={{ color: 'var(--cyan)' }}>2</div><div className="anomaly-stat-lbl">MEDIUM</div></div>
-        <div className="anomaly-stat"><div className="anomaly-stat-val">4</div><div className="anomaly-stat-lbl">UNACKED</div></div>
-      </div>
-      <div className="alert-list">
-        {alerts.map((a, i) => (
-          <div key={a.id} className={`alert-card-lg ${a.severity.toLowerCase()} ${a.ack ? 'acked' : ''}`} style={{ animationDelay: `${i * 0.05}s` }}>
-            <div className="alert-left-bar" style={{ background: a.severity === 'CRITICAL' ? 'var(--red)' : a.severity === 'HIGH' ? 'var(--gold)' : 'var(--cyan)' }}></div>
-            <div className="alert-body">
-              <div className="alert-header-row">
-                <div style={{ flex: 1 }}>
-                  <div className="alert-title-lg">{a.title}</div>
-                  <div className="alert-meta-lg">{a.id} · {a.cat}</div>
-                </div>
-                <SeverityBadge level={a.severity} />
-                {a.ack && <Badge variant="green">ACKED</Badge>}
-              </div>
-              <div className="alert-loc-row">
-                <span>📍 {a.loc}</span>
-                <span>🕐 {a.time}</span>
-              </div>
-              <ConfidenceBar value={a.conf} />
-              <div className="action-row">
-                <button className="btn-brutal" style={{ fontSize: 11, padding: '6px 12px' }}>VIEW SENSOR DATA</button>
-                <button className="btn-brutal" style={{ fontSize: 11, padding: '6px 12px' }}>ROOT CAUSE</button>
-                {!a.ack && <button className="btn-brutal action-btn" style={{ fontSize: 11, padding: '6px 12px', width: 'auto', background: 'var(--gold)', color: '#000' }}>ACK</button>}
-                <button className="btn-brutal action-btn" style={{ fontSize: 11, padding: '6px 12px', width: 'auto', background: 'var(--red)', color: '#fff' }}>CREATE WORK ORDER</button>
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-};
-
-const AnomalySensors = () => {
-  const sensors = [
-    { id: 'SNS-0147', type: 'Bridge Vibration', zone: 'Sector 12', battery: 87, uptime: 99.8, health: 'healthy', lastSeen: 'just now' },
-    { id: 'SNS-0243', type: 'Water Pressure',   zone: 'Zone B',    battery: 62, uptime: 99.1, health: 'healthy', lastSeen: '30 sec' },
-    { id: 'SNS-0358', type: 'AQI Particulate',  zone: 'Sector 7',  battery: 14, uptime: 92.3, health: 'warning', lastSeen: '2 min'  },
-    { id: 'SNS-0421', type: 'Traffic Signal',   zone: 'Sector 13', battery: 94, uptime: 99.9, health: 'healthy', lastSeen: 'just now' },
-    { id: 'SNS-0505', type: 'Sewage Level',     zone: 'NH-14',     battery: 78, uptime: 99.4, health: 'healthy', lastSeen: '45 sec' },
-    { id: 'SNS-0618', type: 'Power Meter',      zone: 'Sector 15', battery: 0,  uptime: 0,    health: 'offline', lastSeen: '3 hr'   },
-    { id: 'SNS-0729', type: 'Structure Vib',    zone: 'Sector 23', battery: 55, uptime: 98.7, health: 'healthy', lastSeen: '1 min'  },
-    { id: 'SNS-0833', type: 'AQI NO2',          zone: 'Sector 3',  battery: 72, uptime: 99.2, health: 'healthy', lastSeen: '20 sec' },
-  ];
-  return (
-    <div className="tab-pane">
-      <div className="kpi-grid-4">
-        <KPICard label="TOTAL SENSORS"   value="847"   color="var(--gold)" />
-        <KPICard label="ONLINE"          value="832"   color="var(--green)" />
-        <KPICard label="WARNINGS"        value="11"    color="var(--gold)" />
-        <KPICard label="OFFLINE"         value="4"     color="var(--red)" />
-      </div>
-      <div className="widget-card mt-20">
-        <DataTable
-          onRowClick={r => console.log(r)}
-          columns={[
-            { key: 'id',      label: 'SENSOR ID', width: 110 },
-            { key: 'type',    label: 'TYPE',      width: 160 },
-            { key: 'zone',    label: 'ZONE',      width: 120 },
-            { key: 'battery', label: 'BATTERY',   width: 140, render: v => v === 0 ? <span style={{ color: 'var(--red)', fontFamily: 'var(--font-mono)' }}>OFFLINE</span> : <ConfidenceBar value={v} /> },
-            { key: 'uptime',  label: 'UPTIME',    width: 100, align: 'right', render: v => `${v}%` },
-            { key: 'health',  label: 'HEALTH',    width: 120, render: v => <StatusPill status={v === 'healthy' ? 'online' : v === 'warning' ? 'busy' : 'alert'} label={v.toUpperCase()} /> },
-            { key: 'lastSeen', label: 'LAST SEEN', width: 100, align: 'right' },
-          ]}
-          rows={sensors}
-        />
-      </div>
-    </div>
-  );
-};
-
-const AnomalyMap = () => {
-  const pins = [
-    { x: 90, y: 80, color: 'var(--red)',   pulse: true,  label: 'S12' },
-    { x: 200, y: 140, color: 'var(--gold)', pulse: true, label: 'S13' },
-    { x: 320, y: 210, color: 'var(--cyan)', pulse: false, label: 'NH14' },
-    { x: 60, y: 200, color: 'var(--red)',   pulse: false, label: 'S7' },
-    { x: 260, y: 90, color: 'var(--green)', pulse: false, label: 'S23' },
-    { x: 180, y: 230, color: 'var(--gold)', pulse: false, label: 'Z-B' },
-  ];
-  return (
-    <div className="tab-pane">
-      <div className="map-layout">
-        <div>
-          <MapMock pins={pins} title="CITY MAP · SENSOR & ALERT OVERLAY" />
-          <div className="map-legend">
-            <span><span className="status-dot red"></span> Critical alert</span>
-            <span><span className="status-dot" style={{ background: 'var(--gold)' }}></span> High alert</span>
-            <span><span className="status-dot" style={{ background: 'var(--cyan)' }}></span> Medium alert</span>
-            <span><span className="status-dot green"></span> Nominal</span>
-          </div>
-        </div>
-        <div className="map-sidebar">
-          <div className="widget-card">
-            <div className="widget-title">ZONES OVERVIEW</div>
-            {[
-              { zone: 'Sector 12', alerts: 3, sensors: 42, status: 'critical' },
-              { zone: 'Sector 13', alerts: 1, sensors: 38, status: 'warning' },
-              { zone: 'Sector 7',  alerts: 1, sensors: 52, status: 'critical' },
-              { zone: 'NH-14',     alerts: 1, sensors: 18, status: 'warning' },
-              { zone: 'Sector 23', alerts: 1, sensors: 28, status: 'warning' },
-              { zone: 'Zone B',    alerts: 1, sensors: 24, status: 'warning' },
-            ].map(z => (
-              <div key={z.zone} className="zone-row">
-                <StatusPill status={z.status === 'critical' ? 'alert' : 'busy'} label="" />
-                <span style={{ flex: 1, fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 500 }}>{z.zone}</span>
-                <span className="small-meta">{z.sensors} sensors</span>
-                <Badge variant={z.alerts > 2 ? 'red' : 'gold'}>{z.alerts} alert{z.alerts > 1 ? 's' : ''}</Badge>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-const AnomalyWorkOrders = () => {
-  const orders = [
-    { id: 'WO-3821', alert: 'ANM-244431', task: 'Inspect bridge structural sensors',  assignee: 'PWD Team A', sla: '6h left', priority: 'CRITICAL', status: 'in_progress' },
-    { id: 'WO-3820', alert: 'ANM-302108', task: 'Replace traffic signal controller',   assignee: 'Traffic-5', sla: '18h left', priority: 'HIGH',  status: 'assigned' },
-    { id: 'WO-3819', alert: 'ANM-094172', task: 'Vibration root-cause investigation',  assignee: 'Structural Eng.', sla: '2d left', priority: 'HIGH', status: 'in_progress' },
-    { id: 'WO-3818', alert: 'ANM-076235', task: 'Unblock sewage line NH-14 Km 34',     assignee: 'Sanitation-3', sla: 'OVERDUE', priority: 'HIGH', status: 'in_progress' },
-    { id: 'WO-3817', alert: 'ANM-201554', task: 'AQI monitor calibration',             assignee: 'Env. Dept', sla: '4d left', priority: 'MEDIUM', status: 'assigned' },
-  ];
-  return (
-    <div className="tab-pane">
-      <div className="widget-card">
-        <DataTable
-          onRowClick={r => console.log(r)}
-          columns={[
-            { key: 'id',       label: 'ORDER',   width: 100 },
-            { key: 'alert',    label: 'ALERT',   width: 130 },
-            { key: 'task',     label: 'TASK' },
-            { key: 'assignee', label: 'ASSIGNED',width: 150 },
-            { key: 'priority', label: 'PRIORITY', width: 100, render: v => <Badge variant={v === 'CRITICAL' ? 'red' : v === 'HIGH' ? 'gold' : 'default'}>{v}</Badge> },
-            { key: 'sla',      label: 'SLA',     width: 110, render: v => <span style={{ color: v === 'OVERDUE' ? 'var(--red)' : 'inherit', fontWeight: v === 'OVERDUE' ? 700 : 400 }}>{v}</span> },
-            { key: 'status',   label: 'STATUS',  width: 140, render: v => <StatusPill status={v === 'in_progress' ? 'busy' : 'online'} label={v.replace('_', ' ').toUpperCase()} /> },
-          ]}
-          rows={orders}
-        />
-      </div>
-    </div>
-  );
-};
-
-const AnomalyAnalytics = () => {
-  const chartData = Array.from({ length: 24 }, () => Math.floor(Math.random() * 10));
-  return (
-    <div className="tab-pane">
-      <div className="kpi-grid-4">
-        <KPICard label="MTTR"            value="4.2h"  color="var(--gold)" data={[6, 5.5, 5, 4.8, 4.5, 4.3, 4.2]} delta="-30%" deltaDir="down" />
-        <KPICard label="PREVENTED DAYS"  value="48"    color="var(--green)" />
-        <KPICard label="FALSE POSITIVES" value="6.1%"  color="var(--cyan)" />
-        <KPICard label="CRITICAL ASSETS" value="24"    color="var(--red)" />
-      </div>
-      <div className="widgets-grid mt-20">
-        <MiniChart title="24-HOUR ANOMALY TIMELINE" data={chartData} color="var(--red)" />
-        <div className="widget-card">
-          <div className="widget-title">SEVERITY DISTRIBUTION</div>
-          {[{ l: 'CRITICAL', v: 1, c: 'var(--red)' }, { l: 'HIGH', v: 5, c: 'var(--gold)' }, { l: 'MEDIUM', v: 2, c: 'var(--cyan)' }, { l: 'LOW', v: 3, c: 'var(--green)' }].map((s, i) => (
-            <div key={i} className="progress-row">
-              <span>{s.l}</span>
-              <div className="progress-bar"><div className="progress-fill" style={{ width: `${(s.v / 11) * 100}%`, background: s.c }}></div></div>
-              <span className="progress-val">{s.v}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-      <div className="widgets-grid mt-20">
-        <div className="widget-card">
-          <div className="widget-title">TOP CATEGORIES</div>
-          <Donut
-            segments={[
-              { label: 'Structure', value: 32, color: 'var(--red)' },
-              { label: 'Traffic',   value: 22, color: 'var(--cyan)' },
-              { label: 'Water',     value: 18, color: 'var(--green)' },
-              { label: 'AQI',       value: 14, color: 'var(--gold)' },
-              { label: 'Power',     value: 14, color: '#888' },
-            ]}
-            centerValue="47"
-            centerLabel="30D"
-          />
-        </div>
-        <div className="widget-card">
-          <div className="widget-title">CRITICAL ASSETS · UPTIME</div>
-          <div className="asset-list">
-            {[
-              { asset: 'Sector-12 Bridge',     uptime: 99.8, class: 'P0' },
-              { asset: 'Water Reservoir 2',   uptime: 99.2, class: 'P0' },
-              { asset: 'Power Substation S15', uptime: 0,    class: 'P0' },
-              { asset: 'NH-14 Drainage',       uptime: 97.8, class: 'P1' },
-            ].map(a => (
-              <div key={a.asset} className="asset-row">
-                <Badge variant={a.class === 'P0' ? 'red' : 'gold'}>{a.class}</Badge>
-                <span style={{ flex: 1, fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 500 }}>{a.asset}</span>
-                <div className="progress-bar" style={{ flex: 1, maxWidth: 120 }}><div className="progress-fill" style={{ width: `${a.uptime}%`, background: a.uptime === 0 ? 'var(--red)' : a.uptime > 99 ? 'var(--green)' : 'var(--gold)' }}></div></div>
-                <span className="progress-val">{a.uptime}%</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
+      {tab === 'analytics' && <AnomalyAnalytics />}
     </div>
   );
 };
