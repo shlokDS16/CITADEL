@@ -5617,110 +5617,259 @@ const AnomalySensors = ({ refreshKey }) => {
 //   e.g. 'https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}'  (needs a
 //   billing-enabled key proxied through your backend per Google ToS).
 // ====================================================================
+// Free, key-less basemaps. GOOGLE-READY: add a Google raster entry here
+// and select it — see GOOGLE_MAPS_SETUP.md. ANOMALY_TILE_URL kept for the
+// doc reference / backward compat.
 const ANOMALY_TILE_URL = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
 const ANOMALY_TILE_ATTR = '© OpenStreetMap';
+const ANM_BASEMAPS = {
+  dark: {
+    label: 'DARK',
+    url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+    attr: '© OpenStreetMap © CARTO', sub: 'abcd', maxZoom: 20,
+  },
+  street: {
+    label: 'STREET',
+    url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
+    attr: '© OpenStreetMap © CARTO', sub: 'abcd', maxZoom: 20,
+  },
+  satellite: {
+    label: 'SATELLITE',
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    attr: 'Tiles © Esri — Source: Esri, Maxar, Earthstar Geographics', sub: '', maxZoom: 19,
+  },
+};
 
 const AnomalyCityMap = ({ refreshKey }) => {
   const mapRef = React.useRef(null);
   const mapObj = React.useRef(null);
   const layerRef = React.useRef(null);
+  const tileRef = React.useRef(null);
+  const searchPinRef = React.useRef(null);
   const [zones, setZones] = React.useState([]);
   const [q, setQ] = React.useState('');
   const [searching, setSearching] = React.useState(false);
   const [sel, setSel] = React.useState(null);
+  const [basemap, setBasemap] = React.useState('dark');
+  const [hidden, setHidden] = React.useState({});            // level -> bool (legend filter)
+  const [sidebarQ, setSidebarQ] = React.useState('');
+  const [updatedAt, setUpdatedAt] = React.useState(null);
 
   React.useEffect(() => {
-    apiFetch('/api/anomaly/map', ANOMALY_AUTH).then(d => setZones(d.zones || [])).catch(() => setZones([]));
+    apiFetch('/api/anomaly/map', ANOMALY_AUTH)
+      .then(d => { setZones(d.zones || []); setUpdatedAt(new Date()); })
+      .catch(() => setZones([]));
   }, [refreshKey]);
 
+  // init map once
   React.useEffect(() => {
     if (!window.L || !mapRef.current || mapObj.current) return;
-    const map = window.L.map(mapRef.current, { zoomControl: true }).setView([22.0, 79.0], 5);
-    window.L.tileLayer(ANOMALY_TILE_URL, {
-      attribution: ANOMALY_TILE_ATTR, maxZoom: 18,
+    const map = window.L.map(mapRef.current, { zoomControl: true, attributionControl: true })
+      .setView([22.5, 79.0], 5);
+    const bm = ANM_BASEMAPS[basemap];
+    tileRef.current = window.L.tileLayer(bm.url, {
+      attribution: bm.attr, subdomains: bm.sub || 'abc', maxZoom: bm.maxZoom,
     }).addTo(map);
     mapObj.current = map;
     layerRef.current = window.L.layerGroup().addTo(map);
     setTimeout(() => map.invalidateSize(), 200);
   }, []);
 
+  // swap basemap on demand
+  React.useEffect(() => {
+    const map = mapObj.current;
+    if (!map || !window.L || !tileRef.current) return;
+    map.removeLayer(tileRef.current);
+    const bm = ANM_BASEMAPS[basemap];
+    tileRef.current = window.L.tileLayer(bm.url, {
+      attribution: bm.attr, subdomains: bm.sub || 'abc', maxZoom: bm.maxZoom,
+    }).addTo(map);
+  }, [basemap]);
+
+  const flyToZone = React.useCallback((z) => {
+    setSel(z);
+    if (mapObj.current) mapObj.current.flyTo([z.lat, z.lng], z.station_id === 'USGS' ? 6 : 9, { duration: 0.8 });
+  }, []);
+
+  // (re)draw markers when zones or legend filter change
   React.useEffect(() => {
     const map = mapObj.current, lg = layerRef.current;
     if (!map || !lg || !window.L) return;
     lg.clearLayers();
+    const pts = [];
     zones.forEach(z => {
+      if (hidden[z.level]) return;
+      const isQuake = z.station_id === 'USGS';
       const color = ANM_LEVEL_COLOR[z.level] || '#22c55e';
-      const radius = z.level === 'critical' ? 38000 : z.level === 'high' ? 28000 : z.level === 'medium' ? 20000 : 12000;
-      window.L.circle([z.lat, z.lng], {
-        radius, color, fillColor: color, fillOpacity: 0.28, weight: 2,
-      }).addTo(lg).on('click', () => setSel(z));
-      const mk = window.L.circleMarker([z.lat, z.lng], {
-        radius: 7, color: '#000', weight: 2, fillColor: color, fillOpacity: 1,
-      }).addTo(lg);
-      mk.bindTooltip(`${z.city} · ${z.level.toUpperCase()}`, { permanent: false, direction: 'top' });
-      mk.bindPopup(
-        `<b>${z.city}</b> — ${z.zone}<br/>` +
-        `Level: <b style="color:${color}">${z.level.toUpperCase()}</b><br/>` +
-        `${z.summary}<br/><span style="font-size:11px;opacity:.7">${z.alert_count} active alert(s)</span>`
-      );
-      mk.on('click', () => setSel(z));
+      const crit = z.level === 'critical', high = z.level === 'high';
+      pts.push([z.lat, z.lng]);
+
+      // impact ring (outer faint + mid) — only for non-nominal so the map
+      // doesn't drown in green circles
+      if (z.level !== 'nominal') {
+        const rOuter = crit ? 46000 : high ? 32000 : 22000;
+        window.L.circle([z.lat, z.lng], {
+          radius: rOuter, color, weight: 1, opacity: 0.45,
+          fillColor: color, fillOpacity: 0.10,
+        }).addTo(lg).on('click', () => flyToZone(z));
+        window.L.circle([z.lat, z.lng], {
+          radius: rOuter * 0.55, color, weight: 1.5, opacity: 0.7,
+          fillColor: color, fillOpacity: 0.22,
+        }).addTo(lg).on('click', () => flyToZone(z));
+      }
+
+      // marker — diamond for quakes, pulsing dot for crit/high, plain dot else
+      let marker;
+      if (isQuake) {
+        const icon = window.L.divIcon({
+          className: '', iconSize: [18, 16],
+          html: `<div class="anm-quake-icon" style="border-bottom-color:${color}"></div>`,
+        });
+        marker = window.L.marker([z.lat, z.lng], { icon });
+      } else if (crit || high) {
+        const icon = window.L.divIcon({
+          className: '', iconSize: [16, 16],
+          html: `<div class="anm-pulse" style="color:${color};width:16px;height:16px">
+                   <div style="position:absolute;left:50%;top:50%;width:13px;height:13px;
+                     border-radius:50%;background:${color};border:2px solid #000;
+                     transform:translate(-50%,-50%)"></div></div>`,
+        });
+        marker = window.L.marker([z.lat, z.lng], { icon });
+      } else {
+        marker = window.L.circleMarker([z.lat, z.lng], {
+          radius: 6, color: '#000', weight: 2, fillColor: color, fillOpacity: 1,
+        });
+      }
+      marker.addTo(lg).on('click', () => flyToZone(z));
+
+      // permanent label chip for critical/high so they read without hover
+      if (crit || high) {
+        marker.bindTooltip(z.city, {
+          permanent: true, direction: 'top', opacity: 1,
+          className: `anm-zone-label ${crit ? 'crit' : 'high'}`,
+        });
+      } else {
+        marker.bindTooltip(`${z.city} · ${z.level.toUpperCase()}`, { direction: 'top' });
+      }
+
+      // rich DOM popup with a focus action
+      const el = document.createElement('div');
+      el.innerHTML =
+        `<b style="font-size:13px">${z.city}</b> <span style="opacity:.6">${z.zone}</span><br/>`
+        + `<span>Status: <b style="color:${color}">${z.level.toUpperCase()}</b></span><br/>`
+        + `<span style="font-size:11px;opacity:.8">${z.summary}</span><br/>`
+        + `<span style="font-size:11px">${z.alert_count} active alert(s)</span><br/>`;
+      const btn = document.createElement('span');
+      btn.className = 'anm-popup-btn';
+      btn.textContent = 'FOCUS ZONE';
+      btn.onclick = () => flyToZone(z);
+      el.appendChild(btn);
+      marker.bindPopup(el);
     });
-  }, [zones]);
+
+    // auto-fit to everything in view (first paint / filter change)
+    if (pts.length && !sel) {
+      try { map.fitBounds(pts, { padding: [40, 40], maxZoom: 7 }); } catch (e) { /* noop */ }
+    }
+  }, [zones, hidden, flyToZone, sel]);
 
   const doSearch = async (e) => {
     e && e.preventDefault();
     if (!q.trim()) return;
     setSearching(true);
     try {
-      const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`, {
-        headers: { 'Accept': 'application/json' },
-      });
+      const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`,
+        { headers: { 'Accept': 'application/json' } });
       const j = await r.json();
       if (j && j[0] && mapObj.current) {
-        const { lat, lon, display_name } = j[0];
-        mapObj.current.setView([parseFloat(lat), parseFloat(lon)], 11);
-        window.L.popup().setLatLng([parseFloat(lat), parseFloat(lon)])
-          .setContent(`<b>${display_name.split(',').slice(0, 2).join(',')}</b>`).openOn(mapObj.current);
+        const lat = parseFloat(j[0].lat), lon = parseFloat(j[0].lon);
+        mapObj.current.flyTo([lat, lon], 11, { duration: 0.9 });
+        if (searchPinRef.current) mapObj.current.removeLayer(searchPinRef.current);
+        searchPinRef.current = window.L.marker([lat, lon]).addTo(mapObj.current)
+          .bindPopup(`<b>${j[0].display_name.split(',').slice(0, 3).join(',')}</b>`).openPopup();
       }
     } catch (err) { /* silent */ }
     finally { setSearching(false); }
   };
 
-  const counts = zones.reduce((acc, z) => { acc[z.level] = (acc[z.level] || 0) + 1; return acc; }, {});
+  const resetView = () => {
+    setSel(null);
+    const pts = zones.filter(z => !hidden[z.level]).map(z => [z.lat, z.lng]);
+    if (mapObj.current && pts.length) {
+      try { mapObj.current.fitBounds(pts, { padding: [40, 40], maxZoom: 7 }); } catch (e) { /* noop */ }
+    }
+  };
+
+  const counts = zones.reduce((a, z) => { a[z.level] = (a[z.level] || 0) + 1; return a; }, {});
+  const toggleLevel = (lvl) => setHidden(h => ({ ...h, [lvl]: !h[lvl] }));
+  const LEGEND = [
+    ['critical', 'Critical'], ['high', 'High'], ['medium', 'Medium'], ['nominal', 'Nominal'],
+  ];
+  const sevRank = { critical: 4, high: 3, medium: 2, nominal: 1 };
+  const sidebarZones = zones
+    .filter(z => z.station_id !== 'USGS' || z.alert_count > 0)
+    .filter(z => !sidebarQ || z.city.toLowerCase().includes(sidebarQ.toLowerCase()))
+    .sort((a, b) => (sevRank[b.level] - sevRank[a.level]) || (b.alert_count - a.alert_count));
 
   return (
     <div className="tab-pane">
       <div className="map-layout">
         <div>
           <form onSubmit={doSearch} style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
-            <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search a location (city, area, landmark)…"
+            <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search any location (city, area, landmark)…"
               style={{ flex: 1, padding: '8px 12px', border: '2px solid #000', fontFamily: 'var(--font-mono)', fontSize: 13, background: '#fff', color: '#000' }} />
             <button type="submit" className="btn-brutal" disabled={searching} style={{ fontSize: 12, padding: '8px 16px' }}>
               {searching ? 'SEARCHING…' : '🔍 GO'}
             </button>
+            <button type="button" className="btn-brutal" onClick={resetView} style={{ fontSize: 12, padding: '8px 14px' }}>⟲ RESET</button>
           </form>
-          <div ref={mapRef} style={{ height: 520, border: '3px solid #000', boxShadow: '6px 6px 0 #000', background: '#aadaff' }}></div>
-          <div className="map-legend" style={{ marginTop: 10 }}>
-            <span><span className="status-dot" style={{ background: ANM_LEVEL_COLOR.critical }}></span> Critical ({counts.critical || 0})</span>
-            <span><span className="status-dot" style={{ background: ANM_LEVEL_COLOR.high }}></span> High ({counts.high || 0})</span>
-            <span><span className="status-dot" style={{ background: ANM_LEVEL_COLOR.medium }}></span> Medium ({counts.medium || 0})</span>
-            <span><span className="status-dot" style={{ background: ANM_LEVEL_COLOR.nominal }}></span> Nominal ({counts.nominal || 0})</span>
+
+          <div className="anm-map-shell">
+            <div ref={mapRef} className="anm-map-canvas"></div>
+            <div className="anm-map-toolbar">
+              {Object.entries(ANM_BASEMAPS).map(([k, v]) => (
+                <button key={k} className={`anm-map-btn ${basemap === k ? 'active' : ''}`}
+                  onClick={() => setBasemap(k)}>{v.label}</button>
+              ))}
+            </div>
+          </div>
+
+          <div className="map-legend" style={{ marginTop: 10, display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+            {LEGEND.map(([lvl, lbl]) => (
+              <span key={lvl} className={`anm-legend-chip ${hidden[lvl] ? 'off' : ''}`} onClick={() => toggleLevel(lvl)}
+                title="Click to show/hide on map">
+                <span className="status-dot" style={{ background: ANM_LEVEL_COLOR[lvl] }}></span> {lbl} ({counts[lvl] || 0})
+              </span>
+            ))}
+            <span style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 10, opacity: 0.55 }}>
+              ◆ seismic · ◉ pulsing = critical/high · {updatedAt ? `updated ${updatedAt.toLocaleTimeString()}` : 'live'}
+            </span>
           </div>
         </div>
+
         <div className="map-sidebar">
           <div className="widget-card">
             <div className="widget-title">STATION ZONES · LIVE</div>
-            <div style={{ maxHeight: 480, overflowY: 'auto' }}>
-              {zones.filter(z => z.station_id !== 'USGS' || z.alert_count > 0).map(z => (
-                <div key={z.station_id} className="zone-row" style={{ cursor: 'pointer' }}
-                  onClick={() => { setSel(z); mapObj.current && mapObj.current.setView([z.lat, z.lng], 9); }}>
+            <div style={{ padding: '8px 10px 4px' }}>
+              <input value={sidebarQ} onChange={e => setSidebarQ(e.target.value)} placeholder="Filter cities…"
+                style={{ width: '100%', padding: '6px 10px', border: '2px solid #000', fontFamily: 'var(--font-mono)', fontSize: 12, background: '#fff', color: '#000' }} />
+            </div>
+            <div style={{ maxHeight: 440, overflowY: 'auto' }}>
+              {sidebarZones.map(z => (
+                <div key={z.station_id} className="zone-row" style={{ cursor: 'pointer', background: sel && sel.station_id === z.station_id ? 'rgba(0,229,255,0.12)' : undefined }}
+                  onClick={() => flyToZone(z)}>
                   <span className="status-dot" style={{ background: ANM_LEVEL_COLOR[z.level] }}></span>
-                  <span style={{ flex: 1, fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 500 }}>{z.city}</span>
+                  <span style={{ flex: 1, fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 500 }}>
+                    {z.city}{z.station_id === 'USGS' ? ' ◆' : ''}
+                  </span>
                   <Badge variant={z.level === 'critical' ? 'red' : z.level === 'high' ? 'gold' : z.level === 'medium' ? 'default' : 'green'}>
                     {z.alert_count} alert{z.alert_count === 1 ? '' : 's'}
                   </Badge>
                 </div>
               ))}
+              {sidebarZones.length === 0 && (
+                <div style={{ padding: 20, textAlign: 'center', opacity: 0.5, fontFamily: 'var(--font-mono)', fontSize: 11 }}>No matching zones.</div>
+              )}
             </div>
           </div>
           {sel && (
@@ -5728,9 +5877,13 @@ const AnomalyCityMap = ({ refreshKey }) => {
               <div className="widget-title" style={{ color: ANM_LEVEL_COLOR[sel.level] }}>{sel.city.toUpperCase()}</div>
               <div style={{ padding: 12, fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.8 }}>
                 <div>Zone: <strong>{sel.zone}</strong></div>
-                <div>Level: <strong style={{ color: ANM_LEVEL_COLOR[sel.level] }}>{sel.level.toUpperCase()}</strong></div>
+                <div>Status: <strong style={{ color: ANM_LEVEL_COLOR[sel.level] }}>{sel.level.toUpperCase()}</strong></div>
                 <div>Active alerts: <strong>{sel.alert_count}</strong></div>
-                <div style={{ marginTop: 6 }}>{sel.summary}</div>
+                {sel.worst_metric && <div>Worst: <strong>{sel.worst_metric} {sel.worst_value}</strong></div>}
+                <div style={{ marginTop: 6, opacity: 0.85 }}>{sel.summary}</div>
+                <button className="btn-brutal" onClick={() => flyToZone(sel)} style={{ marginTop: 10, fontSize: 11, padding: '5px 12px' }}>
+                  ◎ RE-CENTRE
+                </button>
               </div>
             </div>
           )}

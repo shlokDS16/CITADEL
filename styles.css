@@ -2773,3 +2773,68 @@ body.dark .tv-timeline-row { background: #0f0f0f; }
   margin-bottom: 10px;
 }
 .tv-sla-list { margin-top: 8px; }
+
+/* ============================================================
+   Anomaly Monitoring — enhanced Leaflet city map
+   ============================================================ */
+.anm-map-shell { position: relative; }
+.anm-map-canvas {
+  height: 560px; border: 3px solid #000; box-shadow: 6px 6px 0 #000;
+  background: #0b1622;
+}
+.anm-map-toolbar {
+  position: absolute; top: 10px; right: 10px; z-index: 600;
+  display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end;
+}
+.anm-map-btn {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+  letter-spacing: 0.5px; padding: 5px 9px; cursor: pointer;
+  background: #fff; color: #000; border: 2px solid #000;
+  box-shadow: 2px 2px 0 #000; text-transform: uppercase;
+}
+.anm-map-btn.active { background: var(--cyan); color: #000; }
+.anm-map-btn:hover { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 #000; }
+
+/* permanent zone label chips drawn as Leaflet divIcons */
+.anm-zone-label {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+  letter-spacing: 0.4px; color: #fff; white-space: nowrap;
+  background: rgba(8,14,22,0.82); border: 1px solid rgba(255,255,255,0.35);
+  padding: 1px 6px; border-radius: 2px; transform: translateY(-26px);
+  text-shadow: 0 1px 2px #000;
+}
+.anm-zone-label.crit { border-color: #ef4444; color: #fecaca; }
+.anm-zone-label.high { border-color: #f59e0b; color: #fde68a; }
+
+/* pulsing halo for critical/high markers */
+.anm-pulse { position: relative; }
+.anm-pulse::before {
+  content: ''; position: absolute; left: 50%; top: 50%;
+  width: 14px; height: 14px; border-radius: 50%;
+  transform: translate(-50%,-50%);
+  background: currentColor; opacity: 0.55;
+  animation: anmPulse 1.8s ease-out infinite;
+}
+@keyframes anmPulse {
+  0%   { width: 14px; height: 14px; opacity: 0.55; }
+  100% { width: 64px; height: 64px; opacity: 0; }
+}
+.anm-quake-icon {
+  width: 0; height: 0; border-left: 9px solid transparent;
+  border-right: 9px solid transparent; border-bottom: 16px solid #ef4444;
+  filter: drop-shadow(0 1px 2px #000);
+}
+.anm-legend-chip {
+  cursor: pointer; user-select: none; opacity: 1;
+  transition: opacity 0.15s;
+}
+.anm-legend-chip.off { opacity: 0.32; text-decoration: line-through; }
+.leaflet-popup-content-wrapper {
+  border: 2px solid #000; border-radius: 3px; box-shadow: 4px 4px 0 #000;
+}
+.leaflet-popup-content { font-family: var(--font-mono); font-size: 12px; margin: 10px 12px; }
+.anm-popup-btn {
+  display: inline-block; margin-top: 7px; padding: 4px 10px;
+  background: var(--cyan); color: #000; border: 2px solid #000;
+  font-weight: 700; font-size: 11px; cursor: pointer; text-decoration: none;
+}
