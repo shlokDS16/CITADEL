@@ -5105,6 +5105,87 @@ const TRAFFIC_FIELD_LABELS = {
   track_iou_threshold:        ['Track IoU threshold',       'Min IoU to consider two bboxes the same vehicle across snapshots (0..1).'],
 };
 
+// Cross-module #8 — edit traffic fines; reflected live in challan
+// creation, Telegram messages AND the Citizen AI Assistant (all read
+// the govt_fines_penalties table at request time).
+const TrafficFineEditor = () => {
+  const [fines, setFines] = React.useState(null);
+  const [draft, setDraft] = React.useState({});
+  const [busy, setBusy] = React.useState('');
+  const [toast, setToast] = React.useState('');
+
+  const load = React.useCallback(() => {
+    apiFetch('/api/traffic-violations/fines', TRAFFIC_AUTH)
+      .then(d => { setFines(d || []); setDraft({}); })
+      .catch(() => setFines([]));
+  }, []);
+  React.useEffect(load, [load]);
+
+  const flash = (m) => { setToast(m); setTimeout(() => setToast(''), 5000); };
+
+  const saveOne = async (vt) => {
+    const val = draft[vt];
+    if (val === undefined || val === '' || isNaN(parseInt(val, 10))) return;
+    setBusy(vt);
+    try {
+      const r = await apiFetch(`/api/traffic-violations/fines/${encodeURIComponent(vt)}`, {
+        ...TRAFFIC_AUTH, method: 'PUT',
+        json: { fine_amount: parseInt(val, 10), actor: 'rsd' },
+      });
+      flash(`✓ ${vt.replace(/_/g, ' ')}: ₹${r.old_amount ?? '—'} → ₹${r.fine_amount} · live in challans, Telegram & Citizen Assistant`);
+      load();
+    } catch (e) {
+      flash(`✕ ${e.message || e}`);
+    } finally { setBusy(''); }
+  };
+
+  return (
+    <div className="widget-card" style={{ marginTop: 16 }}>
+      <div className="widget-title" style={{ color: 'var(--gold)' }}>⚖ FINE SCHEDULE EDITOR · LIVE</div>
+      {toast && (
+        <div style={{ margin: '10px 14px 0', padding: '8px 12px',
+          background: toast.startsWith('✓') ? '#0a3d1f' : '#3d0a0a',
+          color: toast.startsWith('✓') ? 'var(--green)' : 'var(--red)',
+          border: `2px solid ${toast.startsWith('✓') ? 'var(--green)' : 'var(--red)'}`,
+          fontFamily: 'var(--font-mono)', fontSize: 11 }}>{toast}</div>
+      )}
+      <div style={{ padding: 14 }}>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, opacity: 0.6, marginBottom: 10 }}>
+          Editing a fine updates <code>govt_fines_penalties</code>. Challan creation,
+          Telegram challan messages and the Citizen AI Assistant all read this table
+          at request time — the new amount applies on the very next action, no restart.
+        </div>
+        {!fines ? (
+          <div style={{ opacity: 0.5, fontFamily: 'var(--font-mono)', fontSize: 12 }}>Loading…</div>
+        ) : fines.length === 0 ? (
+          <div style={{ opacity: 0.5, fontFamily: 'var(--font-mono)', fontSize: 12 }}>No fines configured.</div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {fines.map(f => (
+              <div key={f.violation_type} style={{ display: 'grid', gridTemplateColumns: '180px 90px 120px 1fr', gap: 10, alignItems: 'center' }}>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, textTransform: 'capitalize' }}>
+                  {f.violation_type.replace(/_/g, ' ')}
+                </span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, opacity: 0.6 }}>₹{f.fine_amount}</span>
+                <input type="number" min="0" placeholder="new ₹"
+                  value={draft[f.violation_type] ?? ''}
+                  onChange={e => setDraft(d => ({ ...d, [f.violation_type]: e.target.value }))}
+                  style={{ padding: '5px 8px', border: '2px solid #000', fontFamily: 'var(--font-mono)', fontSize: 12, background: '#fff', color: '#000' }} />
+                <button className="btn-brutal" disabled={busy === f.violation_type || draft[f.violation_type] === undefined || draft[f.violation_type] === ''}
+                  onClick={() => saveOne(f.violation_type)}
+                  style={{ fontSize: 11, padding: '5px 12px', width: 'fit-content',
+                    background: (draft[f.violation_type] !== undefined && draft[f.violation_type] !== '') ? 'var(--gold)' : '#ddd', color: '#000' }}>
+                  {busy === f.violation_type ? 'SAVING…' : 'UPDATE'}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 const TrafficSettings = () => {
   const [config, setConfig] = React.useState(null);
   const [schema, setSchema] = React.useState({});
@@ -5301,6 +5382,7 @@ const TrafficSettings = () => {
           </div>
         </div>
       </div>
+      <TrafficFineEditor />
     </div>
   );
 };
@@ -6113,9 +6195,9 @@ const RAGChatbot = ({ onBack }) => {
   return (
     <div className="subpage fade-in">
       <SubPageHeader
-        title="RAG CHATBOT"
+        title="CITIZEN AI ASSISTANT"
         gatewayId="GATEWAY_01"
-        subtitle="LOCAL RAG · OLLAMA LLAMA 3.2 · MULTILINGUAL · 247 KB ARTICLES"
+        subtitle="PAGEINDEX · VECTORLESS REASONING RAG · GROQ · MULTILINGUAL · VOICE · OCR"
         accentColor="var(--gold)"
         onBack={onBack}
       />
@@ -6127,138 +6209,280 @@ const RAGChatbot = ({ onBack }) => {
   );
 };
 
+// ====================================================================
+// Citizen AI Assistant — PageIndex (vectorless reasoning RAG) chat.
+// Live Groq backend · auto language detect+reply · voice in/out ·
+// file upload (OCR→RAG) · reasoning trace · traceable citations.
+// ====================================================================
+const CITIZEN_LANGS = [
+  { label: 'Auto-detect', code: 'auto' }, { label: 'English', code: 'English' },
+  { label: 'हिन्दी', code: 'Hindi' }, { label: 'বাংলা', code: 'Bengali' },
+  { label: 'தமிழ்', code: 'Tamil' }, { label: 'తెలుగు', code: 'Telugu' },
+  { label: 'मराठी', code: 'Marathi' }, { label: 'ગુજરાતી', code: 'Gujarati' },
+  { label: 'ಕನ್ನಡ', code: 'Kannada' }, { label: 'español', code: 'Spanish' },
+];
+
 const ChatbotChat = () => {
-  const [messages, setMessages] = React.useState([
-    { role: 'bot', text: "Welcome to C.I.T.A.D.E.L. AI Assistant.\n\nI can help with:\n• Government services (Aadhaar, PAN, Passport, Voter ID, Driving License)\n• Tax filing, property records, scheme eligibility\n• Health, pension, business registration\n\nHow can I help you today?", suggestions: ['How to apply for Aadhaar?', 'PAN card status check', 'Property tax calculator', 'Ayushman Bharat scheme'] }
-  ]);
+  const [messages, setMessages] = React.useState([{
+    role: 'bot',
+    text: "Namaste 🙏 I'm the CITADEL Citizen Assistant — a reasoning-based "
+      + "(PageIndex, vectorless) AI that knows the city's services.\n\n"
+      + "Ask me about Aadhaar, PAN, passport, driving licence, traffic "
+      + "challans & fines, schemes, taxes — in **any language**. You can "
+      + "**speak** to me 🎙, or **attach a document** 📎 (resume, report, "
+      + "notice) and I'll read it and help.",
+    suggestions: ['What is the fine for riding without a helmet?',
+      'How do I apply for Aadhaar?', 'मेरा PAN कार्ड कैसे बनेगा?',
+      'How to pay a traffic challan?'],
+    meta: { engine: true },
+  }]);
   const [input, setInput] = React.useState('');
-  const [typing, setTyping] = React.useState(false);
-  const [lang, setLang] = React.useState('English');
-  const [voice, setVoice] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+  const [lang, setLang] = React.useState('auto');
+  const [ttsOn, setTtsOn] = React.useState(false);
+  const [listening, setListening] = React.useState(false);
+  const [attach, setAttach] = React.useState(null);
+  const [catalog, setCatalog] = React.useState(null);
+  const [health, setHealth] = React.useState(null);
+  const [openTrace, setOpenTrace] = React.useState({});
   const chatRef = React.useRef(null);
+  const recRef = React.useRef(null);
+  const fileRef = React.useRef(null);
 
   React.useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
-  }, [messages, typing]);
+  }, [messages, busy]);
 
-  const send = (q) => {
-    const query = q || input;
-    if (!query.trim()) return;
-    setMessages(m => [...m, { role: 'user', text: query }]);
-    setInput('');
-    setTyping(true);
-    setTimeout(() => {
-      setTyping(false);
-      setMessages(m => [...m, {
-        role: 'bot',
-        text: "Here's what I found in the knowledge base:\n\n**Applying for Aadhaar**\n\n1. Find your nearest enrollment center (Aadhaar Seva Kendra) via uidai.gov.in\n2. Bring valid ID proof (Passport, Voter ID, Driving License) and address proof\n3. Biometric capture (fingerprints + iris + photo) takes ~15 min\n4. You receive an enrollment slip with EID\n5. Your Aadhaar card arrives in 60–90 days by post\n\nOnline tracking available at resident.uidai.gov.in using your EID.",
-        sources: [
-          { title: 'gov-services-2026.pdf', section: 'Section 3.2', relevance: 96 },
-          { title: 'aadhaar-enrollment-faq.md', section: 'Q4–Q7', relevance: 88 },
-          { title: 'uidai-circular-2026.pdf', section: 'Page 14', relevance: 82 },
-        ],
-        suggestions: ['How long does it take?', 'Can I update my address?', 'What if I lost my Aadhaar?', 'Book appointment'],
-        confidence: 94
-      }]);
-    }, 1500);
+  React.useEffect(() => {
+    apiFetch('/api/citizen/knowledge').then(setCatalog).catch(() => {});
+    apiFetch('/api/v1/citizen/health').then(setHealth).catch(() => {});
+    const t = setInterval(() => apiFetch('/api/v1/citizen/health').then(setHealth).catch(() => {}), 15000);
+    return () => clearInterval(t);
+  }, []);
+
+  const speak = (text, bcp47) => {
+    try {
+      if (!ttsOn || !window.speechSynthesis) return;
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text.replace(/\*\*/g, '').slice(0, 600));
+      u.lang = bcp47 || 'en-IN';
+      const v = window.speechSynthesis.getVoices().find(x => x.lang === u.lang);
+      if (v) u.voice = v;
+      window.speechSynthesis.speak(u);
+    } catch (e) { /* noop */ }
   };
 
+  const pushBot = (data) => {
+    setMessages(m => [...m, {
+      role: 'bot', text: data.answer || '(no answer)',
+      sources: data.sources || [], reasoning: data.reasoning || [],
+      confidence: data.confidence, restricted: data.restricted,
+      usedWeb: data.used_web, language: data.language, bcp47: data.bcp47,
+      ocr: data.ocr,
+      suggestions: data.restricted ? [] : ['Tell me more', 'What documents do I need?', 'Official portal?'],
+    }]);
+    if (data.answer) speak(data.answer, data.bcp47);
+  };
+
+  const histPayload = () => messages.filter(m => m.text)
+    .slice(-6).map(m => ({ role: m.role, text: m.text }));
+
+  const send = async (q) => {
+    const query = (q || input).trim();
+    if ((!query && !attach) || busy) return;
+    const file = attach;
+    setMessages(m => [...m, { role: 'user', text: query || (file ? `📎 ${file.name}` : ''), file: file ? file.name : null }]);
+    setInput(''); setAttach(null); setBusy(true);
+    try {
+      let data;
+      if (file) {
+        const fd = new FormData();
+        fd.append('file', file);
+        fd.append('query', query || '');
+        fd.append('history', JSON.stringify(histPayload()));
+        fd.append('language', lang);
+        fd.append('allow_web', 'true');
+        const r = await fetch(`${API_BASE || ''}/api/citizen/chat/upload`, { method: 'POST', body: fd });
+        data = await r.json();
+        if (!r.ok) throw new Error(data.detail || 'upload failed');
+      } else {
+        data = await apiFetch('/api/citizen/chat', {
+          json: { query, history: histPayload(), language: lang, allow_web: true },
+        });
+      }
+      pushBot(data);
+    } catch (e) {
+      setMessages(m => [...m, { role: 'bot', text: `⚠ ${e.message || e}. Please try again.`, confidence: 0 }]);
+    } finally { setBusy(false); }
+  };
+
+  const toggleVoice = () => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { alert('Voice input is not supported in this browser. Try Chrome/Edge.'); return; }
+    if (listening) { try { recRef.current && recRef.current.stop(); } catch (e) {} setListening(false); return; }
+    const rec = new SR();
+    const codeMap = { Hindi: 'hi-IN', Bengali: 'bn-IN', Tamil: 'ta-IN', Telugu: 'te-IN',
+      Marathi: 'mr-IN', Gujarati: 'gu-IN', Kannada: 'kn-IN', Spanish: 'es-ES', English: 'en-IN' };
+    rec.lang = lang === 'auto' ? 'en-IN' : (codeMap[lang] || 'en-IN');
+    rec.interimResults = true; rec.continuous = false;
+    let finalT = '';
+    rec.onresult = (ev) => {
+      let t = '';
+      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+        t += ev.results[i][0].transcript;
+        if (ev.results[i].isFinal) finalT += ev.results[i][0].transcript;
+      }
+      setInput(finalT || t);
+    };
+    rec.onend = () => { setListening(false); const v = (finalT || '').trim(); if (v) send(v); };
+    rec.onerror = () => setListening(false);
+    recRef.current = rec; setListening(true);
+    try { rec.start(); } catch (e) { setListening(false); }
+  };
+
+  const onFile = (e) => { const f = e.target.files && e.target.files[0]; if (f) setAttach(f); e.target.value = ''; };
+  const clearChat = () => { window.speechSynthesis && window.speechSynthesis.cancel(); setMessages(m => m.slice(0, 1)); };
+
   return (
-    <div className="chat-layout-enhanced">
-      <div className="chat-sidebar-enhanced">
+    <div className="cz-chat">
+      <div className="cz-side">
         <div className="widget-card compact">
-          <div className="widget-title">SESSION</div>
+          <div className="widget-title">⚙ ENGINE</div>
           <div className="info-rows">
-            <div className="info-row"><span>LLM:</span><span style={{ color: 'var(--green)' }}>Ollama 3.2 ✓</span></div>
-            <div className="info-row"><span>Language:</span><span>{lang}</span></div>
-            <div className="info-row"><span>KB Articles:</span><span>247</span></div>
-            <div className="info-row"><span>Response:</span><span>~1.2s avg</span></div>
+            <div className="info-row"><span>RAG:</span><span style={{ color: 'var(--gold)' }}>PageIndex</span></div>
+            <div className="info-row"><span>Mode:</span><span>Vectorless · tree-search</span></div>
+            <div className="info-row"><span>LLM:</span><span style={{ color: 'var(--green)' }}>Groq {health ? '✓' : '…'}</span></div>
+            <div className="info-row"><span>Knowledge:</span><span>{health ? `${health.corpora} trees ${health.trees_ready ? '✓' : '⏳'}` : '…'}</span></div>
           </div>
         </div>
         <div className="widget-card compact">
-          <div className="widget-title">LANGUAGE</div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
-            {['English', 'हिन्दी', 'தமிழ்', 'বাংলা', 'मराठी', 'తెలుగు'].map(l => (
-              <button key={l} className={`chip ${lang === l ? 'selected' : ''}`} onClick={() => setLang(l)} style={{ justifyContent: 'center' }}>{l}</button>
+          <div className="widget-title">🌐 LANGUAGE</div>
+          <div className="cz-lang-grid">
+            {CITIZEN_LANGS.map(l => (
+              <button key={l.code} className={`cz-lang ${lang === l.code ? 'on' : ''}`}
+                onClick={() => setLang(l.code)}>{l.label}</button>
             ))}
           </div>
-          <div style={{ marginTop: 12 }}>
-            <Toggle checked={voice} onChange={setVoice} label="🎙 Voice input (Beta)" />
-          </div>
+          <label className="cz-tts">
+            <input type="checkbox" checked={ttsOn} onChange={e => setTtsOn(e.target.checked)} />
+            🔊 Speak replies (voice out)
+          </label>
         </div>
         <div className="widget-card compact">
-          <div className="widget-title">QUICK ACTIONS</div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            {['📋 Apply Aadhaar', '💳 Check PAN status', '📘 Passport renewal', '🏠 Property tax', '🎓 Scholarship finder'].map(a => (
-              <button key={a} className="quick-link" onClick={() => send(a.split(' ').slice(1).join(' '))}>{a}</button>
-            ))}
-          </div>
+          <div className="widget-title">📚 KNOWLEDGE BASE</div>
+          {catalog && catalog.catalog ? (
+            <div className="cz-kb">
+              {catalog.catalog.map(c => (
+                <div key={c.corpus} className="cz-kb-item" title={c.description}>
+                  <div className="cz-kb-name">{c.corpus.replace(/_/g, ' ')}</div>
+                  <div className="cz-kb-sec">{c.sections.length} sections</div>
+                </div>
+              ))}
+              {!catalog.ready && <div className="cz-kb-build">⏳ Building trees…</div>}
+            </div>
+          ) : <div className="cz-kb-build">Loading…</div>}
         </div>
       </div>
-      <div className="chat-main-enhanced">
-        <div className="chat-header">
-          <span className="chat-title">🤖 OLLAMA ASSISTANT</span>
+
+      <div className="cz-main">
+        <div className="cz-head">
+          <span className="cz-title">🤖 CITIZEN ASSISTANT</span>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <span className="status-badge green small">● ONLINE</span>
-            <button className="icon-btn" title="Export chat">⬇</button>
-            <button className="icon-btn" title="Clear">✕</button>
+            <span className="cz-pill">PAGEINDEX · GROQ</span>
+            <button className="icon-btn" title="Clear chat" onClick={clearChat}>✕</button>
           </div>
         </div>
-        <div className="chat-messages" ref={chatRef}>
+
+        <div className="cz-msgs" ref={chatRef}>
           {messages.map((m, i) => (
             <React.Fragment key={i}>
-              <div className={`chat-msg ${m.role}`}>
-                {m.role === 'bot' && <span className="msg-avatar">🤖</span>}
-                <div className="msg-bubble">
-                  <div dangerouslySetInnerHTML={{ __html: m.text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>') }}></div>
-                  {m.sources && (
-                    <div className="msg-sources">
-                      <div className="msg-sources-title">📎 SOURCES</div>
+              <div className={`cz-row ${m.role}`}>
+                {m.role === 'bot' && <span className="cz-av">{m.restricted ? '🔒' : '🤖'}</span>}
+                <div className={`cz-bubble ${m.role} ${m.restricted ? 'restricted' : ''}`}>
+                  {m.file && <div className="cz-file">📎 {m.file}</div>}
+                  <div dangerouslySetInnerHTML={{ __html: (m.text || '')
+                    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+                    .replace(/\n/g, '<br/>') }} />
+                  {m.ocr && m.ocr.ok && (
+                    <div className="cz-ocr">📄 OCR read “{m.ocr.filename}” · {m.ocr.page_count} page(s) · {Math.round(m.ocr.confidence)}% conf · {m.ocr.chars} chars</div>
+                  )}
+                  {m.reasoning && m.reasoning.length > 0 && (
+                    <div className="cz-trace">
+                      <button className="cz-trace-tog" onClick={() => setOpenTrace(o => ({ ...o, [i]: !o[i] }))}>
+                        🧠 Reasoning trace {openTrace[i] ? '▾' : '▸'}
+                      </button>
+                      {openTrace[i] && (
+                        <ol className="cz-trace-list">
+                          {m.reasoning.map((r, j) => <li key={j}>{r}</li>)}
+                        </ol>
+                      )}
+                    </div>
+                  )}
+                  {m.sources && m.sources.length > 0 && (
+                    <div className="cz-src">
+                      <div className="cz-src-t">📎 SOURCES (traceable)</div>
                       {m.sources.map((s, j) => (
-                        <div key={j} className="source-chip">
-                          <span className="source-title">{s.title}</span>
-                          <span className="source-section">{s.section}</span>
-                          <span className="source-rel">{s.relevance}%</span>
-                        </div>
+                        s.url ? (
+                          <a key={j} className="cz-src-chip web" href={s.url} target="_blank" rel="noopener noreferrer">
+                            🌐 {s.section || s.url}
+                          </a>
+                        ) : (
+                          <div key={j} className="cz-src-chip">
+                            <span className="cz-src-c">{(s.corpus || '').replace(/_/g, ' ')}</span>
+                            <span className="cz-src-s">{s.section}</span>
+                          </div>
+                        )
                       ))}
                     </div>
                   )}
-                  {m.confidence !== undefined && (
-                    <div className="msg-footer">
-                      <ConfidenceBar value={m.confidence} compact />
-                      <div className="feedback-btns">
-                        <button className="icon-btn small" title="Helpful">👍</button>
-                        <button className="icon-btn small" title="Not helpful">👎</button>
-                        <button className="icon-btn small" title="Copy">⎘</button>
-                      </div>
+                  {(m.confidence !== undefined || m.language) && (
+                    <div className="cz-foot">
+                      {m.language && <span className="cz-lng">🌐 {m.language}</span>}
+                      {m.usedWeb && <span className="cz-web">web-assisted</span>}
+                      {m.confidence !== undefined && <span className="cz-conf">{m.confidence}% confidence</span>}
+                      <span style={{ flex: 1 }} />
+                      {m.bcp47 && window.speechSynthesis && (
+                        <button className="icon-btn small" title="Replay voice" onClick={() => { setTtsOn(true); speak(m.text, m.bcp47); }}>🔊</button>
+                      )}
+                      <button className="icon-btn small" title="Copy" onClick={() => navigator.clipboard && navigator.clipboard.writeText(m.text)}>⎘</button>
                     </div>
                   )}
                 </div>
               </div>
-              {m.suggestions && (
-                <div className="msg-suggestions">
-                  {m.suggestions.map(s => (
-                    <button key={s} className="suggestion-chip" onClick={() => send(s)}>{s}</button>
-                  ))}
+              {m.suggestions && m.suggestions.length > 0 && (
+                <div className="cz-sugg">
+                  {m.suggestions.map(s => <button key={s} className="cz-sugg-c" onClick={() => send(s)}>{s}</button>)}
                 </div>
               )}
             </React.Fragment>
           ))}
-          {typing && (
-            <div className="chat-msg bot">
-              <span className="msg-avatar">🤖</span>
-              <div className="msg-bubble typing">
-                <span className="typing-dots"><span></span><span></span><span></span></span>
-                Thinking...
+          {busy && (
+            <div className="cz-row bot">
+              <span className="cz-av">🤖</span>
+              <div className="cz-bubble bot">
+                <span className="cz-dots"><span></span><span></span><span></span></span>
+                <span style={{ marginLeft: 8, opacity: 0.7, fontSize: 12 }}>Reasoning over the knowledge tree…</span>
               </div>
             </div>
           )}
         </div>
-        <div className="chat-input-bar">
-          {voice && <button className="icon-btn" style={{ background: 'var(--red)', color: '#fff' }}>🎙</button>}
-          <input className="chat-input" value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && send()} placeholder="Type your message..." />
-          <button className="icon-btn" title="Attach">📎</button>
-          <button className="btn-brutal action-btn gold" onClick={() => send()} style={{ padding: '8px 20px', width: 'auto' }}>SEND</button>
+
+        {attach && (
+          <div className="cz-attach">📎 {attach.name} <button onClick={() => setAttach(null)}>✕</button></div>
+        )}
+        <div className="cz-input">
+          <button className={`cz-mic ${listening ? 'live' : ''}`} title="Voice input (any language)" onClick={toggleVoice}>
+            {listening ? '⏺' : '🎙'}
+          </button>
+          <input ref={fileRef} type="file" hidden accept=".pdf,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff" onChange={onFile} />
+          <button className="cz-clip" title="Attach a document (OCR)" onClick={() => fileRef.current && fileRef.current.click()}>📎</button>
+          <input className="cz-field" value={input} disabled={busy}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && send()}
+            placeholder={listening ? 'Listening…' : 'Ask in any language, or attach a document…'} />
+          <button className="btn-brutal action-btn gold" onClick={() => send()} disabled={busy}
+            style={{ padding: '8px 20px', width: 'auto' }}>{busy ? '…' : 'SEND'}</button>
         </div>
       </div>
     </div>

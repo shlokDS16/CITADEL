@@ -238,6 +238,27 @@ async def list_fines():
         raise HTTPException(status_code=500, detail=f"Fines lookup failed: {e}")
 
 
+@router.put("/traffic-violations/fines/{violation_type}", tags=["traffic-violations"])
+async def update_fine(violation_type: str, body: dict):
+    """
+    Edit a fine. Reflected live in challan creation, Telegram messages and
+    the Citizen AI Assistant (all read this table at request time).
+    """
+    try:
+        return service.update_fine(
+            violation_type,
+            fine_amount=body.get("fine_amount"),
+            legal_section=body.get("legal_section"),
+            description=body.get("description"),
+            actor=body.get("actor") or "rsd",
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        log.exception("update_fine failed")
+        raise HTTPException(status_code=500, detail=f"Fine update failed: {e}")
+
+
 # ============================================================
 # Phase 1+ — Camera Health Strip (Live Feed top)
 # ============================================================

@@ -70,6 +70,10 @@ test-*.docx
 test-*.pdf
 netlify-drop/
 
+# Citizen Assistant — vendored PageIndex (auto-cloned at runtime) + tree cache
+backend/.vendor_pageindex/
+backend/.citizen_index/
+
 # Claude worktrees + transient agent data
 .claude/worktrees/
 .claude/__claude_resume__/

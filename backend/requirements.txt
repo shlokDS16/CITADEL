@@ -35,6 +35,14 @@ opencv-python-headless>=4.10
 numpy>=1.26
 Pillow>=10.4
 
+# --- Citizen Assistant: PageIndex (vectorless reasoning RAG) ---
+# Self-hosted PageIndex source is auto-cloned at runtime into
+# backend/.vendor_pageindex (git-ignored). These are its runtime deps;
+# Groq is driven through LiteLLM (no OpenAI key needed).
+litellm>=1.83
+PyPDF2>=3.0
+pyyaml>=6.0
+
 # --- NLP / PII ---
 spacy>=3.7
 # Run after install: python -m spacy download en_core_web_sm

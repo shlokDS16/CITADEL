@@ -23,6 +23,7 @@ from app.modules.document_intelligence import router as doc_intel_router
 from app.modules.resume import router as resume_router
 from app.modules.traffic_violations import router as traffic_router
 from app.modules.anomaly_monitoring import router as anomaly_router
+from app.modules.citizen_assistant import router as citizen_router
 
 # ---- logging ----
 logging.basicConfig(
@@ -52,6 +53,14 @@ async def lifespan(app: FastAPI):
         start_background_refresh()
     except Exception as e:
         log.warning("Failed to start anomaly refresh: %s", e)
+
+    # Prebuild Citizen Assistant PageIndex trees (Citizen Module 1) so the
+    # first chat is instant.
+    try:
+        from app.modules.citizen_assistant.pageindex_engine import start_background_build
+        start_background_build()
+    except Exception as e:
+        log.warning("Failed to start citizen assistant build: %s", e)
 
     yield
     try:
@@ -93,6 +102,7 @@ app.include_router(doc_intel_router, prefix="/api", tags=["document-intelligence
 app.include_router(resume_router,    prefix="/api", tags=["resume-screening"])
 app.include_router(traffic_router,   prefix="/api", tags=["traffic-violations"])
 app.include_router(anomaly_router,   prefix="/api", tags=["anomaly-monitoring"])
+app.include_router(citizen_router,   prefix="/api", tags=["citizen-assistant"])
 
 
 # ---- root: friendly landing JSON so visiting `/` doesn't 404 ----

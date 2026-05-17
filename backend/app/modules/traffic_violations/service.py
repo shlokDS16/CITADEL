@@ -893,6 +893,60 @@ def list_fines() -> list[dict[str, Any]]:
     return (sb.table("govt_fines_penalties").select("*").order("violation_type").execute().data or [])
 
 
+def update_fine(violation_type: str, fine_amount: int,
+                legal_section: Optional[str] = None,
+                description: Optional[str] = None,
+                actor: str = "rsd") -> dict[str, Any]:
+    """
+    Change a traffic-violation fine. Because `_fine_amount_for()` (used by
+    challan creation + Telegram) and the Citizen Assistant's live_facts
+    both read this same govt_fines_penalties row at request time, the new
+    amount is reflected EVERYWHERE on the next action — no restart, no
+    rebuild. Upserts so a brand-new violation type can be priced too.
+    """
+    vt = (violation_type or "").strip().lower().replace(" ", "_")
+    if not vt:
+        raise ValueError("violation_type is required")
+    if fine_amount is None or int(fine_amount) < 0:
+        raise ValueError("fine_amount must be a non-negative integer")
+    sb = get_supabase()
+    existing = (
+        sb.table("govt_fines_penalties").select("*")
+        .eq("violation_type", vt).limit(1).execute()
+    ).data or []
+    row = {
+        "violation_type": vt,
+        "fine_amount": int(fine_amount),
+    }
+    if legal_section is not None:
+        row["legal_section"] = legal_section
+    if description is not None:
+        row["description"] = description
+    old_amount = existing[0].get("fine_amount") if existing else None
+    if existing:
+        sb.table("govt_fines_penalties").update(row).eq("violation_type", vt).execute()
+    else:
+        sb.table("govt_fines_penalties").insert(row).execute()
+    try:
+        sb.table("tv_audit_log").insert({
+            "entity_type": "fine", "entity_id": vt, "action": "fine_updated",
+            "actor": actor,
+            "payload": {"old_amount": old_amount, "new_amount": int(fine_amount),
+                        "legal_section": legal_section},
+        }).execute()
+    except Exception:
+        pass
+    log.info("Fine updated: %s %s -> %s by %s", vt, old_amount, fine_amount, actor)
+    return {
+        "violation_type": vt,
+        "old_amount": old_amount,
+        "fine_amount": int(fine_amount),
+        "legal_section": legal_section,
+        "reflected_in": ["challan creation", "Telegram challan messages",
+                         "Citizen AI Assistant (live)"],
+    }
+
+
 # ============================================================
 # Phase 1+ — Camera health summary (used by the strip at top of Live Feed)
 # ============================================================
