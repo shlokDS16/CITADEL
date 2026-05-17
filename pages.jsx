@@ -6185,13 +6185,35 @@ const AnomalyMonitoring = ({ onBack }) => {
    CITIZEN MODULE 1 — RAG CHATBOT
    Tabs: Chat · Services · History
    ====================================================================== */
+// ---- Real, persistent chat history (localStorage, shared across tabs) ----
+const CZ_HIST_KEY = 'citadel_cz_history_v1';
+const czHist = {
+  list() { try { return JSON.parse(localStorage.getItem(CZ_HIST_KEY) || '[]'); } catch (e) { return []; } },
+  _save(a) { try { localStorage.setItem(CZ_HIST_KEY, JSON.stringify(a.slice(0, 60))); } catch (e) {} },
+  upsert(s) { const a = czHist.list().filter(x => x.id !== s.id); a.unshift(s); czHist._save(a); },
+  remove(id) { czHist._save(czHist.list().filter(x => x.id !== id)); },
+  clear() { czHist._save([]); },
+};
+const czRel = (ts) => {
+  const d = Math.max(0, Date.now() - (ts || 0)), m = 60000, h = 3600000, day = 86400000;
+  if (d < m) return 'just now';
+  if (d < h) return `${Math.floor(d / m)} min ago`;
+  if (d < day) return `${Math.floor(d / h)} hr ago`;
+  if (d < 7 * day) return `${Math.floor(d / day)} day(s) ago`;
+  return new Date(ts).toLocaleDateString();
+};
+
 const RAGChatbot = ({ onBack }) => {
   const [tab, setTab] = React.useState('chat');
+  // Cross-tab handoff: Services "ask this" / History "resume" feed the chat.
+  const [handoff, setHandoff] = React.useState(null);
   const tabs = [
     { key: 'chat',     label: 'ASSISTANT' },
     { key: 'services', label: 'SERVICE CATALOG' },
     { key: 'history',  label: 'HISTORY' },
   ];
+  const askFromCatalog = (q) => { setHandoff({ type: 'ask', q, n: Date.now() }); setTab('chat'); };
+  const resumeSession = (sess) => { setHandoff({ type: 'resume', sess, n: Date.now() }); setTab('chat'); };
   return (
     <div className="subpage fade-in">
       <SubPageHeader
@@ -6202,9 +6224,9 @@ const RAGChatbot = ({ onBack }) => {
         onBack={onBack}
       />
       <Tabs tabs={tabs} active={tab} onChange={setTab} accent="var(--gold)" />
-      {tab === 'chat'     && <ChatbotChat />}
-      {tab === 'services' && <ChatbotServices />}
-      {tab === 'history'  && <ChatbotHistory />}
+      {tab === 'chat'     && <ChatbotChat handoff={handoff} />}
+      {tab === 'services' && <ChatbotServices onAsk={askFromCatalog} />}
+      {tab === 'history'  && <ChatbotHistory onResume={resumeSession} />}
     </div>
   );
 };
@@ -6222,7 +6244,21 @@ const CITIZEN_LANGS = [
   { label: 'ಕನ್ನಡ', code: 'Kannada' }, { label: 'español', code: 'Spanish' },
 ];
 
-const ChatbotChat = () => {
+const CZ_GREETING = {
+  role: 'bot',
+  text: "Namaste 🙏 I'm the CITADEL Citizen Assistant — a reasoning-based "
+    + "(PageIndex, vectorless) AI that knows the city's services.\n\n"
+    + "Ask me about Aadhaar, PAN, passport, driving licence, traffic "
+    + "challans & fines, schemes, taxes — in **any language**. You can "
+    + "**speak** to me 🎙, or **attach a document** 📎 (resume, report, "
+    + "notice) and I'll read it and help.",
+  suggestions: ['What is the fine for riding without a helmet?',
+    'How do I apply for Aadhaar?', 'मेरा PAN कार्ड कैसे बनेगा?',
+    'How to pay a traffic challan?'],
+  meta: { engine: true },
+};
+
+const ChatbotChat = ({ handoff }) => {
   const [messages, setMessages] = React.useState([{
     role: 'bot',
     text: "Namaste 🙏 I'm the CITADEL Citizen Assistant — a reasoning-based "
@@ -6240,11 +6276,13 @@ const ChatbotChat = () => {
   const [busy, setBusy] = React.useState(false);
   const [lang, setLang] = React.useState('auto');
   const [ttsOn, setTtsOn] = React.useState(false);
+  const [speaking, setSpeaking] = React.useState(false);
   const [listening, setListening] = React.useState(false);
   const [attach, setAttach] = React.useState(null);
   const [catalog, setCatalog] = React.useState(null);
   const [health, setHealth] = React.useState(null);
   const [openTrace, setOpenTrace] = React.useState({});
+  const sessionRef = React.useRef('cz-' + Date.now());
   const chatRef = React.useRef(null);
   const recRef = React.useRef(null);
   const fileRef = React.useRef(null);
@@ -6253,6 +6291,42 @@ const ChatbotChat = () => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
   }, [messages, busy]);
 
+  // Persist the conversation to real history whenever it has a user turn.
+  React.useEffect(() => {
+    if (!messages.some(m => m.role === 'user')) return;
+    const firstU = messages.find(m => m.role === 'user');
+    czHist.upsert({
+      id: sessionRef.current,
+      title: (firstU && firstU.text ? firstU.text : 'Conversation').slice(0, 80),
+      started: parseInt(sessionRef.current.split('-')[1], 10) || Date.now(),
+      updated: Date.now(),
+      lang,
+      messages: messages.map(m => ({
+        role: m.role, text: m.text, sources: m.sources, reasoning: m.reasoning,
+        confidence: m.confidence, restricted: m.restricted, language: m.language,
+        bcp47: m.bcp47, usedWeb: m.usedWeb, file: m.file, ocr: m.ocr,
+      })),
+    });
+  }, [messages]);
+
+  // Handle cross-tab handoff: Services "ask" or History "resume".
+  React.useEffect(() => {
+    if (!handoff || !handoff.n) return;
+    if (handoff.type === 'resume' && handoff.sess) {
+      stopSpeak();
+      sessionRef.current = handoff.sess.id;
+      setMessages(handoff.sess.messages && handoff.sess.messages.length
+        ? handoff.sess.messages : [CZ_GREETING]);
+      if (handoff.sess.lang) setLang(handoff.sess.lang);
+    } else if (handoff.type === 'ask' && handoff.q) {
+      send(handoff.q);
+    }
+    // eslint-disable-next-line
+  }, [handoff && handoff.n]);
+
+  // Stop any voice if the user leaves this tab / unmounts.
+  React.useEffect(() => () => { try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) {} }, []);
+
   React.useEffect(() => {
     apiFetch('/api/citizen/knowledge').then(setCatalog).catch(() => {});
     apiFetch('/api/v1/citizen/health').then(setHealth).catch(() => {});
@@ -6260,16 +6334,32 @@ const ChatbotChat = () => {
     return () => clearInterval(t);
   }, []);
 
-  const speak = (text, bcp47) => {
+  const stopSpeak = () => {
+    try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) {}
+    setSpeaking(false);
+  };
+
+  const speak = (text, bcp47, force) => {
     try {
-      if (!ttsOn || !window.speechSynthesis) return;
+      if ((!ttsOn && !force) || !window.speechSynthesis || !text) return;
       window.speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text.replace(/\*\*/g, '').slice(0, 600));
+      const u = new SpeechSynthesisUtterance(text.replace(/\*\*/g, '').slice(0, 900));
       u.lang = bcp47 || 'en-IN';
-      const v = window.speechSynthesis.getVoices().find(x => x.lang === u.lang);
+      const v = window.speechSynthesis.getVoices().find(x => x.lang === u.lang)
+        || window.speechSynthesis.getVoices().find(x => (x.lang || '').slice(0, 2) === (u.lang || '').slice(0, 2));
       if (v) u.voice = v;
+      u.onstart = () => setSpeaking(true);
+      u.onend = () => setSpeaking(false);
+      u.onerror = () => setSpeaking(false);
       window.speechSynthesis.speak(u);
-    } catch (e) { /* noop */ }
+    } catch (e) { setSpeaking(false); }
+  };
+
+  const newChat = () => {
+    stopSpeak();
+    sessionRef.current = 'cz-' + Date.now();
+    setMessages([CZ_GREETING]);
+    setInput('');
   };
 
   const pushBot = (data) => {
@@ -6277,11 +6367,12 @@ const ChatbotChat = () => {
       role: 'bot', text: data.answer || '(no answer)',
       sources: data.sources || [], reasoning: data.reasoning || [],
       confidence: data.confidence, restricted: data.restricted,
+      quota: data.quota_exhausted,
       usedWeb: data.used_web, language: data.language, bcp47: data.bcp47,
       ocr: data.ocr,
-      suggestions: data.restricted ? [] : ['Tell me more', 'What documents do I need?', 'Official portal?'],
+      suggestions: (data.restricted || data.quota_exhausted) ? [] : ['Tell me more', 'What documents do I need?', 'Official portal?'],
     }]);
-    if (data.answer) speak(data.answer, data.bcp47);
+    if (data.answer && !data.quota_exhausted) speak(data.answer, data.bcp47);
   };
 
   const histPayload = () => messages.filter(m => m.text)
@@ -6290,6 +6381,7 @@ const ChatbotChat = () => {
   const send = async (q) => {
     const query = (q || input).trim();
     if ((!query && !attach) || busy) return;
+    stopSpeak();
     const file = attach;
     setMessages(m => [...m, { role: 'user', text: query || (file ? `📎 ${file.name}` : ''), file: file ? file.name : null }]);
     setInput(''); setAttach(null); setBusy(true);
@@ -6341,7 +6433,8 @@ const ChatbotChat = () => {
   };
 
   const onFile = (e) => { const f = e.target.files && e.target.files[0]; if (f) setAttach(f); e.target.value = ''; };
-  const clearChat = () => { window.speechSynthesis && window.speechSynthesis.cancel(); setMessages(m => m.slice(0, 1)); };
+  const clearChat = () => { stopSpeak(); newChat(); };
+  const langLabel = (CITIZEN_LANGS.find(l => l.code === lang) || {}).label || 'Auto-detect';
 
   return (
     <div className="cz-chat">
@@ -6363,10 +6456,18 @@ const ChatbotChat = () => {
                 onClick={() => setLang(l.code)}>{l.label}</button>
             ))}
           </div>
+          <div className="cz-lang-now">
+            {lang === 'auto'
+              ? '↳ Auto-detects your language & replies in it'
+              : <>↳ Replies forced in <strong>{langLabel}</strong></>}
+          </div>
           <label className="cz-tts">
-            <input type="checkbox" checked={ttsOn} onChange={e => setTtsOn(e.target.checked)} />
-            🔊 Speak replies (voice out)
+            <input type="checkbox" checked={ttsOn} onChange={e => { if (!e.target.checked) stopSpeak(); setTtsOn(e.target.checked); }} />
+            🔊 Speak replies aloud
           </label>
+          <button className="cz-stop-wide" disabled={!speaking} onClick={stopSpeak}>
+            {speaking ? '⏹ STOP SPEAKING' : '🔇 Voice idle'}
+          </button>
         </div>
         <div className="widget-card compact">
           <div className="widget-title">📚 KNOWLEDGE BASE</div>
@@ -6388,8 +6489,14 @@ const ChatbotChat = () => {
         <div className="cz-head">
           <span className="cz-title">🤖 CITIZEN ASSISTANT</span>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {speaking && (
+              <button className="cz-stop" title="Stop the voice reply" onClick={stopSpeak}>
+                ⏹ STOP VOICE
+              </button>
+            )}
             <span className="cz-pill">PAGEINDEX · GROQ</span>
-            <button className="icon-btn" title="Clear chat" onClick={clearChat}>✕</button>
+            <button className="icon-btn" title="New chat (saved to History)" onClick={newChat}>＋</button>
+            <button className="icon-btn" title="Clear / new conversation" onClick={clearChat}>✕</button>
           </div>
         </div>
 
@@ -6397,8 +6504,8 @@ const ChatbotChat = () => {
           {messages.map((m, i) => (
             <React.Fragment key={i}>
               <div className={`cz-row ${m.role}`}>
-                {m.role === 'bot' && <span className="cz-av">{m.restricted ? '🔒' : '🤖'}</span>}
-                <div className={`cz-bubble ${m.role} ${m.restricted ? 'restricted' : ''}`}>
+                {m.role === 'bot' && <span className="cz-av">{m.quota ? '⏳' : m.restricted ? '🔒' : '🤖'}</span>}
+                <div className={`cz-bubble ${m.role} ${(m.restricted || m.quota) ? 'restricted' : ''}`}>
                   {m.file && <div className="cz-file">📎 {m.file}</div>}
                   <div dangerouslySetInnerHTML={{ __html: (m.text || '')
                     .replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -6443,7 +6550,9 @@ const ChatbotChat = () => {
                       {m.confidence !== undefined && <span className="cz-conf">{m.confidence}% confidence</span>}
                       <span style={{ flex: 1 }} />
                       {m.bcp47 && window.speechSynthesis && (
-                        <button className="icon-btn small" title="Replay voice" onClick={() => { setTtsOn(true); speak(m.text, m.bcp47); }}>🔊</button>
+                        speaking
+                          ? <button className="icon-btn small" title="Stop voice" onClick={stopSpeak}>⏹</button>
+                          : <button className="icon-btn small" title="Play this reply aloud" onClick={() => speak(m.text, m.bcp47, true)}>🔊</button>
                       )}
                       <button className="icon-btn small" title="Copy" onClick={() => navigator.clipboard && navigator.clipboard.writeText(m.text)}>⎘</button>
                     </div>
@@ -6489,70 +6598,173 @@ const ChatbotChat = () => {
   );
 };
 
-const ChatbotServices = () => {
-  const services = [
-    { cat: 'Identity', icon: '🪪', items: ['Aadhaar Enrollment', 'Aadhaar Update', 'PAN Card', 'Voter ID', 'Passport', 'Driving License'] },
-    { cat: 'Tax & Revenue', icon: '💰', items: ['Income Tax', 'GST Registration', 'Property Tax', 'Road Tax', 'Professional Tax'] },
-    { cat: 'Health', icon: '🏥', items: ['Ayushman Bharat', 'Vaccine Records', 'Birth Certificate', 'Death Certificate', 'Health ID'] },
-    { cat: 'Education', icon: '🎓', items: ['Scholarship Portal', 'DigiLocker', 'Board Certificates', 'Student Loans'] },
-    { cat: 'Business', icon: '🏢', items: ['Startup India', 'MSME Registration', 'Udyam Registration', 'Import-Export Code'] },
-    { cat: 'Pension', icon: '👴', items: ['PF Balance', 'Pension Tracking', 'APY Scheme', 'NPS'] },
-    { cat: 'Property', icon: '🏠', items: ['Land Records', 'Registration', 'Mutation', 'Building Plan Approval'] },
-    { cat: 'Utilities', icon: '💡', items: ['Electricity Bill', 'Water Bill', 'Gas Connection', 'Sewage'] },
-  ];
+// Curated services → each opens the live assistant with a tailored
+// question (real RAG answer, not a static page).
+const CZ_SERVICES = [
+  { cat: 'Identity', icon: '🪪', items: [
+    ['Aadhaar enrolment', 'How do I enrol for a new Aadhaar and which documents do I need?'],
+    ['Aadhaar update', 'How do I update my address / mobile in Aadhaar and what is the current fee?'],
+    ['PAN card', 'How do I apply for a PAN card and get an instant e-PAN?'],
+    ['PAN–Aadhaar link', 'How do I link my PAN with Aadhaar and check the status?'],
+    ['Voter ID', 'How do I register for a Voter ID / get an e-EPIC?'],
+    ['Passport', 'How do I apply for a passport and what is Tatkaal?'],
+    ['Driving licence', 'How do I get a learner and permanent driving licence?'],
+  ] },
+  { cat: 'Traffic & Challans', icon: '🚦', items: [
+    ['Helmet fine', 'What is the current fine for riding without a helmet?'],
+    ['Pay a challan', 'How do I pay a traffic e-challan online?'],
+    ['Dispute a challan', 'How can I dispute or contest a traffic challan?'],
+    ['Documents to carry', 'Which vehicle documents must I carry while driving?'],
+  ] },
+  { cat: 'Schemes & Welfare', icon: '🏥', items: [
+    ['Ayushman Bharat', 'Am I eligible for Ayushman Bharat and how do I get the card?'],
+    ['PM-KISAN', 'How do I check my PM-KISAN status and complete e-KYC?'],
+    ['Ration card', 'How do I apply for or port a ration card?'],
+    ['Scholarships', 'How do I apply for a scholarship on the National Scholarship Portal?'],
+  ] },
+  { cat: 'Pension & Provident', icon: '👴', items: [
+    ['EPF balance', 'How do I check my EPF balance and withdraw?'],
+    ['APY scheme', 'How does the Atal Pension Yojana work and how do I enrol?'],
+    ['NPS', 'How do I open an NPS account and what tax benefit does it give?'],
+  ] },
+  { cat: 'Tax & Business', icon: '💰', items: [
+    ['File ITR', 'How do I file an income tax return and e-verify it?'],
+    ['GST registration', 'When and how do I register for GST?'],
+    ['Property tax', 'How do I pay municipal property tax online?'],
+    ['Udyam / MSME', 'How do I get a free Udyam (MSME) registration?'],
+  ] },
+  { cat: 'Documents & Certificates', icon: '📜', items: [
+    ['Birth certificate', 'How do I get a birth certificate from the municipal registrar?'],
+    ['Income certificate', 'How do I apply for an income certificate?'],
+    ['DigiLocker', 'How do I use DigiLocker for my documents?'],
+  ] },
+];
+
+const ChatbotServices = ({ onAsk }) => {
   const [search, setSearch] = React.useState('');
+  const [kb, setKb] = React.useState(null);
+  React.useEffect(() => {
+    apiFetch('/api/citizen/knowledge').then(setKb).catch(() => {});
+  }, []);
+  const q = search.trim().toLowerCase();
+  const match = (s) => !q || s.toLowerCase().includes(q);
+
   return (
     <div className="tab-pane">
-      <div className="toolbar">
-        <SearchBar value={search} onChange={setSearch} placeholder="Search 50+ services..." />
+      <div className="toolbar" style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+        <SearchBar value={search} onChange={setSearch} placeholder="Search services — click any to ask the live assistant…" />
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, opacity: 0.55 }}>
+          Powered by the live PageIndex knowledge base — every item asks the real assistant.
+        </span>
       </div>
-      <div className="service-grid">
-        {services.map((s, i) => (
-          <div key={s.cat} className="service-card" style={{ animationDelay: `${i * 0.05}s` }}>
-            <div className="service-cat-header">
-              <span style={{ fontSize: 22 }}>{s.icon}</span>
-              <span>{s.cat}</span>
+      <div className="cz-svc-grid">
+        {CZ_SERVICES.map((s, i) => {
+          const items = s.items.filter(([label]) => match(label) || match(s.cat));
+          if (!items.length) return null;
+          return (
+            <div key={s.cat} className="cz-svc-card" style={{ animationDelay: `${i * 0.04}s` }}>
+              <div className="cz-svc-head"><span style={{ fontSize: 22 }}>{s.icon}</span><span>{s.cat}</span></div>
+              <div className="cz-svc-items">
+                {items.map(([label, question]) => (
+                  <button key={label} className="cz-svc-item" title={question}
+                    onClick={() => onAsk && onAsk(question)}>
+                    {label} <span className="cz-svc-go">ASK →</span>
+                  </button>
+                ))}
+              </div>
             </div>
-            <div className="service-items">
-              {s.items.filter(i => !search || i.toLowerCase().includes(search.toLowerCase())).map(item => (
-                <button key={item} className="service-item">{item}</button>
-              ))}
-            </div>
+          );
+        })}
+      </div>
+      {kb && kb.catalog && (
+        <div className="widget-card" style={{ marginTop: 16 }}>
+          <div className="widget-title">📚 LIVE KNOWLEDGE BASE — {kb.catalog.length} CORPORA {kb.ready ? '✓' : '⏳'}</div>
+          <div style={{ padding: 12, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            {kb.catalog.flatMap(c => (c.sections || []).filter(match).map(sec => (
+              <button key={c.corpus + sec} className="cz-kb-chip"
+                onClick={() => onAsk && onAsk(`Tell me about: ${sec}`)}
+                title={`From ${c.corpus.replace(/_/g, ' ')}`}>
+                {sec}
+              </button>
+            )))}
+            {kb.catalog.every(c => !(c.sections || []).some(match)) && (
+              <div style={{ opacity: 0.5, fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                No knowledge sections match “{search}”.
+              </div>
+            )}
           </div>
-        ))}
-      </div>
+        </div>
+      )}
     </div>
   );
 };
 
-const ChatbotHistory = () => {
-  const sessions = [
-    { id: 1, title: 'Aadhaar enrollment process', msgs: 8,  when: '2 hours ago',  helpful: true },
-    { id: 2, title: 'PAN status inquiry',          msgs: 4,  when: 'Yesterday',     helpful: true },
-    { id: 3, title: 'Property tax calculation',    msgs: 12, when: '3 days ago',    helpful: true },
-    { id: 4, title: 'Passport renewal timeline',   msgs: 6,  when: '1 week ago',    helpful: false },
-    { id: 5, title: 'Ayushman Bharat eligibility', msgs: 10, when: '2 weeks ago',   helpful: true },
-  ];
+const ChatbotHistory = ({ onResume }) => {
+  const [sessions, setSessions] = React.useState([]);
+  const [search, setSearch] = React.useState('');
+  const reload = React.useCallback(() => setSessions(czHist.list()), []);
+  React.useEffect(() => {
+    reload();
+    const onFocus = () => reload();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [reload]);
+
+  const q = search.trim().toLowerCase();
+  const shown = sessions.filter(s =>
+    !q || (s.title || '').toLowerCase().includes(q)
+    || (s.messages || []).some(m => (m.text || '').toLowerCase().includes(q)));
+
+  const exportAll = () => {
+    const blob = new Blob([JSON.stringify(sessions, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `citadel-chat-history-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click(); URL.revokeObjectURL(a.href);
+  };
+  const del = (id) => { czHist.remove(id); reload(); };
+  const clearAll = () => { if (window.confirm('Delete ALL saved conversations?')) { czHist.clear(); reload(); } };
+
   return (
     <div className="tab-pane">
-      <div className="toolbar">
-        <SearchBar value="" onChange={() => {}} placeholder="Search past conversations..." />
-        <button className="btn-brutal" style={{ fontSize: 11, padding: '6px 14px' }}>⬇ EXPORT ALL</button>
+      <div className="toolbar" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <SearchBar value={search} onChange={setSearch} placeholder="Search your real past conversations…" />
+        <button className="btn-brutal" style={{ fontSize: 11, padding: '6px 14px' }}
+          onClick={exportAll} disabled={!sessions.length}>⬇ EXPORT ALL</button>
+        <button className="btn-brutal" style={{ fontSize: 11, padding: '6px 14px' }}
+          onClick={clearAll} disabled={!sessions.length}>🗑 CLEAR ALL</button>
       </div>
-      <div className="session-list">
-        {sessions.map((s, i) => (
-          <div key={s.id} className="session-item" style={{ animationDelay: `${i * 0.05}s` }}>
-            <span style={{ fontSize: 20 }}>💬</span>
-            <div style={{ flex: 1 }}>
-              <div className="session-title">{s.title}</div>
-              <div className="session-meta">{s.msgs} messages · {s.when}</div>
-            </div>
-            {s.helpful ? <Badge variant="green">👍 HELPFUL</Badge> : <Badge variant="default">👎 NOT HELPFUL</Badge>}
-            <button className="btn-brutal" style={{ fontSize: 11, padding: '6px 12px' }}>RESUME</button>
-            <button className="icon-btn">⋯</button>
+      {shown.length === 0 ? (
+        <div className="widget-card" style={{ padding: 40, textAlign: 'center' }}>
+          <div style={{ fontSize: 14, opacity: 0.6 }}>
+            {sessions.length === 0 ? 'NO CONVERSATIONS YET' : `No matches for “${search}”`}
           </div>
-        ))}
-      </div>
+          <div style={{ fontSize: 11, opacity: 0.45, fontFamily: 'var(--font-mono)', marginTop: 6 }}>
+            Your chats with the assistant are saved here automatically (on this device) and can be resumed.
+          </div>
+        </div>
+      ) : (
+        <div className="session-list">
+          {shown.map((s, i) => {
+            const userMsgs = (s.messages || []).filter(m => m.role === 'user').length;
+            return (
+              <div key={s.id} className="session-item" style={{ animationDelay: `${i * 0.04}s` }}>
+                <span style={{ fontSize: 20 }}>💬</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div className="session-title" style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.title}</div>
+                  <div className="session-meta">
+                    {(s.messages || []).length} messages · {userMsgs} questions · {czRel(s.updated)}
+                  </div>
+                </div>
+                <Badge variant="default">{(s.lang && s.lang !== 'auto') ? s.lang : 'AUTO'}</Badge>
+                <button className="btn-brutal" style={{ fontSize: 11, padding: '6px 12px' }}
+                  onClick={() => onResume && onResume(s)}>RESUME</button>
+                <button className="icon-btn" title="Delete" onClick={() => del(s.id)}>🗑</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 };

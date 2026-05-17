@@ -34,6 +34,7 @@ class ChatResponse(BaseModel):
     sources: list[SourceRef] = []
     used_web: bool = False
     confidence: int = 0
+    quota_exhausted: bool = False          # all LLM providers rate-limited
     ocr: Optional[dict[str, Any]] = None   # present when a file was uploaded
 
 

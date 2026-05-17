@@ -39,11 +39,15 @@ async def knowledge():
 @router.post("/citizen/chat", response_model=schemas.ChatResponse,
              tags=["citizen-assistant"])
 async def chat(body: schemas.ChatRequest):
+    # The pipeline is fully synchronous (LiteLLM sync client + PageIndex).
+    # Run it in a worker thread so the blocking Groq calls never collide
+    # with the running asyncio event loop (that collision was returning
+    # empty completions → "couldn't compose an answer").
+    from starlette.concurrency import run_in_threadpool
     try:
         hist = [t.model_dump() for t in (body.history or [])]
-        return service.chat(
-            body.query, history=hist,
-            language=body.language, allow_web=body.allow_web,
+        return await run_in_threadpool(
+            service.chat, body.query, hist, body.language, body.allow_web,
         )
     except Exception as e:
         log.exception("chat failed")
@@ -59,15 +63,16 @@ async def chat_upload(
     language: Optional[str] = Form(None),
     allow_web: bool = Form(True),
 ):
+    from starlette.concurrency import run_in_threadpool
     try:
         content = await file.read()
         try:
             hist = json.loads(history) if history else []
         except Exception:
             hist = []
-        return service.chat_with_file(
-            query, content, file.filename or "upload",
-            history=hist, language=language, allow_web=allow_web,
+        return await run_in_threadpool(
+            service.chat_with_file, query, content, file.filename or "upload",
+            hist, language, allow_web,
         )
     except Exception as e:
         log.exception("chat_upload failed")

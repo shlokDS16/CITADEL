@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import Any, Optional
 
@@ -28,32 +29,94 @@ from app.modules.citizen_assistant.pageindex_engine import PI_MODEL, get_trees
 log = logging.getLogger("citadel.citizen_assistant.retrieval")
 
 
+class _QuotaExhausted(Exception):
+    """All configured LLM providers are rate/quota limited."""
+    def __init__(self, retry_hint: str = ""):
+        super().__init__("LLM quota exhausted")
+        self.retry_hint = retry_hint
+
+
+def _provider_chain() -> list[str]:
+    """
+    Project LLM priority: Groq primary → Gemini fallback (when Groq drained)
+    → local Ollama last resort. Only providers with credentials/reachable
+    are included; LiteLLM routes each model string to its provider.
+    """
+    chain = [PI_MODEL.removeprefix("litellm/")]            # groq/...
+    gkey = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if gkey:
+        os.environ.setdefault("GEMINI_API_KEY", gkey)
+        chain.append(os.getenv("CITIZEN_GEMINI_MODEL", "gemini/gemini-1.5-flash"))
+    try:
+        import httpx as _hx
+        base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        _hx.get(base + "/api/tags", timeout=0.6)
+        chain.append(f"ollama/{os.getenv('OLLAMA_MODEL', 'llama3.2')}")
+    except Exception:
+        pass
+    return chain
+
+
+def _is_rate_limit(exc: Exception) -> bool:
+    s = (str(exc) or "").lower()
+    return ("ratelimit" in s or "rate_limit" in s or "rate limit" in s
+            or "quota" in s or "tokens per day" in s or "tpd" in s
+            or "429" in s)
+
+
+def _retry_hint(exc: Exception) -> str:
+    import re as _re
+    m = _re.search(r"try again in ([0-9]+m[0-9.]+s|[0-9.]+s)", str(exc) or "")
+    return m.group(1) if m else ""
+
+
 def _llm(prompt: str, history: Optional[list] = None, max_tokens: int = 900,
          temperature: float = 0.2) -> str:
     """
-    Direct LiteLLM call (Groq). We bypass PageIndex's llm_completion for
-    answers because it sets NO max_tokens — a sparse-context query could
-    make the model run away into thousands of repeated tokens. We cap
-    output, allow a little temperature for fluent multilingual prose, and
-    fall back cleanly on error.
+    Multi-provider LLM call via LiteLLM. Tries Groq → Gemini → Ollama in
+    order, with a small retry per provider for transient empties. Raises
+    _QuotaExhausted only when EVERY provider is rate/quota limited (so the
+    caller can show an honest "quota reached" message instead of a vague
+    failure). Output is capped (PageIndex's own helper sets no max_tokens
+    → runaway on sparse prompts).
     """
-    try:
-        import litellm
-        litellm.drop_params = True
-        model = PI_MODEL.removeprefix("litellm/")
-        msgs = (list(history) if history else []) + [{"role": "user", "content": prompt}]
-        r = litellm.completion(
-            model=model, messages=msgs,
-            temperature=temperature, max_tokens=max_tokens,
-        )
-        return (r.choices[0].message.content or "").strip()
-    except Exception as e:
-        log.warning("LLM call failed: %s", e)
-        try:
-            from pageindex.utils import llm_completion
-            return llm_completion(PI_MODEL, prompt, chat_history=history) or ""
-        except Exception:
-            return ""
+    import time as _t
+    import litellm
+    litellm.drop_params = True
+    msgs = (list(history) if history else []) + [{"role": "user", "content": prompt}]
+    chain = _provider_chain()
+    all_rate_limited = True
+    quota_hint = ""
+    last_err = None
+
+    for model in chain:
+        for attempt in range(3):
+            try:
+                r = litellm.completion(
+                    model=model, messages=msgs,
+                    temperature=temperature if attempt == 0 else 0.3,
+                    max_tokens=max_tokens,
+                )
+                txt = (r.choices[0].message.content or "").strip()
+                if txt:
+                    return txt
+                all_rate_limited = False  # empty but not rate-limited
+            except Exception as e:
+                last_err = e
+                if _is_rate_limit(e):
+                    quota_hint = quota_hint or _retry_hint(e)
+                else:
+                    all_rate_limited = False
+                if not _is_rate_limit(e):
+                    _t.sleep(0.5 * (attempt + 1))
+                else:
+                    break  # next provider — retrying same won't help
+    if last_err:
+        log.warning("All LLM providers failed (%d in chain): %s",
+                    len(chain), last_err)
+    if all_rate_limited and last_err is not None:
+        raise _QuotaExhausted(quota_hint)
+    return ""
 
 
 def _walk(node: dict, corpus: str, path: list[str], flat: list[dict], by_id: dict):
@@ -93,10 +156,12 @@ def _flatten(trees: dict[str, Any], extra: Optional[dict] = None):
     return flat, by_id
 
 
-def _toc_text(flat: list[dict], limit: int = 220) -> str:
+# Token-frugal TOC: Groq free tier is 100K tokens/day, and _select runs
+# on EVERY query. Tight caps here ~4x the daily query budget.
+def _toc_text(flat: list[dict], limit: int = 90) -> str:
     out = []
     for r in flat[:limit]:
-        s = r["summary"][:200]
+        s = (r["summary"] or "")[:90]
         out.append(f'[{r["key"]}] {r["path"]}' + (f" — {s}" if s else ""))
     return "\n".join(out)
 
@@ -197,8 +262,26 @@ def answer(
     flat, by_id = _flatten(trees, uploaded_tree)
     reasoning: list[str] = []
 
+    def _quota(hint: str) -> dict[str, Any]:
+        msg = ("⚠ The assistant's AI quota is temporarily exhausted"
+               + (f" — please try again in about {hint}" if hint else
+                  " — please try again shortly") + ". "
+               "Your question was received and understood; this is a "
+               "provider usage limit, not an error in your request. "
+               "(Tip: an administrator can configure a Gemini or local "
+               "Ollama fallback so this never blocks answers.)")
+        return {
+            "answer": msg, "restricted": False,
+            "reasoning": reasoning + ["All LLM providers rate/quota limited."],
+            "sources": [], "used_web": False, "confidence": 0,
+            "quota_exhausted": True,
+        }
+
     # ---- STEP 1: reasoning tree-search + access decision ----
-    sel = _select(query, flat)
+    try:
+        sel = _select(query, flat)
+    except _QuotaExhausted as q:
+        return _quota(q.retry_hint)
     if (sel.get("access") or "allowed").lower() == "restricted":
         reasoning.append(f"Access check → restricted ({sel.get('reason','policy')}).")
         return {
@@ -235,8 +318,8 @@ def answer(
     lf = live_facts.get_live_facts()
     ctx_blocks: list[str] = []
     node_text = "\n\n".join(
-        f"### {c['path']} [{c['corpus']}:{c['node_id']}]\n{(c['text'] or c['summary'])[:2400]}"
-        for c in chosen[:6]
+        f"### {c['path']} [{c['corpus']}:{c['node_id']}]\n{(c['text'] or c['summary'])[:1200]}"
+        for c in chosen[:4]
     )
     if node_text:
         ctx_blocks.append("KNOWLEDGE BASE SECTIONS:\n" + node_text)
@@ -262,16 +345,19 @@ def answer(
             f"{(h.get('role') or 'user').upper()}: {(h.get('text') or '')[:300]}"
             for h in last
         )
-    final = _llm(_answer_prompt(query, language, ctx_blocks, history_note,
-                                bool(uploaded_tree)), max_tokens=650)
-    # Safety net: if the model still degenerated into placeholder spam,
-    # retry once forcing plain romanised output.
-    if final.count("?") > 25 or (len(final) > 400 and len(set(final.split())) < 12):
-        reasoning.append("Detected degraded output — retried in romanised form.")
-        retry = _answer_prompt(
-            query, f"romanised {language} (Latin letters only, no '?')",
-            ctx_blocks, history_note, bool(uploaded_tree))
-        final = _llm(retry, max_tokens=600)
+    try:
+        final = _llm(_answer_prompt(query, language, ctx_blocks, history_note,
+                                    bool(uploaded_tree)), max_tokens=650)
+        # Safety net: if the model still degenerated into placeholder spam,
+        # retry once forcing plain romanised output.
+        if final.count("?") > 25 or (len(final) > 400 and len(set(final.split())) < 12):
+            reasoning.append("Detected degraded output — retried in romanised form.")
+            retry = _answer_prompt(
+                query, f"romanised {language} (Latin letters only, no '?')",
+                ctx_blocks, history_note, bool(uploaded_tree))
+            final = _llm(retry, max_tokens=600)
+    except _QuotaExhausted as q:
+        return _quota(q.retry_hint)
     if not final.strip():
         final = ("I couldn't compose a confident answer. Please rephrase, "
                  "or check the official government portal for this service.")
