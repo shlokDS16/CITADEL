@@ -2987,11 +2987,13 @@ body.dark .tv-timeline-row { background: #0f0f0f; }
   display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   gap: 14px;
 }
+/* Theme-independent: the app runs light by default with NO theme
+   class, so never rely on inherited colour — set bg AND fg explicitly. */
 .cz-svc-card {
-  border: 3px solid #000; box-shadow: 5px 5px 0 #000; background: #111;
-  animation: fadeIn .4s ease both;
+  border: 3px solid #000; box-shadow: 5px 5px 0 #000;
+  background: #ffffff; color: #111;
+  animation: fadeIn .4s ease both; overflow: hidden;
 }
-:root[data-theme="light"] .cz-svc-card, body.light .cz-svc-card { background: #fafafa; }
 .cz-svc-head {
   display: flex; align-items: center; gap: 10px; padding: 12px 14px;
   border-bottom: 3px solid #000; background: var(--gold); color: #000;
@@ -3000,20 +3002,23 @@ body.dark .tv-timeline-row { background: #0f0f0f; }
 .cz-svc-items { display: flex; flex-direction: column; }
 .cz-svc-item {
   display: flex; justify-content: space-between; align-items: center;
-  text-align: left; padding: 10px 14px; border: none;
-  border-bottom: 1px solid rgba(128,128,128,0.25);
-  background: transparent; color: inherit; cursor: pointer;
-  font-family: var(--font-sans); font-size: 13px; transition: background .12s;
+  gap: 8px; text-align: left; padding: 10px 14px; border: none;
+  border-bottom: 1px solid #e2e2e2;
+  background: #ffffff; color: #111; cursor: pointer;
+  font-family: var(--font-sans); font-size: 13px; font-weight: 600;
+  transition: background .12s, color .12s;
 }
+.cz-svc-item:last-child { border-bottom: none; }
 .cz-svc-item:hover { background: var(--cyan); color: #000; }
 .cz-svc-go {
-  font-family: var(--font-mono); font-size: 9px; font-weight: 700;
-  opacity: 0; transition: opacity .12s; letter-spacing: 1px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 800;
+  color: #c026d3; opacity: 0; transition: opacity .12s; letter-spacing: 1px;
+  flex-shrink: 0;
 }
-.cz-svc-item:hover .cz-svc-go { opacity: 1; }
+.cz-svc-item:hover .cz-svc-go { opacity: 1; color: #000; }
 .cz-kb-chip {
   font-family: var(--font-mono); font-size: 11px; padding: 5px 10px;
-  background: #0f0f0f; color: #ddd; border: 1px solid #444; cursor: pointer;
+  background: #1a1a1a; color: #f0f0f0; border: 2px solid #000;
+  box-shadow: 2px 2px 0 #000; cursor: pointer; transition: all .12s;
 }
-:root[data-theme="light"] .cz-kb-chip, body.light .cz-kb-chip { background: #eee; color: #222; }
-.cz-kb-chip:hover { background: var(--gold); color: #000; border-color: #000; }
+.cz-kb-chip:hover { background: var(--gold); color: #000; transform: translate(-1px,-1px); }
