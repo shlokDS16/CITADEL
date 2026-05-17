@@ -5654,12 +5654,22 @@ const AnomalyCityMap = ({ refreshKey }) => {
   const [hidden, setHidden] = React.useState({});            // level -> bool (legend filter)
   const [sidebarQ, setSidebarQ] = React.useState('');
   const [updatedAt, setUpdatedAt] = React.useState(null);
+  const fittedRef = React.useRef(false);   // auto-fit bounds only once, not on every poll
 
-  React.useEffect(() => {
+  const loadMap = React.useCallback(() => {
     apiFetch('/api/anomaly/map', ANOMALY_AUTH)
       .then(d => { setZones(d.zones || []); setUpdatedAt(new Date()); })
-      .catch(() => setZones([]));
-  }, [refreshKey]);
+      .catch(() => {});
+  }, []);
+
+  // initial + on Run-Full-Scan, then auto-refresh every 60s so an
+  // increase/decrease in live alerts is reflected on the map without
+  // a manual scan (matches the Alerts tab cadence).
+  React.useEffect(() => {
+    loadMap();
+    const t = setInterval(loadMap, 60000);
+    return () => clearInterval(t);
+  }, [loadMap, refreshKey]);
 
   // init map once
   React.useEffect(() => {
@@ -5767,9 +5777,10 @@ const AnomalyCityMap = ({ refreshKey }) => {
       marker.bindPopup(el);
     });
 
-    // auto-fit to everything in view (first paint / filter change)
-    if (pts.length && !sel) {
-      try { map.fitBounds(pts, { padding: [40, 40], maxZoom: 7 }); } catch (e) { /* noop */ }
+    // auto-fit ONCE on first paint — never on the 60s auto-refresh, so a
+    // live poll can't yank the user's current pan/zoom.
+    if (pts.length && !sel && !fittedRef.current) {
+      try { map.fitBounds(pts, { padding: [40, 40], maxZoom: 7 }); fittedRef.current = true; } catch (e) { /* noop */ }
     }
   }, [zones, hidden, flyToZone, sel]);
 

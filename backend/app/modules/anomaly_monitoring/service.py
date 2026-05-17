@@ -41,6 +41,25 @@ def _fingerprint(category: str, station_id: str, metric: str) -> str:
     return f"ANM-{h.upper()}"
 
 
+def _short_place(place: str) -> str:
+    """
+    Concise label from a USGS `place` string, preserving the real location.
+
+    "53 km S of Port Blair, India"      -> "Port Blair, India"
+    "94 km SSE of Bamboo Flat, India"   -> "Bamboo Flat, India"
+    "Andaman Islands, India region"     -> "Andaman Islands, India region"
+    "South Sandwich Islands region"     -> "South Sandwich Islands region"
+    """
+    p = (place or "").strip()
+    if not p:
+        return "Seismic event"
+    low = p.lower()
+    idx = low.rfind(" of ")
+    if idx != -1:
+        p = p[idx + 4:].strip()
+    return p if len(p) <= 40 else p[:39] + "…"
+
+
 def _supabase_safe():
     try:
         from app.database import get_supabase
@@ -109,16 +128,16 @@ def _build_alerts(raw: dict[str, Any]) -> list[dict[str, Any]]:
                 "impact": impact,
             })
 
-    # USGS earthquakes — independent of metro stations
+    # USGS earthquakes — independent of metro stations.
+    # IMPORTANT: a quake is located at its OWN epicentre. We must NOT relabel
+    # it with the nearest metro (that put Andaman/Nicobar events under
+    # "Kolkata"). The authoritative human-readable location is USGS `place`.
     for eq in raw.get("earthquakes") or []:
         scored = detect.score_earthquake(eq)
         if not scored:
             continue
-        # nearest metro for naming / zone context
-        nearest = min(
-            sources.METRO_STATIONS,
-            key=lambda s: (s["lat"] - eq["lat"]) ** 2 + (s["lng"] - eq["lng"]) ** 2,
-        )
+        place_full = (eq.get("place") or "").strip()
+        eq_city = _short_place(place_full) if place_full else "Seismic event"
         fp = f"ANM-EQ{(eq.get('usgs_id') or '')[-6:].upper()}"
         impact = playbook.build_impact(scored["category"], scored["severity"])
         impact["affected_zones"] = [
@@ -141,8 +160,8 @@ def _build_alerts(raw: dict[str, Any]) -> list[dict[str, Any]]:
             "value": scored["value"],
             "unit": scored["unit"],
             "threshold": scored["threshold"],
-            "city": nearest["city"] if eq.get("in_india") else (eq.get("place") or "—"),
-            "zone": nearest["zone"] if eq.get("in_india") else "International",
+            "city": eq_city,
+            "zone": "Seismic Event" + (" · India region" if eq.get("in_india") else " · International"),
             "station_id": "USGS",
             "lat": eq["lat"],
             "lng": eq["lng"],
