@@ -299,3 +299,13 @@ Plan: `tasks/todo.md` (9 phases). Contract: `docs/module-specs/06-fake-news-dete
 
 **Bug found+fixed in verify:** `_burst` degenerated (0.0 then 1.0 false-positive) when total span < window / lone-event window — now requires a real ≥3-event cluster for the density term.
 **Verified (live HTTP):** coordinated graph (12 mass-created low-follower bots, same content in a 55 s burst) → **COORDINATED cib 0.95** (burst 1.0 / coord 1.0 / bot 0.8 / struct 1.0, 1 cluster); organic graph (varied ages, 3-day spread, connected reshare chain) → **ORGANIC cib 0.068** (all signals low); malformed input → 422 with actionable message; runs persisted + listable.
+
+### Phase 7 — drift + bulk + exports + report-to-PIB + share (2026-05-18)
+| File | Purpose | Status |
+|------|---------|--------|
+| `modules/fake_news/drift.py` | Jensen-Shannon divergence (scipy) of recent vs reference window over risk/confidence/verdict-mix; `fn_drift_snapshots`; honest "insufficient data" | OK |
+| `modules/fake_news/service.py` | Bulk (≤50, async in-memory batch + worker); `report_html`/`report_pdf` (fpdf2); `report_to_pib` (logs + Telegram); HMAC signed share token (7-day); drift snapshot folded into the feed loop | OK |
+| `modules/fake_news/router.py` | `GET /drift`, `POST /bulk` (202), `GET /bulk/{id}`, `POST /bulk/upload-csv`, `GET /analyses/{id}/report.html|.pdf`, `POST /analyses/{id}/report`, `POST /analyses/{id}/share`, `GET /shared/{token}` | OK |
+
+**Bug found+fixed in verify:** `report_pdf` 500 — fpdf2 2.8.7 cursor trap mixing deprecated `cell(ln=1)` with `multi_cell(0,...)`; rewrote with `multi_cell(epw, …, new_x/new_y)` + `set_x(l_margin)`.
+**Verified (live HTTP):** bulk → 202 + async worker, 2/2 done, per-item verdict+analysis_id, CSV variant 202; `report.html` 200 (self-contained); `report.pdf` 200 valid `%PDF` + attachment header; **report→PIB logged + Telegram actually sent**; share → signed token → `/shared/{token}` resolves, bad token → 404; drift honest "insufficient reference data" (correct — needs history accrual).

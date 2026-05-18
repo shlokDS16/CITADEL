@@ -21,6 +21,7 @@ from fastapi import (
     Query,
     UploadFile,
 )
+from fastapi.responses import HTMLResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
@@ -317,3 +318,116 @@ async def propagation_runs() -> dict:
 
     rows = await run_in_threadpool(repo.list_propagation_runs, 50)
     return {"data": rows, "meta": {"total": len(rows)}}
+
+
+# ---- concept drift (Phase 7) ----
+@router.get("/v1/fake-news/drift", tags=[_TAG],
+            summary="Concept-drift status (Jensen-Shannon vs reference window)")
+async def drift_status(recompute: bool = False) -> dict:
+    from app.modules.fake_news import drift
+
+    if recompute:
+        return {"data": await run_in_threadpool(drift.compute_drift)}
+    return {"data": await run_in_threadpool(drift.latest, 20)}
+
+
+# ---- bulk (Phase 7) ----
+@router.post("/v1/fake-news/bulk", tags=[_TAG], status_code=202,
+             summary="Submit <=50 URLs/texts for async batch analysis")
+async def bulk(
+    body: schemas.BulkIn, x_user_id: str | None = Header(default=None),
+    x_user_role: str | None = Header(default=None),
+) -> dict:
+    if not body.urls:
+        raise HTTPException(status_code=422, detail="urls is empty")
+    res = await run_in_threadpool(
+        service.bulk_submit, body.urls, x_user_id, (x_user_role or "citizen"))
+    return {"data": res}
+
+
+@router.post("/v1/fake-news/bulk/upload-csv", tags=[_TAG], status_code=202,
+             summary="Submit a CSV (1 URL/text per line) for batch analysis")
+async def bulk_csv(
+    file: UploadFile = File(...), x_user_id: str | None = Header(default=None),
+) -> dict:
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=422, detail="empty file")
+    lines = [ln.strip().strip(",") for ln in
+             raw.decode("utf-8", "replace").splitlines() if ln.strip()]
+    if lines and lines[0].lower() in ("url", "urls", "text"):
+        lines = lines[1:]
+    if not lines:
+        raise HTTPException(status_code=422, detail="no rows")
+    res = await run_in_threadpool(service.bulk_submit, lines, x_user_id,
+                                  "citizen")
+    return {"data": res}
+
+
+@router.get("/v1/fake-news/bulk/{batch_id}", tags=[_TAG],
+            summary="Batch status + per-item verdicts")
+async def bulk_get(batch_id: str) -> dict:
+    res = await run_in_threadpool(service.bulk_status, batch_id)
+    if res is None:
+        raise HTTPException(status_code=404, detail="batch not found")
+    return {"data": res}
+
+
+# ---- exports / report / share (Phase 7) ----
+@router.get("/v1/fake-news/analyses/{analysis_id}/report.html", tags=[_TAG],
+            summary="Self-contained HTML analysis report")
+async def report_html(analysis_id: str) -> HTMLResponse:
+    html = await run_in_threadpool(service.report_html, analysis_id)
+    if html is None:
+        raise HTTPException(status_code=404, detail="analysis not found")
+    return HTMLResponse(content=html)
+
+
+@router.get("/v1/fake-news/analyses/{analysis_id}/report.pdf", tags=[_TAG],
+            summary="PDF analysis report")
+async def report_pdf(analysis_id: str) -> Response:
+    pdf = await run_in_threadpool(service.report_pdf, analysis_id)
+    if pdf is None:
+        raise HTTPException(status_code=404,
+                            detail="analysis not found or PDF unavailable")
+    return Response(
+        content=pdf, media_type="application/pdf",
+        headers={"Content-Disposition":
+                 f'attachment; filename="fake-news-{analysis_id}.pdf"'})
+
+
+@router.post("/v1/fake-news/analyses/{analysis_id}/report", tags=[_TAG],
+             summary="Refer the analysis to PIB Fact Check (logs + notifies)")
+async def report_pib(analysis_id: str) -> dict:
+    res = await run_in_threadpool(service.report_to_pib, analysis_id)
+    if not res.get("ok"):
+        raise HTTPException(status_code=404,
+                            detail=res.get("error", "analysis not found"))
+    return {"data": res}
+
+
+@router.post("/v1/fake-news/analyses/{analysis_id}/share", tags=[_TAG],
+             summary="Generate a signed read-only share link (7-day TTL)")
+async def share(analysis_id: str) -> dict:
+    from app.modules.fake_news import repo
+
+    if await run_in_threadpool(repo.get_analysis, analysis_id) is None:
+        raise HTTPException(status_code=404, detail="analysis not found")
+    token = service.make_share_token(analysis_id)
+    return {"data": {"token": token,
+                     "url": f"/api/v1/fake-news/shared/{token}",
+                     "ttl_days": 7}}
+
+
+@router.get("/v1/fake-news/shared/{token}", tags=[_TAG],
+            summary="Resolve a signed share link → read-only analysis")
+async def shared(token: str) -> dict:
+    from app.modules.fake_news import repo
+
+    aid = service.verify_share_token(token)
+    if not aid:
+        raise HTTPException(status_code=404, detail="invalid or expired link")
+    row = await run_in_threadpool(repo.get_analysis, aid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="analysis not found")
+    return {"data": row}

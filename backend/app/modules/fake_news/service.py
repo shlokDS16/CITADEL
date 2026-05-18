@@ -7,6 +7,7 @@ orchestrator, HITL, history and drift glue arrive in later phases.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import sys
 import threading
@@ -23,6 +24,7 @@ from app.config import settings
 from app.modules.fake_news import (
     adversarial,
     credibility,
+    drift,
     fact_check,
     heuristics,
     llm_rationale,
@@ -651,6 +653,234 @@ def analyze_media_content(
 
 
 # ==========================================================================
+# Bulk analysis (<=50 items, async) — spec-06 /bulk
+# ==========================================================================
+_BULK: dict[str, dict] = {}
+_BULK_LOCK = threading.Lock()
+_BULK_VERDICT = {"REAL": "REAL", "LIKELY_REAL": "REAL", "FAKE": "FAKE",
+                 "LIKELY_FAKE": "LIKELY_FAKE", "UNCERTAIN": "UNCERTAIN"}
+
+
+def _is_url(s: str) -> bool:
+    return s.lower().startswith(("http://", "https://"))
+
+
+def _bulk_worker(bid: str, items: list[str], rid: str | None,
+                 role: str) -> None:
+    for idx, it in enumerate(items):
+        try:
+            mode = "URL" if _is_url(it) else "TEXT"
+            req = schemas.AnalyzeIn(
+                mode=mode, **({"url": it} if mode == "URL" else {"text": it}))
+            out = analyze(req, rid, role)
+            with _BULK_LOCK:
+                row = _BULK[bid]["items"][idx]
+                row["verdict"] = _BULK_VERDICT.get(out.verdict, "UNCERTAIN")
+                row["confidence"] = out.confidence
+                row["analysis_id"] = out.id
+        except Exception as e:  # noqa: BLE001
+            with _BULK_LOCK:
+                _BULK[bid]["items"][idx]["verdict"] = "ERROR"
+                _BULK[bid]["items"][idx]["error"] = str(e)[:200]
+        finally:
+            with _BULK_LOCK:
+                _BULK[bid]["completed"] += 1
+    with _BULK_LOCK:
+        _BULK[bid]["status"] = "done"
+
+
+def bulk_submit(items: list[str], requester_id: str | None = None,
+                requester_role: str = "citizen") -> dict:
+    items = [s.strip() for s in items if s and s.strip()][:50]
+    bid = str(uuid.uuid4())
+    rec = {
+        "id": bid, "submitted_at": datetime.now(timezone.utc).isoformat(),
+        "total": len(items), "completed": 0,
+        "status": "running" if items else "done",
+        "items": [{"url": it, "verdict": "UNCERTAIN", "confidence": 0.0,
+                   "analysis_id": None, "error": None} for it in items],
+    }
+    with _BULK_LOCK:
+        _BULK[bid] = rec
+    if items:
+        threading.Thread(target=_bulk_worker,
+                         args=(bid, items, requester_id, requester_role),
+                         name=f"fn-bulk-{bid[:8]}", daemon=True).start()
+    return {"id": bid, "submitted_at": rec["submitted_at"],
+            "total": rec["total"],
+            "status_url": f"/api/v1/fake-news/bulk/{bid}"}
+
+
+def bulk_status(batch_id: str) -> dict | None:
+    with _BULK_LOCK:
+        rec = _BULK.get(batch_id)
+        return json.loads(json.dumps(rec)) if rec else None
+
+
+# ==========================================================================
+# Exportable report + report-to-PIB + signed share link
+# ==========================================================================
+def _esc(s: object) -> str:
+    import html as _html
+
+    return _html.escape(str(s if s is not None else ""))
+
+
+def report_html(analysis_id: str) -> str | None:
+    a = repo.get_analysis(analysis_id)
+    if not a:
+        return None
+    claims = a.get("claims") or []
+    rf = a.get("red_flags") or []
+    rs = a.get("reasoning") or []
+    rows = "".join(
+        f"<tr><td>{_esc(c.get('claim_text'))}</td>"
+        f"<td><b>{_esc(c.get('verdict'))}</b></td>"
+        f"<td>{_esc(round((c.get('confidence') or 0)*100))}%</td>"
+        f"<td>{_esc(c.get('notes'))}</td></tr>" for c in claims)
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<title>CITADEL Fake-News Report {_esc(analysis_id)}</title>
+<style>body{{font-family:'JetBrains Mono',monospace;background:#F2F0EB;
+color:#111;margin:0;padding:32px}}h1{{font-family:'Chakra Petch',sans-serif}}
+.box{{border:3px solid #000;box-shadow:6px 6px 0 #E63946;background:#fff;
+padding:20px;margin-bottom:20px}}.v{{font-size:28px;font-weight:700}}
+table{{width:100%;border-collapse:collapse}}td,th{{border:2px solid #000;
+padding:8px;text-align:left;font-size:13px}}th{{background:#111;color:#fff}}
+li{{margin:4px 0}}</style></head><body>
+<h1>FAKE NEWS ANALYSIS REPORT</h1>
+<div class="box"><div class="v">{_esc(a.get('verdict'))} &mdash;
+confidence {_esc(round((a.get('confidence') or 0)*100))}%</div>
+<div>Risk score: {_esc(a.get('risk_score'))} &middot; Analysis
+{_esc(analysis_id)} &middot; {_esc(a.get('submitted_at'))}</div></div>
+<div class="box"><h3>Input excerpt</h3><p>{_esc(a.get('input_excerpt'))}</p></div>
+<div class="box"><h3>Claim-by-claim ({len(claims)})</h3><table>
+<tr><th>Claim</th><th>Verdict</th><th>Conf</th><th>Notes</th></tr>
+{rows or '<tr><td colspan=4>No check-worthy claims extracted.</td></tr>'}
+</table></div>
+<div class="box"><h3>Red flags</h3><ul>
+{''.join(f'<li>&#9888; {_esc(f)}</li>' for f in rf) or '<li>None</li>'}
+</ul></div>
+<div class="box"><h3>Reasoning trace</h3><ol>
+{''.join(f'<li>{_esc(s)}</li>' for s in rs)}</ol></div>
+<div class="box" style="box-shadow:6px 6px 0 #888;font-size:11px">
+Generated by CITADEL Fake News Detector. Verdicts are decision-support,
+not legal determinations. Route low-confidence items to human review.
+</div></body></html>"""
+
+
+def report_pdf(analysis_id: str) -> bytes | None:
+    a = repo.get_analysis(analysis_id)
+    if not a:
+        return None
+    try:
+        from fpdf import FPDF
+    except Exception:  # noqa: BLE001
+        return None
+
+    def _t(x: object) -> str:
+        return str(x if x is not None else "").encode(
+            "latin-1", "replace").decode("latin-1")
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(True, margin=15)
+    pdf.add_page()
+
+    def line(txt: str, size: int = 10, bold: bool = False, gap: int = 5) -> None:
+        # multi_cell with explicit effective-page-width + reset X avoids the
+        # fpdf2 "not enough horizontal space" cursor trap.
+        pdf.set_font("Helvetica", "B" if bold else "", size)
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(pdf.epw, gap, _t(txt),
+                       new_x="LMARGIN", new_y="NEXT")
+
+    line("CITADEL - Fake News Analysis Report", 16, True, 9)
+    line(f"Verdict: {a.get('verdict')}  "
+         f"(confidence {round((a.get('confidence') or 0) * 100)}%)", 13, True, 8)
+    line(f"Risk score: {a.get('risk_score')}", 10)
+    line(f"Analysis id: {analysis_id}", 10)
+    line(f"Submitted: {a.get('submitted_at')}", 10)
+    pdf.ln(2)
+    line("Input excerpt", 11, True, 6)
+    line(a.get("input_excerpt") or "(none)", 9)
+    pdf.ln(1)
+    line(f"Claims ({len(a.get('claims') or [])})", 11, True, 6)
+    for c in (a.get("claims") or []):
+        line(f"[{c.get('verdict')}] {c.get('claim_text')} - {c.get('notes')}", 9)
+    if not (a.get("claims") or []):
+        line("No check-worthy claims extracted.", 9)
+    pdf.ln(1)
+    line("Red flags", 11, True, 6)
+    for f in (a.get("red_flags") or []):
+        line(f"- {f}", 9)
+    if not (a.get("red_flags") or []):
+        line("None", 9)
+    pdf.ln(1)
+    line("Reasoning trace", 11, True, 6)
+    for s in (a.get("reasoning") or []):
+        line(f"- {s}", 8)
+    return bytes(pdf.output())
+
+
+def report_to_pib(analysis_id: str) -> dict:
+    a = repo.get_analysis(analysis_id)
+    if not a:
+        return {"ok": False, "error": "analysis not found"}
+    repo.mark_reported(analysis_id)
+    tg = {"sent": False}
+    token = settings.TELEGRAM_BOT_TOKEN
+    chat = settings.TELEGRAM_DEFAULT_CHAT_ID
+    if token and chat:
+        try:
+            msg = (f"PIB FACT-CHECK REFERRAL\nVerdict: {a.get('verdict')} "
+                   f"({round((a.get('confidence') or 0)*100)}%)\n"
+                   f"Excerpt: {str(a.get('input_excerpt'))[:300]}\n"
+                   f"Analysis: {analysis_id}")
+            r = httpx.post(
+                f"{settings.TELEGRAM_API_BASE}/bot{token}/sendMessage",
+                json={"chat_id": chat, "text": msg}, timeout=10)
+            tg = {"sent": r.status_code == 200}
+        except Exception as e:  # noqa: BLE001
+            tg = {"sent": False, "error": str(e)[:160]}
+    return {"ok": True, "reported": True, "telegram": tg}
+
+
+def _share_secret() -> bytes:
+    return (settings.SUPABASE_SERVICE_ROLE_KEY or "citadel-fn").encode()
+
+
+def make_share_token(analysis_id: str, ttl_days: int = 7) -> str:
+    import base64
+    import hmac
+    import time as _t
+
+    exp = int(_t.time()) + ttl_days * 86400
+    payload = f"{analysis_id}.{exp}"
+    sig = hmac.new(_share_secret(), payload.encode(), "sha256").hexdigest()[:32]
+    raw = f"{payload}.{sig}".encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def verify_share_token(token: str) -> str | None:
+    import base64
+    import hmac
+    import time as _t
+
+    try:
+        pad = "=" * (-len(token) % 4)
+        raw = base64.urlsafe_b64decode(token + pad).decode()
+        analysis_id, exp, sig = raw.rsplit(".", 2)
+        good = hmac.new(_share_secret(), f"{analysis_id}.{exp}".encode(),
+                        "sha256").hexdigest()[:32]
+        if not hmac.compare_digest(sig, good):
+            return None
+        if int(exp) < int(_t.time()):
+            return None
+        return analysis_id
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# ==========================================================================
 # Background: curated-credibility seed + fact-check feed refresh (<=6h).
 # Mirrors the anomaly module's daemon pattern; degrades if tables absent.
 # ==========================================================================
@@ -726,6 +956,12 @@ def _feed_loop() -> None:
             log.info("fact-check feed refresh: %s", refresh_fact_check_feed())
         except Exception as e:  # noqa: BLE001
             log.warning("feed loop error: %s", e)
+        try:
+            d = drift.compute_drift()
+            if d.get("drifted"):
+                log.warning("CONCEPT DRIFT detected: %s", d.get("per_feature"))
+        except Exception as e:  # noqa: BLE001
+            log.debug("drift compute skipped: %s", e)
         _FEED_STOP.wait(timeout=_FEED_INTERVAL)
 
 
