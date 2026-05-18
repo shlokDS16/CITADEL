@@ -265,3 +265,16 @@ Plan: `tasks/todo.md` (9 phases). Contract: `docs/module-specs/06-fake-news-dete
 
 **NLI probe-verified:** id2label entailment/neutral/contradiction; supports→entail 0.99, refutes→contradict 0.99.
 **Verified (live HTTP):** "COVID-19 vaccines contain microchips" → **FAKE 0.93 / risk 0.95** via 4 retrieved fact-check contradictions + NLI (L1 risk was 0.01 — L1/L2 alone *missed* it; Layer 3 caught it, proving the multi-layer thesis); scam → FAKE 0.93; true statement → LIKELY_REAL risk 0.32 (honest — won't assert REAL without corroboration; live retrieval is non-deterministic); `/sources` → 29 seeded rows; `/sources/altnews.in` → HIGH allowlist; `PUT /sources/{d}` officer-edit OK; `/related-fact-checks?q=covid vaccine microchip` → real FactCheck.org URLs. Calibration tuned: 2+-source corroboration 0.82, noisy fake-head down-weighted (L1 0.50 / fake 0.30). Zero LLM tokens used. ~4–7 s/analysis (async lands Phase 7).
+
+### Phase 4 — LLM rationale + persistence + HITL + feedback loop (2026-05-18)
+| File | Purpose | Status |
+|------|---------|--------|
+| `modules/fake_news/llm_rationale.py` | Layer 4: Groq llama-3.3-70b via LiteLLM provider-chain (citizen pattern), `_QuotaExhausted`; JSON rationale (central_claim/rationale/recommendation); never raises | OK |
+| `modules/fake_news/repo.py` | Persist analyses + claim_analyses; history (paged/filtered) + stats; soft-delete; HITL review queue; feedback ground-truth; refittable logistic meta-classifier (no-op < 30 samples) | OK |
+| `modules/fake_news/service.py` | Layer 4 wired behind token-frugal gate (risk≥threshold OR UNCERTAIN — NOT needs_review); `repo.persist_analysis` replaces inline; signed-bigint simhash; removed dead `_persist` + stale reasoning line | OK |
+| `modules/fake_news/heuristics.py` | `to_signed64`/`to_unsigned64` — SimHash↔Postgres bigint lossless mapping | OK |
+| `modules/fake_news/router.py` | `GET /analyses/{id}`, `GET /history`, `GET /history/stats`, `DELETE /history/{id}`, `GET /review-queue`, `POST /review/{id}/decide`, `POST /feedback`, `POST /meta/refit`, `GET /meta/status` | OK |
+| `modules/fake_news/schemas.py` | `ReviewDecision`, `FeedbackIn` | OK |
+
+**Bug found+fixed during verify:** unsigned 64-bit SimHash overflowed Postgres `bigint` → every persist silently failed; signed two's-complement mapping at the DB boundary fixes it losslessly. Token-frugal gate was firing on clean content (needs_review ≈ always true pre-fact-check) → dropped `needs_review` from the gate.
+**Verified (live HTTP):** scam → FAKE + Layer-4 Groq rationale ("central_claim", reasoning, "Recommendation: Remove…"); clean → Layer-4 **skipped** (no tokens burned); history total + real stats (checks 2 / fake 1 / real 1); `GET /analyses/{id}` returns verdict + 2 claim rows + signed simhash; review-queue→decide (verdict corrected, feedback recorded); direct feedback OK; soft-delete removes from history; `meta/refit` honestly no-ops < 30 samples.

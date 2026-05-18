@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Query
 from starlette.concurrency import run_in_threadpool
 
 from app.modules.fake_news import schemas, service
@@ -136,3 +136,107 @@ async def related_fact_checks(q: str) -> dict:
         raise HTTPException(status_code=422, detail="q is required")
     rows = await run_in_threadpool(fact_check.search, q.strip())
     return {"data": rows, "meta": {"total": len(rows)}}
+
+
+# ---- history / persistence (Phase 4) ----
+@router.get("/v1/fake-news/analyses/{analysis_id}", tags=[_TAG],
+            summary="Full stored analysis (with claim rows)")
+async def get_analysis(analysis_id: str) -> dict:
+    from app.modules.fake_news import repo
+
+    row = await run_in_threadpool(repo.get_analysis, analysis_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="analysis not found")
+    return {"data": row}
+
+
+@router.get("/v1/fake-news/history", tags=[_TAG], summary="Past checks (paged)")
+async def history(
+    page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100),
+    q: str | None = None, verdict: str | None = None,
+    x_user_id: str | None = Header(default=None),
+) -> dict:
+    from app.modules.fake_news import repo
+
+    res = await run_in_threadpool(repo.history, x_user_id, page, page_size, q, verdict)
+    return {"data": res["items"],
+            "meta": {"total": res["total"], "page": res["page"],
+                     "page_size": res["page_size"]}}
+
+
+@router.get("/v1/fake-news/history/stats", tags=[_TAG],
+            summary="History KPIs (checks run / fake / real / reported)")
+async def history_stats(x_user_id: str | None = Header(default=None)) -> dict:
+    from app.modules.fake_news import repo
+
+    return {"data": await run_in_threadpool(repo.history_stats, x_user_id)}
+
+
+@router.delete("/v1/fake-news/history/{analysis_id}", tags=[_TAG],
+               summary="Soft-delete an analysis from the requester's history")
+async def delete_history(
+    analysis_id: str, x_user_id: str | None = Header(default=None),
+) -> dict:
+    from app.modules.fake_news import repo
+
+    ok = await run_in_threadpool(repo.soft_delete, analysis_id, x_user_id)
+    if not ok:
+        raise HTTPException(status_code=503, detail="history store unavailable")
+    return {"data": {"deleted": analysis_id}}
+
+
+# ---- HITL review queue + feedback (Phase 4) ----
+@router.get("/v1/fake-news/review-queue", tags=[_TAG],
+            summary="Low-confidence analyses awaiting human review")
+async def review_queue(status: str = "pending") -> dict:
+    from app.modules.fake_news import repo
+
+    rows = await run_in_threadpool(repo.list_review_queue, status, 100)
+    return {"data": rows, "meta": {"total": len(rows)}}
+
+
+@router.post("/v1/fake-news/review/{queue_id}/decide", tags=[_TAG],
+             summary="Resolve a review item (ground-truth for retraining)")
+async def review_decide(
+    queue_id: str, body: schemas.ReviewDecision,
+    x_user_id: str | None = Header(default=None),
+) -> dict:
+    from app.modules.fake_news import repo
+
+    res = await run_in_threadpool(
+        repo.decide_review, queue_id, body.human_verdict, body.notes, x_user_id)
+    if res is None:
+        raise HTTPException(status_code=404,
+                            detail="review item not found / store unavailable")
+    return {"data": res}
+
+
+@router.post("/v1/fake-news/feedback", tags=[_TAG],
+             summary="Direct ground-truth feedback on an analysis")
+async def feedback(
+    body: schemas.FeedbackIn, x_user_id: str | None = Header(default=None),
+) -> dict:
+    from app.modules.fake_news import repo
+
+    ok = await run_in_threadpool(
+        repo.add_feedback, body.analysis_id, body.human_verdict,
+        x_user_id, body.notes)
+    if not ok:
+        raise HTTPException(status_code=503, detail="feedback store unavailable")
+    return {"data": {"recorded": True}}
+
+
+@router.post("/v1/fake-news/meta/refit", tags=[_TAG],
+             summary="Refit the logistic meta-classifier from feedback")
+async def meta_refit() -> dict:
+    from app.modules.fake_news import repo
+
+    return {"data": await run_in_threadpool(repo.refit_meta)}
+
+
+@router.get("/v1/fake-news/meta/status", tags=[_TAG],
+            summary="Latest meta-classifier training status")
+async def meta_status() -> dict:
+    from app.modules.fake_news import repo
+
+    return {"data": await run_in_threadpool(repo.meta_status)}

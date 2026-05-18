@@ -106,6 +106,18 @@ class BulkIn(BaseModel):
     options: AnalyzeOptions = AnalyzeOptions()
 
 
+class ReviewDecision(BaseModel):
+    """HITL reviewer's resolution of a queued analysis."""
+    human_verdict: Verdict
+    notes: str = Field("", max_length=2000)
+
+
+class FeedbackIn(BaseModel):
+    analysis_id: str
+    human_verdict: Verdict
+    notes: str = Field("", max_length=2000)
+
+
 class SourceUpdate(BaseModel):
     """Officer edit of a source-credibility row (runtime-editable)."""
     publisher_name: str | None = None

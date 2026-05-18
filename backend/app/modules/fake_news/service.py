@@ -24,7 +24,9 @@ from app.modules.fake_news import (
     credibility,
     fact_check,
     heuristics,
+    llm_rationale,
     pipeline as ml,
+    repo,
     schemas,
 )
 
@@ -287,42 +289,6 @@ def _final_verdict(
     return combined_risk, l2_verdict, conf, nr, note
 
 
-def _persist(out: schemas.AnalysisOut, hashes: dict[str, str], url: str | None) -> None:
-    sb = _get_sb()
-    if sb is None:
-        return
-    try:
-        sb.table("analyses").insert({
-            "id": out.id,
-            "requester_id": out.requester_id,
-            "requester_role": out.requester_role,
-            "mode": out.mode,
-            "input_text_hash": hashes.get("sha256"),
-            "input_simhash": int(hashes["simhash"]) if hashes.get("simhash") else None,
-            "input_url": url,
-            "input_excerpt": out.input_excerpt,
-            "verdict": out.verdict,
-            "confidence": out.confidence,
-            "risk_score": out.risk_score,
-            "layers": out.layers,
-            "claims": [c.model_dump() for c in out.claims],
-            "source_credibility": out.source_credibility.model_dump()
-            if out.source_credibility else None,
-            "bias_profile": out.bias_profile.model_dump() if out.bias_profile else None,
-            "sentiment": out.sentiment.model_dump() if out.sentiment else None,
-            "manipulation": out.manipulation.model_dump() if out.manipulation else None,
-            "red_flags": out.red_flags,
-            "reasoning": out.reasoning,
-            "model_versions": out.model_versions,
-            "response_time_ms": out.response_time_ms,
-            "needs_review": out.needs_review,
-            "submitted_at": out.submitted_at.isoformat(),
-            "completed_at": out.completed_at.isoformat() if out.completed_at else None,
-        }).execute()
-    except Exception as e:  # noqa: BLE001 — table may not exist yet (pre-DDL)
-        log.debug("analyses persist skipped: %s", e)
-
-
 def analyze(
     req: schemas.AnalyzeIn,
     requester_id: str | None = None,
@@ -489,7 +455,6 @@ def analyze(
             + ", ".join(f"{k}x{n}" for k, n in vc.items()) + f". {fc_note}")
     else:
         reasoning.append("Layer 3: " + fc_note)
-    reasoning.append("Layer 4 (LLM rationale, high-risk only) wires in Phase 4.")
 
     cred_obj = None
     if req.options.source_credibility:
@@ -508,6 +473,35 @@ def analyze(
             reasoning.append(f"Publisher {cinfo['publisher']} is a known credible "
                              f"source (credibility {cinfo['score']}/100).")
 
+    # ---- Layer 4: LLM rationale — high-risk / ambiguous only (token-frugal) ----
+    llm_layer: dict = {"invoked": False}
+    llm_quota = False
+    # Token-frugal gate: LLM only on genuinely risky/ambiguous content.
+    # NOT gated on needs_review — confidence is < auto-threshold for almost
+    # everything pre-fact-check, which would burn Groq's daily quota.
+    if text and (final_risk >= settings.FN_HIGH_RISK_THRESHOLD
+                 or verdict == "UNCERTAIN"):
+        lr = llm_rationale.rationale(
+            excerpt=norm.normalized or text, verdict=verdict,
+            confidence=confidence, risk=final_risk,
+            red_flags=red_flags, claims=fc.get("claims", []))
+        llm_layer = {"invoked": True, **lr}
+        if lr.get("quota_exhausted"):
+            llm_quota = True
+            reasoning.append(
+                "Layer 4: LLM rationale unavailable — provider quota reached"
+                + (f" (retry in ~{lr['retry_hint']})" if lr.get("retry_hint") else "")
+                + ". Verdict stands from Layers 1-3 (local, not quota-bound).")
+        elif lr.get("available"):
+            if lr.get("rationale"):
+                reasoning.append("Layer 4 rationale: " + lr["rationale"])
+            if lr.get("recommendation"):
+                reasoning.append("Recommendation: " + lr["recommendation"])
+        else:
+            reasoning.append("Layer 4: LLM returned no usable rationale.")
+    else:
+        reasoning.append("Layer 4: skipped (not high-risk — token-frugal gate).")
+
     out = schemas.AnalysisOut(
         id=aid, requester_id=requester_id,
         requester_role=requester_role,  # type: ignore[arg-type]
@@ -515,7 +509,7 @@ def analyze(
         mode=req.mode, input_excerpt=(norm.normalized or text)[:_EXCERPT],
         verdict=verdict,  # type: ignore[arg-type]
         confidence=confidence, risk_score=round(final_risk, 4),
-        needs_review=needs_review, quota_exhausted=False,
+        needs_review=needs_review, quota_exhausted=llm_quota,
         claims=claim_objs,
         source_credibility=cred_obj,
         bias_profile=None,
@@ -538,6 +532,7 @@ def analyze(
                 "related": len(related_objs),
                 "google_fc": bool(settings.GOOGLE_FACTCHECK_API_KEY),
             },
+            "llm": llm_layer,
         },
         model_versions={
             "adversarial": "1.0", "heuristics": _L1_VERSION,
@@ -546,11 +541,11 @@ def analyze(
             "bias": settings.FN_MODEL_BIAS,
             "propaganda": settings.FN_MODEL_PROPAGANDA,
             "nli": settings.FN_MODEL_NLI, "claims": "spacy-en_core_web_sm",
-            "sentiment": "vader-3",
+            "sentiment": "vader-3", "llm": llm_rationale._FN_MODEL,
         },
         response_time_ms=int((time.perf_counter() - t0) * 1000),
     )
-    _persist(out, h.hashes, url)
+    repo.persist_analysis(out, h.hashes, url)
     return out
 
 

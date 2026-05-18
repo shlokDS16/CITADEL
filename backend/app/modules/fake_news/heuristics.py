@@ -289,6 +289,17 @@ def hamming64(a: int, b: int) -> int:
     return bin((a ^ b) & ((1 << 64) - 1)).count("1")
 
 
+# SimHash is an unsigned 64-bit value; Postgres `bigint` is signed 64-bit
+# (max ~9.2e18) so storing the raw unsigned form overflows. Map via lossless
+# two's-complement at the DB boundary, reinterpret on read.
+def to_signed64(u: int) -> int:
+    return u - (1 << 64) if u >= (1 << 63) else u
+
+
+def to_unsigned64(s: int) -> int:
+    return s + (1 << 64) if s < 0 else s
+
+
 def match_debunked(sha: str, sim: int, supabase) -> dict | None:  # noqa: ANN001
     """Exact or near-duplicate match against the fn_debunked store.
 
@@ -313,7 +324,7 @@ def match_debunked(sha: str, sim: int, supabase) -> dict | None:  # noqa: ANN001
             sv = r.get("simhash")
             if sv is None:
                 continue
-            d = hamming64(sim, int(sv))
+            d = hamming64(sim, to_unsigned64(int(sv)))
             if d < best_d:
                 best, best_d = r, d
         if best is not None and best_d <= _DEBUNK_HAMMING:
