@@ -6990,7 +6990,7 @@ const FakeNewsAnalyze = ({ reopen, clearReopen }) => {
     } catch (e) { toast('Report failed', 'error'); }
   };
   const openReport = (ext) =>
-    window.open(`${API_BASE}${FN_BASE}/analyses/${result.id}/report.${ext}`, '_blank');
+    window.open(`${API_BASE}${FN_BASE}/analyses/${result.id}/report.${ext}?uid=${encodeURIComponent(fnUid)}`, '_blank');
 
   const v = result ? fnV(result.verdict) : null;
   const sc = result && result.source_credibility;
@@ -7276,7 +7276,7 @@ const FakeNewsBulk = () => {
                       <Badge variant={r.verdict === 'FAKE' ? 'red' : r.verdict === 'REAL' ? 'green'
                         : r.verdict === 'ERROR' ? 'default' : 'gold'}>{bv.label}</Badge>
                       <span className="bulk-conf">{r.analysis_id
-                        ? <a href={`${API_BASE}${FN_BASE}/analyses/${r.analysis_id}/report.html`}
+                        ? <a href={`${API_BASE}${FN_BASE}/analyses/${r.analysis_id}/report.html?uid=${encodeURIComponent(fnUid)}`}
                             target="_blank" rel="noreferrer" title="Open report">{fnPct(r.confidence)}% ↗</a>
                         : `${fnPct(r.confidence)}%`}</span>
                     </div>
@@ -7388,12 +7388,19 @@ const FakeNewsReview = () => {
   const [draft, setDraft] = React.useState({});
   const [toast, toastHost] = useToast();
 
-  const load = () => {
+  const [tick, setTick] = React.useState(0);
+  const load = React.useCallback(() => {
     fnApi('/review-queue', { params: { status: 'pending' } })
       .then(r => setQueue(r.data || [])).catch(() => setQueue([]));
     apiFetch(`${FN_BASE}/meta/status`).then(r => setMeta(r.data)).catch(() => {});
-  };
-  React.useEffect(load, []);
+  }, []);
+  // real-time: poll the queue every 8s so newly-flagged analyses appear
+  // without leaving/re-entering the tab
+  React.useEffect(() => {
+    load();
+    const t = setInterval(load, 8000);
+    return () => clearInterval(t);
+  }, [load, tick]);
 
   const decide = async (item) => {
     const d = draft[item.id] || {};
@@ -7417,9 +7424,14 @@ const FakeNewsReview = () => {
     <div className="tab-pane">
       {toastHost}
       <div className="widget-card">
-        <div className="widget-title" style={{ display: 'flex', justifyContent: 'space-between' }}>
-          <span>HUMAN-IN-THE-LOOP REVIEW QUEUE</span>
-          <span className="small-meta">low-confidence analyses awaiting a human verdict</span>
+        <div className="widget-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>HUMAN-IN-THE-LOOP REVIEW QUEUE{queue ? ` · ${queue.length} PENDING` : ''}</span>
+          <span className="small-meta" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span className="fn-dot on" title="Auto-refreshing every 8s"></span>
+            live · auto-refresh 8s
+            <button className="btn-brutal" style={{ fontSize: 10, padding: '3px 9px' }}
+              onClick={() => setTick(t => t + 1)} title="Refresh now">↻</button>
+          </span>
         </div>
         <div className="fn-meta-bar">
           Meta-classifier: <strong>{meta && meta.trained ? `trained · ${meta.n_samples} samples`
@@ -7439,7 +7451,7 @@ const FakeNewsReview = () => {
                   <span className="fn-tag" style={{ background: mv.c, color: mv.fg }}>MODEL: {mv.label}</span>
                   <span className="fn-review-reason">{item.reason}</span>
                   <a className="fn-ev-link" title="Open report"
-                    href={`${API_BASE}${FN_BASE}/analyses/${item.analysis_id}/report.html`}
+                    href={`${API_BASE}${FN_BASE}/analyses/${item.analysis_id}/report.html?uid=${encodeURIComponent(fnUid)}`}
                     target="_blank" rel="noreferrer">↗ view</a>
                 </div>
                 <SegmentedControl options={FN_REVIEW_OPTS} value={d.verdict || ''}
@@ -7460,15 +7472,40 @@ const FakeNewsReview = () => {
   );
 };
 
+const FN_TECHNIQUES = [
+  { t: 'Loaded language', d: 'Emotionally charged words ("slammed", "destroys", "evil") to push a reaction over reason.' },
+  { t: 'Cherry-picking', d: 'Real facts selectively chosen to imply a false conclusion while omitting context.' },
+  { t: 'Fabricated authority', d: '"Experts agree" / fake credentials / quotes attributed to no real, checkable person.' },
+  { t: 'Out-of-context media', d: 'A genuine old photo/video reused as if it shows a current, unrelated event.' },
+  { t: 'AI-generated media', d: 'Synthetic images/voices/deepfakes presented as authentic footage.' },
+  { t: 'Whataboutism', d: 'Deflecting a claim by pointing at an unrelated wrong instead of addressing it.' },
+  { t: 'Manufactured urgency', d: '"Share before it is deleted!" — pressure to spread before you can verify.' },
+  { t: 'Coordinated amplification', d: 'Many fresh/low-follower accounts pushing the same link in seconds (bot/CIB burst).' },
+];
+const FN_LAYERS = [
+  { k: 'L1', t: 'Heuristics + adversarial', d: 'Regex/lexicon red flags, ALL-CAPS & urgency, suspicious domain age, de-obfuscation, and a SimHash match against known-debunked content.' },
+  { k: 'L2', t: 'Transformer classifiers', d: 'Fast neural models score fabrication-style, clickbait and bias — plus VADER sentiment. A weak style signal, not a truth verdict.' },
+  { k: 'L3', t: 'RAG fact-check + NLI', d: 'Extracts the claims, retrieves evidence (Google Fact Check, fact-check feeds, web, Wikipedia) and runs DeBERTa-v3 NLI: does the evidence support or contradict it?' },
+  { k: 'L4', t: 'LLM rationale', d: 'For high-risk/ambiguous items only, a Groq Llama-3.3 model writes a plain-English rationale for a human moderator.' },
+];
+
 const FakeNewsLearn = () => {
   const [sources, setSources] = React.useState(null);
   React.useEffect(() => {
     fnApi('/sources').then(r => setSources(r.data || [])).catch(() => setSources([]));
   }, []);
-  const allow = (sources || []).filter(s => s.in_allowlist).slice(0, 10);
+  const all = sources || [];
+  const allow = all.filter(s => s.in_allowlist).slice(0, 12);
+  const block = all.filter(s => s.in_blocklist).slice(0, 6);
   return (
   <div className="tab-pane">
-    <div className="widgets-grid">
+    <div className="kpi-grid-4">
+      <KPICard label="SOURCES IN KB" value={sources === null ? '—' : all.length} color="var(--gold)" />
+      <KPICard label="ALLOWLISTED"   value={sources === null ? '—' : all.filter(s => s.in_allowlist).length} color="var(--green)" />
+      <KPICard label="BLOCKLISTED"   value={sources === null ? '—' : all.filter(s => s.in_blocklist).length} color="var(--red)" />
+      <KPICard label="DETECTION LAYERS" value="5" color="var(--cyan)" />
+    </div>
+    <div className="widgets-grid mt-20">
       <div className="widget-card">
         <div className="widget-title">🚩 COMMON RED FLAGS</div>
         <div className="flag-guide">
@@ -7488,7 +7525,7 @@ const FakeNewsLearn = () => {
         </div>
       </div>
       <div className="widget-card">
-        <div className="widget-title">✅ TRUSTED SOURCES</div>
+        <div className="widget-title">✅ TRUSTED SOURCES <span className="small-meta">live</span></div>
         <div className="trusted-list">
           {sources === null ? <div className="fn-load-txt" style={{ padding: 14 }}>Loading live allowlist…</div>
             : allow.length === 0 ? <div className="fn-load-txt" style={{ padding: 14 }}>No allowlisted sources found.</div>
@@ -7498,16 +7535,68 @@ const FakeNewsLearn = () => {
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 700, fontFamily: 'var(--font-display)', fontSize: 13 }}>{t.publisher_name || t.domain}</div>
                 <div style={{ fontSize: 10, fontFamily: 'var(--font-mono)', opacity: 0.5 }}>{t.domain}</div>
+                <div className="progress-bar" style={{ marginTop: 4, height: 5 }}>
+                  <div className="progress-fill" style={{ width: `${t.score || 0}%`,
+                    background: (t.score || 0) >= 70 ? 'var(--green)' : 'var(--gold)' }}></div>
+                </div>
               </div>
-              <Badge variant={t.trust_rating === 'HIGH' ? 'green' : 'default'}>{t.trust_rating || 'LISTED'}</Badge>
+              <Badge variant={t.trust_rating === 'HIGH' ? 'green' : 'default'}>{t.score != null ? `${t.score}` : (t.trust_rating || 'LISTED')}</Badge>
             </div>
           ))}
+          {block.length > 0 && (
+            <>
+              <div className="widget-title mt-14" style={{ fontSize: 12 }}>⛔ KNOWN LOW-CREDIBILITY</div>
+              {block.map((t, i) => (
+                <div key={`b${i}`} className="trusted-row">
+                  <span style={{ color: 'var(--red)' }}>✕</span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 700, fontFamily: 'var(--font-display)', fontSize: 13 }}>{t.publisher_name || t.domain}</div>
+                    <div style={{ fontSize: 10, fontFamily: 'var(--font-mono)', opacity: 0.5 }}>{t.domain}{t.notes ? ` · ${t.notes}` : ''}</div>
+                  </div>
+                  <Badge variant="red">LOW</Badge>
+                </div>
+              ))}
+            </>
+          )}
         </div>
         <div className="small-meta" style={{ padding: '8px 14px', opacity: 0.6 }}>
-          Live from the maintained source-credibility KB · officer-editable
+          Live from the maintained source-credibility KB · officer-editable in API
         </div>
       </div>
     </div>
+
+    <div className="widget-card mt-20">
+      <div className="widget-title">🧠 MANIPULATION &amp; PROPAGANDA TECHNIQUES</div>
+      <div className="flag-guide">
+        {FN_TECHNIQUES.map((f, i) => (
+          <div key={i} className="flag-guide-item">
+            <div className="flag-guide-title">{f.t}</div>
+            <div className="flag-guide-desc">{f.d}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+
+    <div className="widget-card mt-20">
+      <div className="widget-title">⚙️ HOW THIS DETECTOR WORKS — THE 5-LAYER WATERFALL</div>
+      <div className="fn-waterfall" style={{ marginBottom: 4 }}>
+        {FN_LAYERS.map((l, i) => (
+          <React.Fragment key={l.k}>
+            <div className="fn-wf-node on" style={{ minWidth: 150 }}>
+              <div className="fn-wf-k">{l.k}</div>
+              <div className="fn-wf-t">{l.t}</div>
+              <div className="fn-wf-s">{l.d}</div>
+            </div>
+            {i < FN_LAYERS.length - 1 && <div className="fn-wf-arrow">▶</div>}
+          </React.Fragment>
+        ))}
+      </div>
+      <div className="small-meta" style={{ padding: '8px 2px', opacity: 0.65 }}>
+        Truth is decided by Layer 3 (evidence + NLI), not by writing style. Unverifiable
+        content is marked UNCERTAIN — “no red flags” is never reported as “true”.
+      </div>
+    </div>
+
     <div className="widget-card mt-20">
       <div className="widget-title">📚 HOW TO VERIFY NEWS — 5-STEP GUIDE</div>
       <div className="verify-steps">

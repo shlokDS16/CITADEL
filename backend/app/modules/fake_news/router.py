@@ -402,8 +402,13 @@ async def bulk_get(batch_id: str) -> dict:
             summary="Self-contained HTML analysis report")
 async def report_html(
     analysis_id: str, x_user_id: str | None = Header(default=None),
+    uid: str | None = Query(default=None),
 ) -> HTMLResponse:
-    html = await run_in_threadpool(service.report_html, analysis_id, x_user_id)
+    # browser navigations (window.open / <a>) can't set headers — accept the
+    # same pseudonymous id via ?uid= (same soft-trust as the header in this
+    # no-JWT citizen model; not a security boundary, just anti-enumeration)
+    html = await run_in_threadpool(service.report_html, analysis_id,
+                                   x_user_id or uid)
     if html is None:
         raise HTTPException(status_code=404, detail="analysis not found")
     return HTMLResponse(content=html, headers={
@@ -417,6 +422,7 @@ async def report_html(
             summary="PDF analysis report")
 async def report_pdf(
     analysis_id: str, x_user_id: str | None = Header(default=None),
+    uid: str | None = Query(default=None),
 ) -> Response:
     import uuid as _uuid
 
@@ -424,7 +430,8 @@ async def report_pdf(
         _uuid.UUID(analysis_id)              # reject non-UUID → no header injection
     except ValueError:
         raise HTTPException(status_code=404, detail="analysis not found")
-    pdf = await run_in_threadpool(service.report_pdf, analysis_id, x_user_id)
+    pdf = await run_in_threadpool(service.report_pdf, analysis_id,
+                                  x_user_id or uid)
     if pdf is None:
         raise HTTPException(status_code=404,
                             detail="analysis not found or PDF unavailable")
