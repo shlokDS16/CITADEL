@@ -278,3 +278,14 @@ Plan: `tasks/todo.md` (9 phases). Contract: `docs/module-specs/06-fake-news-dete
 
 **Bug found+fixed during verify:** unsigned 64-bit SimHash overflowed Postgres `bigint` → every persist silently failed; signed two's-complement mapping at the DB boundary fixes it losslessly. Token-frugal gate was firing on clean content (needs_review ≈ always true pre-fact-check) → dropped `needs_review` from the gate.
 **Verified (live HTTP):** scam → FAKE + Layer-4 Groq rationale ("central_claim", reasoning, "Recommendation: Remove…"); clean → Layer-4 **skipped** (no tokens burned); history total + real stats (checks 2 / fake 1 / real 1); `GET /analyses/{id}` returns verdict + 2 claim rows + signed simhash; review-queue→decide (verdict corrected, feedback recorded); direct feedback OK; soft-delete removes from history; `meta/refit` honestly no-ops < 30 samples.
+
+### Phase 5 — Multi-modal forensics (deepfake / AI-image / video) (2026-05-18)
+| File | Purpose | Status |
+|------|---------|--------|
+| `modules/fake_news/media_forensics.py` | EXIF inspection (missing camera / AI-tool software strings), image verdict from fabricated prob, video = OpenCV 8-frame sample + aggregate (mean/max/frac), type sniffing; never raises | OK |
+| `modules/fake_news/pipeline.py` | `image_forensics()` — SigLIP2 3-class (AI/Deepfake/Real) primary + ViT binary fallback; label-name normalization to {real, ai_generated, deepfake, fabricated} | OK |
+| `modules/fake_news/service.py` | `analyze_media_content()` — forensics + optional caption merged worst-case through the text waterfall (out-of-context image + misleading caption); IMAGE/VIDEO `analyze()` branch fetches from URL else points to upload route; persisted | OK |
+| `modules/fake_news/router.py` | `POST /api/v1/fake-news/analyze/media` (multipart, size-capped) | OK |
+
+**Probe-verified:** primary `prithivMLmods/AI-vs-Deepfake-vs-Real-Siglip2` (SiglipForImageClassification, AI/Deepfake/Real); fallback `dima806/deepfake_vs_real_image_detection` (ViT, Real/Fake) — both load, label mapping robust.
+**Verified (live HTTP):** synthetic PNG → FAKE 0.9992 (SigLIP2 AI 0.993) + "No EXIF metadata" flag; image+scam caption → FAKE with caption run through full text waterfall & merged ("worst-case of media vs text"); 15-frame video → 8 frames sampled+aggregated, verdict produced; empty file → 422. Persisted; no mocks; no 5xx.

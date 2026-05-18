@@ -12,8 +12,18 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import (
+    APIRouter,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    UploadFile,
+)
 from starlette.concurrency import run_in_threadpool
+
+from app.config import settings
 
 from app.modules.fake_news import schemas, service
 
@@ -65,6 +75,34 @@ async def analyze(
     except Exception as e:  # noqa: BLE001
         log.exception("fake-news analyze failed")
         raise HTTPException(status_code=500, detail=f"analyze failed: {e}")
+
+
+@router.post(
+    "/v1/fake-news/analyze/media",
+    response_model=schemas.AnalysisOut,
+    tags=[_TAG],
+    summary="Deepfake / AI-image (and video) forensics on an uploaded file",
+)
+async def analyze_media(
+    file: UploadFile = File(...),
+    query: str = Form(""),
+    x_user_id: str | None = Header(default=None),
+    x_user_role: str | None = Header(default=None),
+) -> schemas.AnalysisOut:
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=422, detail="empty file")
+    if len(content) > settings.max_upload_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"file exceeds {settings.MAX_UPLOAD_SIZE_MB} MB limit")
+    try:
+        return await run_in_threadpool(
+            service.analyze_media_content, content, file.filename or "media",
+            query, x_user_id, (x_user_role or "citizen"))
+    except Exception as e:  # noqa: BLE001
+        log.exception("analyze_media failed")
+        raise HTTPException(status_code=500, detail=f"media analysis failed: {e}")
 
 
 @router.post(

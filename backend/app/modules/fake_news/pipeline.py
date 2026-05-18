@@ -308,6 +308,64 @@ def nli(premise: str, hypothesis: str) -> dict:
                 "neutral": 1.0, "contradiction": 0.0, "label": "neutral"}
 
 
+# --------------------------------------------------------------------------
+# Multi-modal — deepfake / AI-generated image detection
+# --------------------------------------------------------------------------
+@lru_cache(maxsize=2)
+def _img_pipe(model_id: str):  # noqa: ANN202
+    from transformers import pipeline as hf_pipeline
+
+    with _LOAD_LOCK:
+        log.info("loading image-classification model: %s", model_id)
+        return hf_pipeline("image-classification", model=model_id, device=_DEVICE)
+
+
+def _norm_image_scores(raw: list[dict]) -> dict:
+    """Map arbitrary label names → {real, ai, deepfake} probabilities."""
+    real = ai = deep = 0.0
+    for d in raw:
+        lbl = str(d["label"]).lower()
+        sc = float(d["score"])
+        if "real" in lbl or "authentic" in lbl or "human" in lbl:
+            real = max(real, sc)
+        elif "deepfake" in lbl or "deep fake" in lbl or "face" in lbl:
+            deep = max(deep, sc)
+        elif any(x in lbl for x in ("ai", "artificial", "gan", "synthetic",
+                                    "generated", "fake")):
+            ai = max(ai, sc)
+    fabricated = round(min(1.0, max(ai + deep, 1.0 - real if real else 0.0)), 4)
+    return {"real": round(real, 4), "ai_generated": round(ai, 4),
+            "deepfake": round(deep, 4), "fabricated": fabricated}
+
+
+def image_forensics(content: bytes) -> dict:
+    """Real/AI/deepfake probabilities for an image. Never raises.
+
+    Tries the primary SigLIP2 3-class model, falls back to the ViT binary
+    model, so a single broken repo doesn't disable forensics.
+    """
+    if not settings.FN_ENABLE_HEAVY_MODELS:
+        return {"available": False, "reason": "heavy models disabled"}
+    import io
+
+    from PIL import Image
+
+    try:
+        img = Image.open(io.BytesIO(content)).convert("RGB")
+    except Exception as e:  # noqa: BLE001
+        return {"available": False, "error": f"not a readable image: {e}"}
+    for mid in (settings.FN_MODEL_DEEPFAKE, settings.FN_MODEL_DEEPFAKE_FALLBACK):
+        try:
+            raw = _img_pipe(mid)(img)
+            scores = _norm_image_scores(raw)
+            return {"available": True, "model": mid, **scores,
+                    "raw": {str(d["label"]): round(float(d["score"]), 4)
+                            for d in raw}}
+        except Exception as e:  # noqa: BLE001
+            log.warning("image model %s failed: %s", mid, e)
+    return {"available": False, "error": "all image models failed to load"}
+
+
 def warmup() -> dict:
     """Eagerly load + calibrate every model. Used by the warmup endpoint
     and (optionally) the lifespan pre-warm so the first request is fast."""

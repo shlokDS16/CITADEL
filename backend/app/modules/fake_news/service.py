@@ -6,6 +6,7 @@ orchestrator, HITL, history and drift glue arrive in later phases.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import sys
 import threading
@@ -25,6 +26,7 @@ from app.modules.fake_news import (
     fact_check,
     heuristics,
     llm_rationale,
+    media_forensics,
     pipeline as ml,
     repo,
     schemas,
@@ -300,16 +302,30 @@ def analyze(
     aid = str(uuid.uuid4())
     reasoning: list[str] = []
 
-    # ---- media: forensics arrive in Phase 5 (don't error the endpoint) ----
+    # ---- media: fetch-from-URL forensics, else point at the upload route ----
     if req.mode in ("IMAGE", "VIDEO"):
+        if req.url:
+            try:
+                with httpx.Client(timeout=_FETCH_TIMEOUT, follow_redirects=True,
+                                  headers={"User-Agent": _UA}) as c:
+                    rr = c.get(req.url)
+                if rr.status_code == 200 and rr.content:
+                    return analyze_media_content(
+                        rr.content, req.url.split("/")[-1] or "media",
+                        query="", requester_id=requester_id,
+                        requester_role=requester_role)
+            except Exception as e:  # noqa: BLE001
+                log.info("media url fetch failed: %s", e)
         return schemas.AnalysisOut(
-            id=aid, requester_id=requester_id, requester_role=requester_role,
+            id=aid, requester_id=requester_id,
+            requester_role=requester_role,  # type: ignore[arg-type]
             submitted_at=now, completed_at=datetime.now(timezone.utc),
             mode=req.mode, input_excerpt="(media)", verdict="UNCERTAIN",
             confidence=0.0, risk_score=0.0, needs_review=True,
-            reasoning=["Deepfake / AI-image forensics is delivered in Phase 5. "
-                       "Text and URL analysis is fully live now."],
-            model_versions={"pipeline": "phase-1"},
+            reasoning=["For image/video, upload the file to POST "
+                       "/api/v1/fake-news/analyze/media (multipart), or pass a "
+                       "direct media URL."],
+            model_versions={"pipeline": "fake-news"},
             response_time_ms=int((time.perf_counter() - t0) * 1000),
         )
 
@@ -546,6 +562,91 @@ def analyze(
         response_time_ms=int((time.perf_counter() - t0) * 1000),
     )
     repo.persist_analysis(out, h.hashes, url)
+    return out
+
+
+_SEV = {"REAL": 0, "LIKELY_REAL": 1, "UNCERTAIN": 2, "LIKELY_FAKE": 3, "FAKE": 4}
+
+
+def analyze_media_content(
+    content: bytes, filename: str = "", query: str = "",
+    requester_id: str | None = None, requester_role: str = "citizen",
+) -> schemas.AnalysisOut:
+    """Image/video deepfake + AI-gen forensics; merges an optional caption
+    through the text waterfall (worst-case of media vs text → catches
+    out-of-context images with misleading captions)."""
+    t0 = time.perf_counter()
+    now = datetime.now(timezone.utc)
+    aid = str(uuid.uuid4())
+    mf = media_forensics.analyze_media(content, filename)
+    reasoning: list[str] = []
+
+    if not mf.get("available"):
+        return schemas.AnalysisOut(
+            id=aid, requester_id=requester_id,
+            requester_role=requester_role,  # type: ignore[arg-type]
+            submitted_at=now, completed_at=datetime.now(timezone.utc),
+            mode="VIDEO" if mf.get("kind") == "video" else "IMAGE",
+            input_excerpt=f"({mf.get('kind', 'media')} upload)",
+            verdict="UNCERTAIN", confidence=0.0, risk_score=0.0,
+            needs_review=True,
+            reasoning=[f"Media forensics unavailable: {mf.get('reason')}"],
+            layers={"forensics": mf}, model_versions={"pipeline": "fake-news"},
+            response_time_ms=int((time.perf_counter() - t0) * 1000))
+
+    kind = mf["kind"]
+    mode = "VIDEO" if kind == "video" else "IMAGE"
+    verdict, confidence = mf["verdict"], mf["confidence"]
+    risk = float(mf["fabricated"])
+    red_flags = list(mf.get("red_flags", []))
+    reasoning.append(
+        f"Media forensics ({kind}): fabricated probability {risk:.2f}"
+        + (f" via {mf.get('forensics', {}).get('model')}"
+           if mf.get("forensics") else "") + ".")
+    for fl in mf.get("exif", {}).get("flags", []):
+        reasoning.append("EXIF: " + fl)
+
+    claims: list = []
+    related: list = []
+    cred = sentiment = manip = None
+    if query and len(query.strip()) >= 20:
+        try:
+            txt = analyze(schemas.AnalyzeIn(mode="TEXT", text=query),
+                          requester_id, requester_role)
+            if _SEV.get(txt.verdict, 0) > _SEV.get(verdict, 0):
+                verdict, confidence = txt.verdict, max(confidence, txt.confidence)
+            risk = max(risk, txt.risk_score)
+            red_flags += txt.red_flags
+            claims, related = txt.claims, txt.related_fact_checks
+            cred, sentiment, manip = (txt.source_credibility, txt.sentiment,
+                                      txt.manipulation)
+            reasoning.append("Caption text analyzed and merged "
+                             "(worst-case of media vs text).")
+        except Exception as e:  # noqa: BLE001
+            reasoning.append(f"Caption text analysis skipped: {e}")
+
+    needs_review = (verdict == "UNCERTAIN"
+                    or confidence < settings.FN_AUTO_VERDICT_CONFIDENCE)
+    out = schemas.AnalysisOut(
+        id=aid, requester_id=requester_id,
+        requester_role=requester_role,  # type: ignore[arg-type]
+        submitted_at=now, completed_at=datetime.now(timezone.utc),
+        mode=mode,
+        input_excerpt=(query[:_EXCERPT] if query
+                       else f"({kind} upload: {filename or 'media'})"),
+        verdict=verdict, confidence=round(confidence, 4),
+        risk_score=round(risk, 4), needs_review=needs_review,
+        quota_exhausted=False, claims=claims, source_credibility=cred,
+        bias_profile=None, sentiment=sentiment,
+        red_flags=list(dict.fromkeys(red_flags)), manipulation=manip,
+        related_fact_checks=related, reasoning=reasoning,
+        layers={"forensics": mf},
+        model_versions={"deepfake": settings.FN_MODEL_DEEPFAKE,
+                        "deepfake_fallback": settings.FN_MODEL_DEEPFAKE_FALLBACK},
+        response_time_ms=int((time.perf_counter() - t0) * 1000))
+    repo.persist_analysis(
+        out, {"sha256": hashlib.sha256(content).hexdigest(), "simhash": "0"},
+        None)
     return out
 
 
