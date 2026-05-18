@@ -33,6 +33,36 @@ router = APIRouter()
 
 _TAG = "fake-news"
 
+_IMG_EXT = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff")
+_VID_EXT = (".mp4", ".mov", ".avi", ".webm", ".mkv", ".m4v")
+_DATA_EXT = (".csv", ".json", ".txt")
+
+
+async def _read_capped(file: UploadFile, cap: int) -> bytes:
+    """Read an upload in bounded chunks, aborting (413) once it exceeds the
+    cap — avoids buffering an arbitrarily large body in memory first."""
+    buf = bytearray()
+    while True:
+        chunk = await file.read(65536)
+        if not chunk:
+            break
+        buf += chunk
+        if len(buf) > cap:
+            raise HTTPException(
+                status_code=413,
+                detail=f"file exceeds {settings.MAX_UPLOAD_SIZE_MB} MB limit")
+    if not buf:
+        raise HTTPException(status_code=422, detail="empty file")
+    return bytes(buf)
+
+
+def _require_ext(filename: str | None, allowed: tuple[str, ...]) -> None:
+    name = (filename or "").lower()
+    if not name.endswith(allowed):
+        raise HTTPException(
+            status_code=415,
+            detail=f"unsupported file type; allowed: {', '.join(allowed)}")
+
 
 @router.get(
     "/v1/fake-news/health",
@@ -90,13 +120,8 @@ async def analyze_media(
     x_user_id: str | None = Header(default=None),
     x_user_role: str | None = Header(default=None),
 ) -> schemas.AnalysisOut:
-    content = await file.read()
-    if not content:
-        raise HTTPException(status_code=422, detail="empty file")
-    if len(content) > settings.max_upload_bytes:
-        raise HTTPException(
-            status_code=413,
-            detail=f"file exceeds {settings.MAX_UPLOAD_SIZE_MB} MB limit")
+    _require_ext(file.filename, _IMG_EXT + _VID_EXT)
+    content = await _read_capped(file, settings.max_upload_bytes)
     try:
         return await run_in_threadpool(
             service.analyze_media_content, content, file.filename or "media",
@@ -180,10 +205,12 @@ async def related_fact_checks(q: str) -> dict:
 # ---- history / persistence (Phase 4) ----
 @router.get("/v1/fake-news/analyses/{analysis_id}", tags=[_TAG],
             summary="Full stored analysis (with claim rows)")
-async def get_analysis(analysis_id: str) -> dict:
+async def get_analysis(
+    analysis_id: str, x_user_id: str | None = Header(default=None),
+) -> dict:
     from app.modules.fake_news import repo
 
-    row = await run_in_threadpool(repo.get_analysis, analysis_id)
+    row = await run_in_threadpool(repo.get_analysis, analysis_id, x_user_id)
     if row is None:
         raise HTTPException(status_code=404, detail="analysis not found")
     return {"data": row}
@@ -220,7 +247,8 @@ async def delete_history(
 
     ok = await run_in_threadpool(repo.soft_delete, analysis_id, x_user_id)
     if not ok:
-        raise HTTPException(status_code=503, detail="history store unavailable")
+        raise HTTPException(status_code=404,
+                            detail="not found or not owned by this user")
     return {"data": {"deleted": analysis_id}}
 
 
@@ -289,11 +317,8 @@ async def propagation_analyze(
     file: UploadFile = File(...),
     x_user_id: str | None = Header(default=None),
 ) -> dict:
-    raw = await file.read()
-    if not raw:
-        raise HTTPException(status_code=422, detail="empty file")
-    if len(raw) > settings.max_upload_bytes:
-        raise HTTPException(status_code=413, detail="file too large")
+    _require_ext(file.filename, _DATA_EXT)
+    raw = await _read_capped(file, settings.max_upload_bytes)
 
     def _work() -> dict:
         from app.modules.fake_news import propagation, repo
@@ -350,9 +375,8 @@ async def bulk(
 async def bulk_csv(
     file: UploadFile = File(...), x_user_id: str | None = Header(default=None),
 ) -> dict:
-    raw = await file.read()
-    if not raw:
-        raise HTTPException(status_code=422, detail="empty file")
+    _require_ext(file.filename, _DATA_EXT)
+    raw = await _read_capped(file, settings.max_upload_bytes)
     lines = [ln.strip().strip(",") for ln in
              raw.decode("utf-8", "replace").splitlines() if ln.strip()]
     if lines and lines[0].lower() in ("url", "urls", "text"):
@@ -376,17 +400,31 @@ async def bulk_get(batch_id: str) -> dict:
 # ---- exports / report / share (Phase 7) ----
 @router.get("/v1/fake-news/analyses/{analysis_id}/report.html", tags=[_TAG],
             summary="Self-contained HTML analysis report")
-async def report_html(analysis_id: str) -> HTMLResponse:
-    html = await run_in_threadpool(service.report_html, analysis_id)
+async def report_html(
+    analysis_id: str, x_user_id: str | None = Header(default=None),
+) -> HTMLResponse:
+    html = await run_in_threadpool(service.report_html, analysis_id, x_user_id)
     if html is None:
         raise HTTPException(status_code=404, detail="analysis not found")
-    return HTMLResponse(content=html)
+    return HTMLResponse(content=html, headers={
+        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "no-referrer",
+    })
 
 
 @router.get("/v1/fake-news/analyses/{analysis_id}/report.pdf", tags=[_TAG],
             summary="PDF analysis report")
-async def report_pdf(analysis_id: str) -> Response:
-    pdf = await run_in_threadpool(service.report_pdf, analysis_id)
+async def report_pdf(
+    analysis_id: str, x_user_id: str | None = Header(default=None),
+) -> Response:
+    import uuid as _uuid
+
+    try:
+        _uuid.UUID(analysis_id)              # reject non-UUID → no header injection
+    except ValueError:
+        raise HTTPException(status_code=404, detail="analysis not found")
+    pdf = await run_in_threadpool(service.report_pdf, analysis_id, x_user_id)
     if pdf is None:
         raise HTTPException(status_code=404,
                             detail="analysis not found or PDF unavailable")
@@ -398,8 +436,10 @@ async def report_pdf(analysis_id: str) -> Response:
 
 @router.post("/v1/fake-news/analyses/{analysis_id}/report", tags=[_TAG],
              summary="Refer the analysis to PIB Fact Check (logs + notifies)")
-async def report_pib(analysis_id: str) -> dict:
-    res = await run_in_threadpool(service.report_to_pib, analysis_id)
+async def report_pib(
+    analysis_id: str, x_user_id: str | None = Header(default=None),
+) -> dict:
+    res = await run_in_threadpool(service.report_to_pib, analysis_id, x_user_id)
     if not res.get("ok"):
         raise HTTPException(status_code=404,
                             detail=res.get("error", "analysis not found"))
@@ -408,10 +448,12 @@ async def report_pib(analysis_id: str) -> dict:
 
 @router.post("/v1/fake-news/analyses/{analysis_id}/share", tags=[_TAG],
              summary="Generate a signed read-only share link (7-day TTL)")
-async def share(analysis_id: str) -> dict:
+async def share(
+    analysis_id: str, x_user_id: str | None = Header(default=None),
+) -> dict:
     from app.modules.fake_news import repo
 
-    if await run_in_threadpool(repo.get_analysis, analysis_id) is None:
+    if await run_in_threadpool(repo.get_analysis, analysis_id, x_user_id) is None:
         raise HTTPException(status_code=404, detail="analysis not found")
     token = service.make_share_token(analysis_id)
     return {"data": {"token": token,
@@ -427,7 +469,7 @@ async def shared(token: str) -> dict:
     aid = service.verify_share_token(token)
     if not aid:
         raise HTTPException(status_code=404, detail="invalid or expired link")
-    row = await run_in_threadpool(repo.get_analysis, aid)
+    row = await run_in_threadpool(repo.get_analysis, aid, None, True)
     if row is None:
         raise HTTPException(status_code=404, detail="analysis not found")
     return {"data": row}

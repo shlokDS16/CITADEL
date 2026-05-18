@@ -138,10 +138,9 @@ def health() -> schemas.HealthResponse:
 
 
 # ==========================================================================
-# Analysis waterfall.  Phase 1 = Layer 1 only (heuristics + adversarial +
-# hash/near-dup). Layers 2-4 (transformer classifier, RAG/NLI, LLM rationale)
-# are wired in later phases — the verdict is honestly marked preliminary
-# until then. Nothing here returns mock values; every field is computed.
+# Analysis waterfall: L1 heuristics+adversarial+hash → L2 transformer
+# classifiers + VADER → L3 RAG fact-check + NLI → L4 LLM rationale
+# (high-risk only). Nothing returns mock values; every field is computed.
 # ==========================================================================
 _UA = "Mozilla/5.0 (compatible; CitadelFakeNews/1.0; +https://citadel.local)"
 _FETCH_TIMEOUT = 12.0
@@ -160,15 +159,85 @@ def _get_sb():  # noqa: ANN202
         return None
 
 
+_MAX_REDIRECTS = 4
+
+
+def _host_is_safe(host: str) -> bool:
+    """True only if every IP `host` resolves to is a public address.
+
+    Blocks SSRF to loopback / private / link-local (incl. cloud metadata
+    169.254.169.254) / reserved / multicast ranges.
+    """
+    import ipaddress
+    import socket
+
+    if not host:
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except Exception:  # noqa: BLE001
+        return False
+    for fam, _t, _p, _c, sockaddr in infos:
+        ip_s = sockaddr[0].split("%")[0]
+        try:
+            ip = ipaddress.ip_address(ip_s)
+        except ValueError:
+            return False
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            return False
+    return True
+
+
+def ssrf_safe_get(url: str, max_bytes: int = _FETCH_MAX_BYTES):  # noqa: ANN201
+    """SSRF-hardened GET. Validates the host (and every redirect hop) is a
+    public address, forbids non-http(s) schemes, and streams with a byte cap.
+    Returns the final httpx.Response, or None if blocked/failed. Never raises.
+    """
+    from urllib.parse import urlparse
+
+    cur = url
+    try:
+        for _ in range(_MAX_REDIRECTS + 1):
+            p = urlparse(cur)
+            if p.scheme not in ("http", "https") or not p.hostname:
+                log.warning("ssrf: rejected non-http/url %r", cur[:120])
+                return None
+            if not _host_is_safe(p.hostname):
+                log.warning("ssrf: blocked private/internal host %r", p.hostname)
+                return None
+            with httpx.Client(timeout=_FETCH_TIMEOUT, follow_redirects=False,
+                              headers={"User-Agent": _UA}) as c:
+                with c.stream("GET", cur) as r:
+                    if r.status_code in (301, 302, 303, 307, 308):
+                        loc = r.headers.get("location")
+                        if not loc:
+                            return None
+                        cur = str(httpx.URL(cur).join(loc))
+                        continue
+                    buf = bytearray()
+                    for chunk in r.iter_bytes():
+                        buf += chunk
+                        if len(buf) > max_bytes:
+                            break
+                    r._content = bytes(buf)  # noqa: SLF001 — finalize body
+                    return r
+        log.warning("ssrf: too many redirects for %r", url[:120])
+        return None
+    except Exception as e:  # noqa: BLE001
+        log.info("ssrf_safe_get failed: %s", e)
+        return None
+
+
 def _fetch_article(url: str) -> tuple[str, str, str]:
     """Fetch a URL and extract clean article text. Never raises.
 
     Returns (text, title, final_url). On failure text/title are "".
     """
     try:
-        with httpx.Client(timeout=_FETCH_TIMEOUT, follow_redirects=True,
-                          headers={"User-Agent": _UA}) as c:
-            r = c.get(url)
+        r = ssrf_safe_get(url, max_bytes=_FETCH_MAX_BYTES * 2)
+        if r is None:
+            return "", "", url
         final_url = str(r.url)
         ctype = r.headers.get("content-type", "")
         if r.status_code != 200 or "html" not in ctype.lower():
@@ -284,8 +353,17 @@ def _final_verdict(
     if corroborated:
         return (min(combined_risk, 0.3), "LIKELY_REAL", 0.74, False,
                 "Claims corroborated, though style signals are mixed.")
-    # no decisive verification → fall back to the style verdict, but a
-    # genuine verification *attempt* slightly de-risks pure-style calls.
+    # No decisive verification. A misinformation tool must NOT assert a
+    # REAL-family verdict from absence-of-red-flags alone — that's "not
+    # verified", not "true". Downgrade unverified REAL-ish to UNCERTAIN;
+    # only keep FAKE-ish style verdicts (those are risk warnings, not
+    # truth claims).
+    if l2_verdict in ("REAL", "LIKELY_REAL"):
+        note = ("Style looks clean but no claim could be verified — "
+                "treat as unverified, not confirmed true."
+                if claims else
+                "No check-worthy claims to verify — unverified, not confirmed.")
+        return combined_risk, "UNCERTAIN", 0.5, True, note
     conf = round(min(0.78, l2_conf + (0.05 if claims else 0.0)), 4)
     nr = l2_verdict == "UNCERTAIN" or conf < settings.FN_AUTO_VERDICT_CONFIDENCE
     note = ("Claims checked but evidence was inconclusive."
@@ -308,10 +386,8 @@ def analyze(
     if req.mode in ("IMAGE", "VIDEO"):
         if req.url:
             try:
-                with httpx.Client(timeout=_FETCH_TIMEOUT, follow_redirects=True,
-                                  headers={"User-Agent": _UA}) as c:
-                    rr = c.get(req.url)
-                if rr.status_code == 200 and rr.content:
+                rr = ssrf_safe_get(req.url, max_bytes=settings.max_upload_bytes)
+                if rr is not None and rr.status_code == 200 and rr.content:
                     return analyze_media_content(
                         rr.content, req.url.split("/")[-1] or "media",
                         query="", requester_id=requester_id,
@@ -377,9 +453,6 @@ def analyze(
         f"(manipulation peak {max(h.manipulation.values())}/100, "
         f"{len(h.red_flags)} red flag(s))."
     )
-    reasoning.append("Layers 2-4 (transformer classifier, RAG/NLI fact-check, "
-                     "LLM rationale) are not yet active — this is a preliminary "
-                     "Layer-1 screening result.")
 
     # ---- Layer 2: transformer style classifiers + VADER sentiment ----
     l2 = _l2_run(text)
@@ -665,28 +738,42 @@ def _is_url(s: str) -> bool:
     return s.lower().startswith(("http://", "https://"))
 
 
+_BULK_WORKERS = 3
+_BULK_MAX_KEEP = 50
+
+
+def _bulk_one(bid: str, idx: int, it: str, rid: str | None, role: str) -> None:
+    try:
+        mode = "URL" if _is_url(it) else "TEXT"
+        req = schemas.AnalyzeIn(
+            mode=mode, **({"url": it} if mode == "URL" else {"text": it}))
+        out = analyze(req, rid, role)
+        with _BULK_LOCK:
+            row = _BULK[bid]["items"][idx]
+            row["verdict"] = _BULK_VERDICT.get(out.verdict, "UNCERTAIN")
+            row["confidence"] = out.confidence
+            row["analysis_id"] = out.id
+    except Exception as e:  # noqa: BLE001
+        with _BULK_LOCK:
+            _BULK[bid]["items"][idx]["verdict"] = "ERROR"
+            _BULK[bid]["items"][idx]["error"] = str(e)[:200]
+    finally:
+        with _BULK_LOCK:
+            _BULK[bid]["completed"] += 1
+
+
 def _bulk_worker(bid: str, items: list[str], rid: str | None,
                  role: str) -> None:
-    for idx, it in enumerate(items):
-        try:
-            mode = "URL" if _is_url(it) else "TEXT"
-            req = schemas.AnalyzeIn(
-                mode=mode, **({"url": it} if mode == "URL" else {"text": it}))
-            out = analyze(req, rid, role)
-            with _BULK_LOCK:
-                row = _BULK[bid]["items"][idx]
-                row["verdict"] = _BULK_VERDICT.get(out.verdict, "UNCERTAIN")
-                row["confidence"] = out.confidence
-                row["analysis_id"] = out.id
-        except Exception as e:  # noqa: BLE001
-            with _BULK_LOCK:
-                _BULK[bid]["items"][idx]["verdict"] = "ERROR"
-                _BULK[bid]["items"][idx]["error"] = str(e)[:200]
-        finally:
-            with _BULK_LOCK:
-                _BULK[bid]["completed"] += 1
-    with _BULK_LOCK:
-        _BULK[bid]["status"] = "done"
+    from concurrent.futures import ThreadPoolExecutor
+
+    try:
+        with ThreadPoolExecutor(max_workers=_BULK_WORKERS,
+                                thread_name_prefix=f"fn-bulk-{bid[:6]}") as ex:
+            for idx, it in enumerate(items):
+                ex.submit(_bulk_one, bid, idx, it, rid, role)
+    finally:
+        with _BULK_LOCK:
+            _BULK[bid]["status"] = "done"
 
 
 def bulk_submit(items: list[str], requester_id: str | None = None,
@@ -702,6 +789,10 @@ def bulk_submit(items: list[str], requester_id: str | None = None,
     }
     with _BULK_LOCK:
         _BULK[bid] = rec
+        if len(_BULK) > _BULK_MAX_KEEP:        # evict oldest (no leak)
+            for k in sorted(_BULK, key=lambda x: _BULK[x]["submitted_at"]
+                            )[:len(_BULK) - _BULK_MAX_KEEP]:
+                _BULK.pop(k, None)
     if items:
         threading.Thread(target=_bulk_worker,
                          args=(bid, items, requester_id, requester_role),
@@ -726,8 +817,8 @@ def _esc(s: object) -> str:
     return _html.escape(str(s if s is not None else ""))
 
 
-def report_html(analysis_id: str) -> str | None:
-    a = repo.get_analysis(analysis_id)
+def report_html(analysis_id: str, requester_id: str | None = None) -> str | None:
+    a = repo.get_analysis(analysis_id, requester_id)
     if not a:
         return None
     claims = a.get("claims") or []
@@ -768,8 +859,8 @@ not legal determinations. Route low-confidence items to human review.
 </div></body></html>"""
 
 
-def report_pdf(analysis_id: str) -> bytes | None:
-    a = repo.get_analysis(analysis_id)
+def report_pdf(analysis_id: str, requester_id: str | None = None) -> bytes | None:
+    a = repo.get_analysis(analysis_id, requester_id)
     if not a:
         return None
     try:
@@ -821,8 +912,8 @@ def report_pdf(analysis_id: str) -> bytes | None:
     return bytes(pdf.output())
 
 
-def report_to_pib(analysis_id: str) -> dict:
-    a = repo.get_analysis(analysis_id)
+def report_to_pib(analysis_id: str, requester_id: str | None = None) -> dict:
+    a = repo.get_analysis(analysis_id, requester_id)
     if not a:
         return {"ok": False, "error": "analysis not found"}
     repo.mark_reported(analysis_id)
@@ -835,9 +926,10 @@ def report_to_pib(analysis_id: str) -> dict:
                    f"({round((a.get('confidence') or 0)*100)}%)\n"
                    f"Excerpt: {str(a.get('input_excerpt'))[:300]}\n"
                    f"Analysis: {analysis_id}")
-            r = httpx.post(
-                f"{settings.TELEGRAM_API_BASE}/bot{token}/sendMessage",
-                json={"chat_id": chat, "text": msg}, timeout=10)
+            with httpx.Client(timeout=10) as _c:
+                r = _c.post(
+                    f"{settings.TELEGRAM_API_BASE}/bot{token}/sendMessage",
+                    json={"chat_id": chat, "text": msg})
             tg = {"sent": r.status_code == 200}
         except Exception as e:  # noqa: BLE001
             tg = {"sent": False, "error": str(e)[:160]}
@@ -845,17 +937,28 @@ def report_to_pib(analysis_id: str) -> dict:
 
 
 def _share_secret() -> bytes:
-    return (settings.SUPABASE_SERVICE_ROLE_KEY or "citadel-fn").encode()
+    """App-specific signing key, derived one-way from the server secret.
+
+    No guessable constant fallback (forgeable tokens) and never the raw
+    service-role JWT itself — fail closed if the server secret is missing.
+    """
+    import hashlib
+
+    base = settings.SUPABASE_SERVICE_ROLE_KEY
+    if not base:
+        raise RuntimeError("share signing unavailable: server secret unset")
+    return hashlib.sha256(b"citadel-fn-share-v1|" + base.encode()).digest()
 
 
 def make_share_token(analysis_id: str, ttl_days: int = 7) -> str:
     import base64
     import hmac
+
     import time as _t
 
     exp = int(_t.time()) + ttl_days * 86400
     payload = f"{analysis_id}.{exp}"
-    sig = hmac.new(_share_secret(), payload.encode(), "sha256").hexdigest()[:32]
+    sig = hmac.new(_share_secret(), payload.encode(), "sha256").hexdigest()
     raw = f"{payload}.{sig}".encode()
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
@@ -870,7 +973,7 @@ def verify_share_token(token: str) -> str | None:
         raw = base64.urlsafe_b64decode(token + pad).decode()
         analysis_id, exp, sig = raw.rsplit(".", 2)
         good = hmac.new(_share_secret(), f"{analysis_id}.{exp}".encode(),
-                        "sha256").hexdigest()[:32]
+                        "sha256").hexdigest()
         if not hmac.compare_digest(sig, good):
             return None
         if int(exp) < int(_t.time()):

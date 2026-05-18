@@ -324,3 +324,27 @@ Driven by `ui-ux-pro-max` (Data-Dense Dashboard pattern; brutalist visual langua
 | `styles.css` | `=== FAKE NEWS DETECTOR ===` brutalist section (theme-independent explicit colours; reduced-motion) | OK |
 
 **Verified in-browser (preview tools, :8080 → :8000):** app compiles clean in-browser Babel (`FakeNewsDetector` is a valid fn, **no JSX/runtime errors**); status strip shows real `torch 2.11.0 · transformers 5.3.0 · GROQ KEYED · FACT-CHECK GOOGLE · DRIFT BASELINE`; scam → **FAKE 93% / risk 95%**, 4-layer waterfall all "on" with live values (L1 0.40 / L2 100% / L3 2 claims / L4 reasoned), 5 red flags, **real RELATED FACT-CHECKS** (Newschecker/Factly with working links); HISTORY KPIs+table live (the run persisted); REVIEW queue + meta status live; LEARN trusted sources live from the credibility KB; BULK renders. Only console output = benign in-browser-Babel notice. Brutalist language fully preserved (screenshot).
+
+### Phase 9 — Enterprise hardening (2026-05-18)
+Ran `security-auditor` + `api-contract-validator` + `code-reviewer` agents; triaged and fixed every genuine finding (the contract "drift #1" was a false alarm — agent couldn't read `drift.py`; `latest()` returns `{latest:row}`, frontend is correct).
+| Fix | Severity | File(s) |
+|-----|----------|---------|
+| SSRF guard `ssrf_safe_get` — DNS→IP public-only, scheme allowlist, manual redirect re-validation, streamed byte cap; applied to article + media-URL fetch | CRITICAL | service.py |
+| Share token — dedicated one-way-derived secret (no `"citadel-fn"` constant fallback, fail-closed), **full** HMAC (dropped `[:32]`) | CRITICAL | service.py |
+| Tenant scoping — `get_analysis`/report.html/pdf/share/delete now require & filter by `requester_id`; missing → no access; share-link path uses explicit `allow_any` | CRITICAL/IDOR | repo.py, router.py |
+| Verdict floor — unverified REAL/LIKELY_REAL → **UNCERTAIN** (a misinfo tool must not assert "true" from absence-of-red-flags) | BLOCKER | service.py |
+| Upload hardening — chunked `_read_capped` (abort >cap before buffering) + extension allowlist on media/propagation/CSV | HIGH | router.py |
+| report.pdf — reject non-UUID id (Content-Disposition header-injection) | MEDIUM | router.py |
+| ilike injection — escape `% _ \ ,` in history search | MEDIUM | repo.py |
+| report.html — CSP `default-src 'none'` + nosniff + no-referrer | LOW(def-in-depth) | router.py |
+| Model singletons — real double-checked-lock per-model cache (`_singleton`); fixes parallel double-load OOM **and** the `lru_cache(maxsize=1)` multi-model thrash | MAJOR | pipeline.py |
+| Bulk — bounded `ThreadPoolExecutor(3)` + `_BULK` LRU eviction (was serial + unbounded leak) | MAJOR | service.py |
+| `analyze_video` temp file — `mkstemp` unique (was pid+len collision) | MINOR | media_forensics.py |
+| `refit_meta` honesty — `applied_to_live:false` + note (nothing reads weights yet) | correctness | repo.py |
+| Removed stale "Layers 2-4 not yet active" reasoning line (contradicted live L2-L4) | polish | service.py |
+| Propagation dates normalized tz-aware UTC (naive/aware subtraction crash) | correctness | propagation.py |
+| `report_to_pib` httpx in `with` context | minor | service.py |
+
+**Regression-verified live:** boot 200 (all refactors import clean); `http://169.254.169.254/...` & `http://127.0.0.1:8000/...` → **SSRF blocked** (no fetch); `GET /analyses/{id}` no-auth → 404, other-user → 404, owner → 200; share → token, `/shared/{token}` 200, **forged token → 404**; `report.pdf` non-UUID → 404; clean text → UNCERTAIN (honest floor); propagation organic still ORGANIC; bulk/history intact.
+
+**Documented follow-ups (not blocking, consistent with codebase):** no per-endpoint rate-limit (project-wide gap; other modules same), no `Idempotency-Key` store (project-wide), `python-magic` mime-sniff (extension allowlist in place), module unit-test suite (other modules also lack), meta-classifier live application (intentionally gated).

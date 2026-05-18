@@ -30,7 +30,7 @@ import io
 import json
 import logging
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 
 log = logging.getLogger("citadel.fake_news.propagation")
 
@@ -59,15 +59,22 @@ def _parse_dt(v: str | None) -> datetime | None:
     if not v:
         return None
     v = v.strip().replace("Z", "+00:00")
+    def _utc(d):  # noqa: ANN001, ANN202 — normalize to tz-aware UTC so
+        # naive and offset-aware inputs never get subtracted together.
+        if d is None:
+            return None
+        return (d.replace(tzinfo=timezone.utc) if d.tzinfo is None
+                else d.astimezone(timezone.utc))
+
     for fmt in (None, "%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d/%m/%Y %H:%M",
                 "%d-%m-%Y", "%Y/%m/%d"):
         try:
-            return datetime.fromisoformat(v) if fmt is None \
-                else datetime.strptime(v, fmt)
+            return _utc(datetime.fromisoformat(v) if fmt is None
+                        else datetime.strptime(v, fmt))
         except Exception:  # noqa: BLE001
             continue
     try:
-        return datetime.fromtimestamp(float(v))
+        return _utc(datetime.fromtimestamp(float(v)))
     except Exception:  # noqa: BLE001
         return None
 

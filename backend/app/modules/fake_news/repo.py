@@ -120,13 +120,22 @@ def persist_analysis(out, hashes: dict[str, str], url: str | None) -> None:  # n
 # --------------------------------------------------------------------------
 # History
 # --------------------------------------------------------------------------
-def get_analysis(analysis_id: str) -> dict | None:
+def get_analysis(analysis_id: str, requester_id: str | None = None,
+                 allow_any: bool = False) -> dict | None:
+    """Fetch an analysis. Tenant-scoped by `requester_id` unless `allow_any`
+    (only the signed share-link path passes allow_any — the token is the
+    grant). No requester and not allow_any → no access."""
     sb = _sb()
     if sb is None:
         return None
+    if not allow_any and not requester_id:
+        return None
     try:
-        a = (sb.table("analyses").select("*").eq("id", analysis_id)
-             .is_("deleted_at", "null").limit(1).execute())
+        qy = (sb.table("analyses").select("*").eq("id", analysis_id)
+              .is_("deleted_at", "null"))
+        if not allow_any:
+            qy = qy.eq("requester_id", requester_id)
+        a = qy.limit(1).execute()
         if not a.data:
             return None
         row = a.data[0]
@@ -157,7 +166,11 @@ def history(requester_id: str | None, page: int = 1, page_size: int = 25,
         if verdict:
             query = query.eq("verdict", verdict)
         if q:
-            query = query.ilike("input_excerpt", f"%{q}%")
+            # escape PostgREST/LIKE metacharacters so a user query of
+            # "%" / "_" / "," can't widen or alter the filter
+            safe = (q[:200].replace("\\", "\\\\").replace("%", "\\%")
+                    .replace("_", "\\_").replace(",", " "))
+            query = query.ilike("input_excerpt", f"%{safe}%")
         lo = (page - 1) * page_size
         res = (query.order("submitted_at", desc=True)
                .range(lo, lo + page_size - 1).execute())
@@ -198,14 +211,11 @@ def history_stats(requester_id: str | None) -> dict:
 
 def soft_delete(analysis_id: str, requester_id: str | None) -> bool:
     sb = _sb()
-    if sb is None:
+    if sb is None or not requester_id:        # never delete cross-tenant
         return False
     try:
-        q = sb.table("analyses").update({"deleted_at": _now()}).eq(
-            "id", analysis_id)
-        if requester_id:
-            q = q.eq("requester_id", requester_id)
-        q.execute()
+        (sb.table("analyses").update({"deleted_at": _now()})
+         .eq("id", analysis_id).eq("requester_id", requester_id).execute())
         return True
     except Exception as e:  # noqa: BLE001
         log.debug("soft_delete failed: %s", e)
@@ -364,8 +374,12 @@ def refit_meta() -> dict:
             "weights": weights, "n_samples": n,
             "metrics": {"train_accuracy": acc}, "trained_at": _now(),
         }).execute()
+        # Honest: weights are persisted for audit/export and future
+        # gated rollout — they are NOT yet fed into the live verdict
+        # (an under-trained meta-model must not override verified L3).
         return {"trained": True, "n_samples": n, "train_accuracy": acc,
-                "applied_to_live": True}
+                "applied_to_live": False,
+                "note": "weights stored; live application gated pending eval"}
     except Exception as e:  # noqa: BLE001
         log.warning("refit_meta failed: %s", e)
         return {"trained": False, "reason": str(e)}

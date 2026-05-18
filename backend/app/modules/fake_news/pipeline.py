@@ -39,6 +39,24 @@ _DEVICE = -1          # CPU
 _MAX_LEN = 512
 _MIN_CHARS = 25       # below this, transformer signal is unreliable
 _LOAD_LOCK = threading.Lock()
+_MODELS: dict = {}
+
+
+def _singleton(key, factory):  # noqa: ANN001, ANN202
+    """Double-checked, per-key model cache. Prevents N threads loading the
+    same HF model in parallel (lru_cache memoizes only the *return*, so
+    concurrent first-calls each load — an OOM risk on a constrained box);
+    also a real multi-model cache (the old lru_cache(maxsize=1) thrashed
+    because every loader shared one slot keyed by model id)."""
+    m = _MODELS.get(key)
+    if m is not None:
+        return m
+    with _LOAD_LOCK:
+        m = _MODELS.get(key)
+        if m is None:
+            m = factory()
+            _MODELS[key] = m
+        return m
 
 # Canonical calibration pairs: (risk-positive example, neutral example).
 _CAL = {
@@ -66,17 +84,17 @@ _CAL = {
 # --------------------------------------------------------------------------
 # Lazy singletons
 # --------------------------------------------------------------------------
-@lru_cache(maxsize=1)
 def _tc(model_id: str):  # noqa: ANN202
-    """Load a text-classification pipeline (cached). Raises on failure."""
-    from transformers import pipeline as hf_pipeline
+    """Load a text-classification pipeline (per-model singleton)."""
+    def _make():  # noqa: ANN202
+        from transformers import pipeline as hf_pipeline
 
-    with _LOAD_LOCK:
         log.info("loading text-classification model: %s", model_id)
         return hf_pipeline(
             "text-classification", model=model_id, tokenizer=model_id,
             top_k=None, device=_DEVICE, truncation=True, max_length=_MAX_LEN,
         )
+    return _singleton(f"tc:{model_id}", _make)
 
 
 def _scores(pipe, text: str) -> dict[str, float]:  # noqa: ANN001
@@ -170,25 +188,24 @@ def classify_bias(text: str) -> dict:
     return _binary_risk(settings.FN_MODEL_BIAS, "bias", text)
 
 
-@lru_cache(maxsize=1)
 def _propaganda_pipe():  # noqa: ANN202
-    """Propaganda model — architecture-aware (token vs sequence)."""
-    from transformers import AutoConfig
-    from transformers import pipeline as hf_pipeline
+    """Propaganda model — architecture-aware (token vs sequence), singleton."""
+    def _make():  # noqa: ANN202
+        from transformers import AutoConfig
+        from transformers import pipeline as hf_pipeline
 
-    mid = settings.FN_MODEL_PROPAGANDA
-    cfg = AutoConfig.from_pretrained(mid)
-    arch_list = list(getattr(cfg, "architectures", None) or [])
-    is_tok = any(a.endswith(_STD_TOK) for a in arch_list)
-    is_seq = any(a.endswith(_STD_SEQ) for a in arch_list)
-    if not (is_tok or is_seq):
-        # e.g. QCRI's BertForTokenAndSequenceJointClassification is a custom
-        # joint head that needs trust_remote_code and is not pipeline-safe —
-        # refuse rather than emit meaningless LABEL_0/1 noise.
-        raise ValueError(
-            f"unsupported propaganda model architecture {arch_list!r} "
-            f"(not a standard sequence/token classifier) — excluded")
-    with _LOAD_LOCK:
+        mid = settings.FN_MODEL_PROPAGANDA
+        cfg = AutoConfig.from_pretrained(mid)
+        arch_list = list(getattr(cfg, "architectures", None) or [])
+        is_tok = any(a.endswith(_STD_TOK) for a in arch_list)
+        is_seq = any(a.endswith(_STD_SEQ) for a in arch_list)
+        if not (is_tok or is_seq):
+            # e.g. QCRI's BertForTokenAndSequenceJointClassification is a
+            # custom joint head needing trust_remote_code, not pipeline-safe
+            # — refuse rather than emit meaningless LABEL_0/1 noise.
+            raise ValueError(
+                f"unsupported propaganda model architecture {arch_list!r} "
+                f"(not a standard sequence/token classifier) — excluded")
         if is_tok:
             log.info("loading propaganda (token-classification): %s", mid)
             return ("token", hf_pipeline(
@@ -198,6 +215,7 @@ def _propaganda_pipe():  # noqa: ANN202
         return ("seq", hf_pipeline(
             "text-classification", model=mid, tokenizer=mid, top_k=None,
             device=_DEVICE, truncation=True, max_length=_MAX_LEN))
+    return _singleton("propaganda", _make)
 
 
 def detect_propaganda(text: str) -> dict:
@@ -264,16 +282,16 @@ def sentiment(text: str) -> dict:
 # --------------------------------------------------------------------------
 # Layer 3 helper — NLI claim verification (DeBERTa-v3 MNLI/FEVER/ANLI)
 # --------------------------------------------------------------------------
-@lru_cache(maxsize=1)
 def _nli_pipe():  # noqa: ANN202
-    from transformers import pipeline as hf_pipeline
+    def _make():  # noqa: ANN202
+        from transformers import pipeline as hf_pipeline
 
-    mid = settings.FN_MODEL_NLI
-    with _LOAD_LOCK:
+        mid = settings.FN_MODEL_NLI
         log.info("loading NLI model: %s", mid)
         return hf_pipeline("text-classification", model=mid, tokenizer=mid,
                            top_k=None, device=_DEVICE, truncation=True,
                            max_length=_MAX_LEN)
+    return _singleton("nli", _make)
 
 
 def nli(premise: str, hypothesis: str) -> dict:
@@ -311,13 +329,13 @@ def nli(premise: str, hypothesis: str) -> dict:
 # --------------------------------------------------------------------------
 # Multi-modal — deepfake / AI-generated image detection
 # --------------------------------------------------------------------------
-@lru_cache(maxsize=2)
 def _img_pipe(model_id: str):  # noqa: ANN202
-    from transformers import pipeline as hf_pipeline
+    def _make():  # noqa: ANN202
+        from transformers import pipeline as hf_pipeline
 
-    with _LOAD_LOCK:
         log.info("loading image-classification model: %s", model_id)
         return hf_pipeline("image-classification", model=model_id, device=_DEVICE)
+    return _singleton(f"img:{model_id}", _make)
 
 
 def _norm_image_scores(raw: list[dict]) -> dict:

@@ -93,12 +93,12 @@ def analyze_image(content: bytes) -> dict:
 
 
 def analyze_video(content: bytes, filename: str = "video.mp4") -> dict:
-    tmp = os.path.join(tempfile.gettempdir(),
-                       f"fn_vid_{os.getpid()}_{len(content)}.bin")
+    # Unique temp path — concurrent uploads of equal size must not collide.
+    fd, tmp = tempfile.mkstemp(prefix="fn_vid_", suffix=".bin")
     try:
         import cv2
 
-        with open(tmp, "wb") as f:
+        with os.fdopen(fd, "wb") as f:
             f.write(content)
         cap = cv2.VideoCapture(tmp)
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
