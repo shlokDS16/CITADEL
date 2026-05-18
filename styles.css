@@ -3022,3 +3022,109 @@ body.dark .tv-timeline-row { background: #0f0f0f; }
   box-shadow: 2px 2px 0 #000; cursor: pointer; transition: all .12s;
 }
 .cz-kb-chip:hover { background: var(--gold); color: #000; transform: translate(-1px,-1px); }
+
+/* ====================================================================
+   === FAKE NEWS DETECTOR (Citizen M2) — neo-brutalist, theme-independent
+   ==================================================================== */
+.fn-strip {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  background: #111; color: #f0f0f0; border: 3px solid #000;
+  box-shadow: 6px 6px 0 var(--red); padding: 10px 16px; margin: 12px 0 18px;
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: .5px;
+}
+.fn-strip strong { color: #fff; font-weight: 700; }
+.fn-strip-k { color: #8a8a8a; }
+.fn-strip-sep { color: #444; padding: 0 2px; }
+.fn-dot { width: 9px; height: 9px; border: 2px solid #000; display: inline-block; }
+.fn-dot.on { background: var(--green); } .fn-dot.off { background: var(--red); }
+
+.fn-waterfall { display: flex; align-items: stretch; flex-wrap: wrap; margin: 12px 0; }
+.fn-wf-node {
+  flex: 1; min-width: 120px; border: 3px solid #000; padding: 12px;
+  background: #fff; color: #111; box-shadow: 6px 6px 0 #000;
+  margin-right: 14px; margin-bottom: 8px;
+}
+.fn-wf-node.off { background: #ECEAE3; color: #888; box-shadow: 6px 6px 0 #999; }
+.fn-wf-node.on  { background: #fff; box-shadow: 6px 6px 0 var(--red); }
+.fn-wf-k { font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+  background: #111; color: #fff; display: inline-block; padding: 2px 7px; }
+.fn-wf-t { font-family: var(--font-display); font-weight: 700; font-size: 14px;
+  margin-top: 8px; color: #111; }
+.fn-wf-node.off .fn-wf-t { color: #888; }
+.fn-wf-v { font-family: var(--font-mono); font-size: 13px; font-weight: 700;
+  margin-top: 4px; color: var(--red); }
+.fn-wf-node.off .fn-wf-v { color: #999; }
+.fn-wf-s { font-family: var(--font-mono); font-size: 10px; color: #777; margin-top: 4px; }
+.fn-wf-arrow { display: flex; align-items: center; color: #111;
+  font-size: 16px; margin: 0 14px 8px -6px; }
+
+.fn-verdict {
+  display: flex; align-items: center; gap: 16px; border: 3px solid #000;
+  background: #fff; color: #111; box-shadow: 6px 6px 0 var(--vc, #000);
+  padding: 16px 18px;
+}
+.fn-verdict-badge { width: 52px; height: 52px; display: flex;
+  align-items: center; justify-content: center; border: 3px solid #000;
+  font-size: 26px; font-weight: 700; }
+.fn-verdict-main { flex: 1; }
+.fn-verdict-label { font-family: var(--font-display); font-weight: 700;
+  font-size: 26px; color: #111; letter-spacing: .5px; }
+.fn-verdict-meta { font-family: var(--font-mono); font-size: 12px;
+  color: #444; margin-top: 4px; }
+.fn-chip { background: var(--gold); color: #000; border: 2px solid #000;
+  font-size: 10px; font-weight: 700; padding: 2px 8px; margin-left: 10px; }
+.fn-quota { background: #FBEFC8; color: #5a4500; border: 3px solid #000;
+  box-shadow: 6px 6px 0 var(--gold); padding: 12px 16px; margin-bottom: 16px;
+  font-family: var(--font-mono); font-size: 12px; font-weight: 600; }
+.fn-err { background: #FBE0E2; color: #8a1a22; border: 2px solid var(--red);
+  padding: 10px 14px; font-family: var(--font-mono); font-size: 12px; }
+
+.fn-loading { padding: 30px 16px; text-align: center; }
+.fn-scan { height: 6px; background: #ECEAE3; border: 2px solid #000;
+  overflow: hidden; position: relative; }
+.fn-scan::after { content: ''; position: absolute; top: 0; bottom: 0;
+  width: 30%; background: var(--red); animation: fnScan 1.1s linear infinite; }
+@keyframes fnScan { 0% { left: -30%; } 100% { left: 100%; } }
+.fn-load-txt { font-family: var(--font-mono); font-size: 12px;
+  color: #555; margin-top: 14px; }
+
+.fn-claim { border: 3px solid #000; background: #fff; color: #111;
+  box-shadow: 5px 5px 0 var(--cc, #000); padding: 12px 14px; margin-bottom: 12px; }
+.fn-claim-top { display: flex; align-items: center; gap: 10px; }
+.fn-claim-badge { font-family: var(--font-mono); font-size: 11px;
+  font-weight: 700; border: 2px solid #000; padding: 2px 9px; }
+.fn-claim-nli { font-family: var(--font-mono); font-size: 10px; color: #666;
+  border: 1px solid #999; padding: 1px 6px; }
+.fn-claim-conf { margin-left: auto; font-family: var(--font-mono);
+  font-weight: 700; font-size: 13px; color: #111; }
+.fn-claim-text { font-family: var(--font-mono); font-size: 13px;
+  color: #111; margin: 8px 0 6px; line-height: 1.5; }
+.fn-claim-notes { font-size: 12px; color: #555; font-style: italic; }
+.fn-ev { border-left: 4px solid #000; padding: 6px 10px; margin-top: 8px;
+  background: #F7F6F1; }
+.fn-ev-support { border-left-color: var(--green); }
+.fn-ev-contra  { border-left-color: var(--red); }
+.fn-ev-h { font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+  color: #333; margin-bottom: 4px; }
+.fn-ev-row { display: flex; align-items: baseline; gap: 8px; font-size: 11px;
+  color: #333; margin: 3px 0; }
+.fn-ev-pub { font-weight: 700; color: #111; white-space: nowrap; }
+.fn-ev-snip { color: #555; flex: 1; }
+.fn-ev-link { color: var(--red); font-weight: 700; text-decoration: none; }
+.fn-trace { font-family: var(--font-mono); font-size: 12px;
+  background: #111; color: #e8e8e8; border: 3px solid #000;
+  padding: 14px 14px 14px 30px; margin-top: 10px; line-height: 1.7; }
+.fn-trace li { margin: 4px 0; }
+.fn-tag { font-family: var(--font-mono); font-size: 11px; font-weight: 700;
+  border: 2px solid #000; padding: 2px 8px; display: inline-block; }
+.fn-meta-bar { display: flex; align-items: center; gap: 10px;
+  font-family: var(--font-mono); font-size: 12px; color: #333;
+  background: #F7F6F1; border: 2px solid #000; padding: 8px 12px; margin: 10px 0; }
+.fn-review { border: 3px solid #000; background: #fff; color: #111;
+  box-shadow: 5px 5px 0 #000; padding: 14px; margin: 12px 0; }
+.fn-review-top { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.fn-review-reason { font-family: var(--font-mono); font-size: 12px;
+  color: #555; flex: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .fn-scan::after { animation: none; width: 50%; }
+}

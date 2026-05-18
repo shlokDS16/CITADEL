@@ -309,3 +309,18 @@ Plan: `tasks/todo.md` (9 phases). Contract: `docs/module-specs/06-fake-news-dete
 
 **Bug found+fixed in verify:** `report_pdf` 500 — fpdf2 2.8.7 cursor trap mixing deprecated `cell(ln=1)` with `multi_cell(0,...)`; rewrote with `multi_cell(epw, …, new_x/new_y)` + `set_x(l_margin)`.
 **Verified (live HTTP):** bulk → 202 + async worker, 2/2 done, per-item verdict+analysis_id, CSV variant 202; `report.html` 200 (self-contained); `report.pdf` 200 valid `%PDF` + attachment header; **report→PIB logged + Telegram actually sent**; share → signed token → `/shared/{token}` resolves, bad token → 404; drift honest "insufficient reference data" (correct — needs history accrual).
+
+### Phase 8 — Frontend revamp (live-wired, brutalist) (2026-05-18)
+Driven by `ui-ux-pro-max` (Data-Dense Dashboard pattern; brutalist visual language kept per hard-rule). `pages.jsx` `FakeNewsDetector` + sub-components fully rewritten — **no mocks, every value from `/api/v1/fake-news/*`** via `apiFetch` (+ stable `x-user-id`).
+| Piece | What | Status |
+|------|------|--------|
+| `FakeNewsStatusStrip` | live `/health` + `/drift` (replaces fake "BERT 92.3%") | OK |
+| `FakeNewsWaterfall` | the signature 4-node L1→L4 pipeline viz from `layers` | OK |
+| `FakeNewsAnalyze` | TEXT/URL/IMAGE/VIDEO, live analyze + `/analyze/media`, verdict slab, claim cards w/ NLI supporting/contradicting evidence, credibility ring, manipulation, sentiment, red flags, related fact-checks, reasoning trace, report.html/pdf + share + report-to-PIB; reopen-from-history | OK |
+| `FakeNewsBulk` | live `/bulk` (202) + poll progress + per-item links; CSV upload | OK |
+| `FakeNewsHistory` | live `/history/stats` KPIs + paged/searchable `/history` table + reopen + soft-delete | OK |
+| `FakeNewsReview` | NEW HITL tab: `/review-queue` → decide → `/review/{id}/decide`; meta-classifier status + refit | OK |
+| `FakeNewsLearn` | live trusted sources from `/sources` allowlist + red-flag guide + 5-step | OK |
+| `styles.css` | `=== FAKE NEWS DETECTOR ===` brutalist section (theme-independent explicit colours; reduced-motion) | OK |
+
+**Verified in-browser (preview tools, :8080 → :8000):** app compiles clean in-browser Babel (`FakeNewsDetector` is a valid fn, **no JSX/runtime errors**); status strip shows real `torch 2.11.0 · transformers 5.3.0 · GROQ KEYED · FACT-CHECK GOOGLE · DRIFT BASELINE`; scam → **FAKE 93% / risk 95%**, 4-layer waterfall all "on" with live values (L1 0.40 / L2 100% / L3 2 claims / L4 reasoned), 5 red flags, **real RELATED FACT-CHECKS** (Newschecker/Factly with working links); HISTORY KPIs+table live (the run persisted); REVIEW queue + meta status live; LEARN trusted sources live from the credibility KB; BULK renders. Only console output = benign in-browser-Babel notice. Brutalist language fully preserved (screenshot).

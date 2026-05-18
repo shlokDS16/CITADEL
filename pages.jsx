@@ -6773,12 +6773,83 @@ const ChatbotHistory = ({ onResume }) => {
    CITIZEN MODULE 2 — FAKE NEWS DETECTOR
    Tabs: Analyze · Bulk · History · Learn
    ====================================================================== */
+// ======================================================================
+// CITIZEN MODULE 2 — FAKE NEWS DETECTOR  (live: /api/v1/fake-news/*)
+// 5-layer production waterfall. No mocks — every value comes from backend.
+// ======================================================================
+const FN_BASE = '/api/v1/fake-news';
+
+const fnUid = (() => {
+  try {
+    let u = localStorage.getItem('citadel_fn_uid');
+    if (!u) { u = 'cz-' + Math.random().toString(36).slice(2, 10); localStorage.setItem('citadel_fn_uid', u); }
+    return u;
+  } catch (e) { return 'cz-anon'; }
+})();
+const FN_HDR = { 'x-user-id': fnUid, 'x-user-role': 'citizen' };
+
+const fnApi = (path, opts = {}) =>
+  apiFetch(`${FN_BASE}${path}`, { ...opts, headers: { ...FN_HDR, ...(opts.headers || {}) } });
+
+const FN_VERDICT = {
+  FAKE:        { c: 'var(--red)',   fg: '#fff', icon: '✕', label: 'FAKE' },
+  LIKELY_FAKE: { c: 'var(--gold)',  fg: '#000', icon: '⚠', label: 'LIKELY FAKE' },
+  UNCERTAIN:   { c: 'var(--cyan)',  fg: '#000', icon: '?', label: 'UNCERTAIN' },
+  LIKELY_REAL: { c: 'var(--green)', fg: '#000', icon: '✓', label: 'LIKELY REAL' },
+  REAL:        { c: 'var(--green)', fg: '#000', icon: '✓', label: 'REAL' },
+  ERROR:       { c: '#888',         fg: '#fff', icon: '!', label: 'ERROR' },
+};
+const fnV = (v) => FN_VERDICT[v] || FN_VERDICT.UNCERTAIN;
+const fnPct = (x) => Math.round((Number(x) || 0) * 100);
+
+// Live model + concept-drift status strip (replaces the old fake "92.3%").
+const FakeNewsStatusStrip = () => {
+  const [h, setH] = React.useState(null);
+  const [d, setD] = React.useState(null);
+  React.useEffect(() => {
+    const pull = () => {
+      fnApi('/health').then(setH).catch(() => {});
+      apiFetch(`${FN_BASE}/drift`).then(r => setD(r.data)).catch(() => {});
+    };
+    pull();
+    const t = setInterval(pull, 20000);
+    return () => clearInterval(t);
+  }, []);
+  const ml = (h && h.ml) || {};
+  const up = h && h.status === 'ok';
+  const drift = d && d.latest;
+  return (
+    <div className="fn-strip">
+      <span className={`fn-dot ${up ? 'on' : 'off'}`}></span>
+      <span className="fn-strip-k">ENGINE</span>
+      <strong>{up ? 'OPERATIONAL' : 'CONNECTING…'}</strong>
+      <span className="fn-strip-sep">/</span>
+      <span className="fn-strip-k">STACK</span>
+      <strong>torch {ml.torch || '—'} · transformers {ml.transformers || '—'}</strong>
+      <span className="fn-strip-sep">/</span>
+      <span className="fn-strip-k">GROQ</span>
+      <strong style={{ color: h && h.groq_configured ? 'var(--green)' : 'var(--red)' }}>
+        {h && h.groq_configured ? 'KEYED' : 'OFF'}</strong>
+      <span className="fn-strip-sep">/</span>
+      <span className="fn-strip-k">FACT-CHECK API</span>
+      <strong style={{ color: h && h.google_factcheck_configured ? 'var(--green)' : 'var(--gold)' }}>
+        {h && h.google_factcheck_configured ? 'GOOGLE' : 'KEYLESS'}</strong>
+      <span className="fn-strip-sep">/</span>
+      <span className="fn-strip-k">DRIFT</span>
+      <strong style={{ color: drift && drift.drifted ? 'var(--red)' : 'var(--green)' }}>
+        {drift ? (drift.drifted ? 'SHIFT DETECTED' : 'STABLE') : 'BASELINE'}</strong>
+    </div>
+  );
+};
+
 const FakeNewsDetector = ({ onBack }) => {
   const [tab, setTab] = React.useState('analyze');
+  const [reopen, setReopen] = React.useState(null);
   const tabs = [
     { key: 'analyze', label: 'ANALYZE' },
     { key: 'bulk',    label: 'BULK CHECK' },
     { key: 'history', label: 'HISTORY' },
+    { key: 'review',  label: 'REVIEW' },
     { key: 'learn',   label: 'LEARN' },
   ];
   return (
@@ -6786,158 +6857,340 @@ const FakeNewsDetector = ({ onBack }) => {
       <SubPageHeader
         title="FAKE NEWS DETECTOR"
         gatewayId="GATEWAY_02"
-        subtitle="BERT + TF-IDF · CLAIM EXTRACTION · SOURCE CREDIBILITY · BIAS ANALYSIS"
+        subtitle="5-LAYER WATERFALL · HEURISTICS → TRANSFORMERS → RAG/NLI → LLM · DEEPFAKE · CIB"
         accentColor="var(--red)"
         onBack={onBack}
       />
+      <FakeNewsStatusStrip />
       <Tabs tabs={tabs} active={tab} onChange={setTab} accent="var(--red)" />
-      {tab === 'analyze' && <FakeNewsAnalyze />}
+      {tab === 'analyze' && <FakeNewsAnalyze reopen={reopen} clearReopen={() => setReopen(null)} />}
       {tab === 'bulk'    && <FakeNewsBulk />}
-      {tab === 'history' && <FakeNewsHistory />}
+      {tab === 'history' && <FakeNewsHistory onReopen={(a) => { setReopen(a); setTab('analyze'); }} />}
+      {tab === 'review'  && <FakeNewsReview />}
       {tab === 'learn'   && <FakeNewsLearn />}
     </div>
   );
 };
 
-const FakeNewsAnalyze = () => {
+// The signature centerpiece: the 4-layer waterfall, rendered brutalist.
+const FakeNewsWaterfall = ({ layers, verdict }) => {
+  const L = layers || {};
+  const heur = L.heuristics || {};
+  const cls = L.classifier || {};
+  const fcl = L.fact_check || {};
+  const llm = L.llm || {};
+  const nodes = [
+    { k: 'L1', t: 'HEURISTICS', on: heur.l1_risk != null,
+      v: heur.l1_risk != null ? `risk ${heur.l1_risk}` : '—',
+      sub: 'regex · domain · simhash' },
+    { k: 'L2', t: 'CLASSIFIERS', on: cls.available,
+      v: cls.available ? `fab ${fnPct(cls.score)}%` : 'excluded',
+      sub: 'transformer + VADER' },
+    { k: 'L3', t: 'RAG · NLI', on: (fcl.n_claims || 0) > 0,
+      v: `${fcl.n_claims || 0} claim(s)`,
+      sub: fcl.google_fc ? 'Google FC + NLI' : 'keyless + NLI' },
+    { k: 'L4', t: 'LLM RATIONALE', on: llm.invoked && llm.available,
+      v: llm.invoked ? (llm.quota_exhausted ? 'quota ⏳' : (llm.available ? 'reasoned' : 'n/a'))
+        : 'skipped',
+      sub: 'Groq llama-3.3' },
+  ];
+  return (
+    <div className="fn-waterfall" role="img" aria-label="Detection waterfall">
+      {nodes.map((n, i) => (
+        <React.Fragment key={n.k}>
+          <div className={`fn-wf-node ${n.on ? 'on' : 'off'}`}>
+            <div className="fn-wf-k">{n.k}</div>
+            <div className="fn-wf-t">{n.t}</div>
+            <div className="fn-wf-v">{n.v}</div>
+            <div className="fn-wf-s">{n.sub}</div>
+          </div>
+          {i < nodes.length - 1 && <div className="fn-wf-arrow">▶</div>}
+        </React.Fragment>
+      ))}
+    </div>
+  );
+};
+
+const FakeNewsEvidence = ({ items, kind }) => {
+  if (!items || !items.length) return null;
+  return (
+    <div className={`fn-ev fn-ev-${kind}`}>
+      <div className="fn-ev-h">{kind === 'support' ? '↑ SUPPORTING' : '↓ CONTRADICTING'} ({items.length})</div>
+      {items.slice(0, 4).map((s, i) => (
+        <div key={i} className="fn-ev-row">
+          <span className="fn-ev-pub">{s.publisher || 'source'}</span>
+          <span className="fn-ev-snip">{(s.snippet || s.title || '').slice(0, 140)}</span>
+          {s.url && <a className="fn-ev-link" href={s.url} target="_blank" rel="noreferrer" title="Open source">↗</a>}
+        </div>
+      ))}
+    </div>
+  );
+};
+
+const FakeNewsAnalyze = ({ reopen, clearReopen }) => {
   const [mode, setMode] = React.useState('TEXT');
   const [text, setText] = React.useState('');
-  const [analyzing, setAnalyzing] = React.useState(false);
+  const [file, setFile] = React.useState(null);
+  const [opts, setOpts] = React.useState({
+    source_credibility: true, claim_by_claim: true, bias_detection: true,
+    deepfake_detection: true, cross_reference: true,
+  });
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState(null);
   const [result, setResult] = React.useState(null);
+  const [openTrace, setOpenTrace] = React.useState(false);
+  const [toast, toastHost] = useToast();
+  const fileRef = React.useRef(null);
 
-  const verify = () => {
-    if (!text.trim()) return;
-    setAnalyzing(true);
-    setTimeout(() => {
-      setAnalyzing(false);
-      setResult({
-        verdict: 'LIKELY FAKE',
-        confidence: 87,
-        claims: [
-          { text: 'Government announces free smartphones for all citizens', verdict: 'FALSE',       conf: 96, notes: 'No official source found; schema matches known hoax pattern' },
-          { text: 'Distribution starts next week',                          verdict: 'UNVERIFIED', conf: 62, notes: 'Specific date with no confirming source' },
-          { text: 'Register via link in message',                           verdict: 'SUSPICIOUS', conf: 94, notes: 'Phishing indicator — non-gov domain' },
-        ],
-        sourceCred: { score: 18, publisher: 'unverified-news.info', age: 'Domain registered 14 days ago', trustRating: 'LOW' },
-        bias: { left: 12, center: 22, right: 66 },
-        sentiment: { positive: 12, negative: 68, neutral: 20 },
-        redFlags: [
-          'Extreme emotional language detected',
-          'No credible source cited',
-          'Specific amounts without verification',
-          'Calls to immediate action',
-          'Similar to known misinformation template #4471',
-        ],
-        manipulation: { clickbait: 82, urgency: 78, authorityClaim: 45, emotional: 88 },
-        relatedArticles: [
-          { title: 'Fact-check: No free phone scheme from government', src: 'PIB Fact Check', date: '2026-03-18' },
-          { title: 'Similar scam circulated in 2024',                  src: 'TruthSpy India',  date: '2024-11-02' },
-        ]
-      });
-    }, 2000);
+  React.useEffect(() => {
+    if (reopen) { setResult(reopen); setErr(null); clearReopen && clearReopen(); }
+  }, [reopen]);
+
+  const isMedia = mode === 'IMAGE' || mode === 'VIDEO';
+  const setOpt = (k) => setOpts(o => ({ ...o, [k]: !o[k] }));
+
+  const verify = async () => {
+    if (busy) return;
+    if (isMedia && !file) { setErr('Choose an image or video file to analyze.'); return; }
+    if (!isMedia && !text.trim()) { setErr('Paste article text or a URL first.'); return; }
+    setBusy(true); setErr(null); setResult(null);
+    try {
+      let data;
+      if (isMedia) {
+        const fd = new FormData();
+        fd.append('file', file);
+        fd.append('query', mode === 'TEXT' ? '' : (text || ''));
+        data = await fnApi('/analyze/media', { form: fd });
+      } else {
+        data = await fnApi('/analyze', {
+          json: {
+            mode, text: mode === 'TEXT' ? text : null,
+            url: mode === 'URL' ? text.trim() : null, options: opts,
+          },
+        });
+      }
+      setResult(data);
+    } catch (e) {
+      setErr(e.message || 'Analysis failed. Is the backend running?');
+    } finally { setBusy(false); }
   };
+
+  const doShare = async () => {
+    try {
+      const r = await fnApi(`/analyses/${result.id}/share`, { json: {} });
+      const link = `${API_BASE}${r.data.url}`;
+      try { await navigator.clipboard.writeText(link); } catch (e) {}
+      toast('Share link copied (valid 7 days)', 'success');
+    } catch (e) { toast('Could not create share link', 'error'); }
+  };
+  const doReport = async () => {
+    try {
+      await fnApi(`/analyses/${result.id}/report`, { json: {} });
+      toast('Referred to PIB Fact Check', 'success');
+    } catch (e) { toast('Report failed', 'error'); }
+  };
+  const openReport = (ext) =>
+    window.open(`${API_BASE}${FN_BASE}/analyses/${result.id}/report.${ext}`, '_blank');
+
+  const v = result ? fnV(result.verdict) : null;
+  const sc = result && result.source_credibility;
+  const mn = result && result.manipulation;
+  const se = result && result.sentiment;
 
   return (
     <div className="tab-pane">
+      {toastHost}
       <div className="grid-3-col">
         <div className="col-panel left-panel">
           <div className="panel-header" style={{ background: 'var(--red)', color: '#fff' }}>CONTENT INPUT</div>
           <div className="panel-body">
-            <SegmentedControl options={['TEXT', 'URL', 'IMAGE', 'VIDEO']} value={mode} onChange={setMode} accent="var(--red)" />
-            <textarea className="brutal-textarea mt-14" rows={8} placeholder={mode === 'TEXT' ? 'Paste article text or news content...' : mode === 'URL' ? 'https://example.com/article' : 'Upload or paste media URL'} value={text} onChange={e => setText(e.target.value)}></textarea>
+            <SegmentedControl options={['TEXT', 'URL', 'IMAGE', 'VIDEO']} value={mode}
+              onChange={(m) => { setMode(m); setErr(null); }} accent="var(--red)" />
+            {isMedia ? (
+              <div className="fn-file mt-14">
+                <input ref={fileRef} type="file"
+                  accept={mode === 'IMAGE' ? 'image/*' : 'video/*'}
+                  onChange={e => setFile(e.target.files[0] || null)}
+                  style={{ display: 'none' }} />
+                <button className="btn-brutal" style={{ width: '100%', padding: '14px' }}
+                  onClick={() => fileRef.current && fileRef.current.click()}>
+                  {file ? `📎 ${file.name}` : `CHOOSE ${mode} FILE`}
+                </button>
+                <textarea className="brutal-textarea mt-14" rows={3}
+                  placeholder="Optional caption / accompanying claim (analyzed too)…"
+                  value={text} onChange={e => setText(e.target.value)} />
+              </div>
+            ) : (
+              <textarea className="brutal-textarea mt-14" rows={9}
+                placeholder={mode === 'URL' ? 'https://example.com/article' : 'Paste article text or a forwarded message…'}
+                value={text} onChange={e => setText(e.target.value)} />
+            )}
             <div className="checkbox-row">
-              <label><input type="checkbox" defaultChecked /> Source credibility check</label>
-              <label><input type="checkbox" defaultChecked /> Claim-by-claim analysis</label>
-              <label><input type="checkbox" defaultChecked /> Bias detection</label>
-              <label><input type="checkbox" /> Deepfake detection {mode === 'IMAGE' || mode === 'VIDEO' ? '' : '(requires media)'}</label>
-              <label><input type="checkbox" defaultChecked /> Cross-reference fact checkers</label>
+              <label><input type="checkbox" checked={opts.source_credibility} onChange={() => setOpt('source_credibility')} /> Source credibility</label>
+              <label><input type="checkbox" checked={opts.claim_by_claim} onChange={() => setOpt('claim_by_claim')} /> Claim-by-claim (RAG/NLI)</label>
+              <label><input type="checkbox" checked={opts.cross_reference} onChange={() => setOpt('cross_reference')} /> Cross-reference fact-checkers</label>
+              <label><input type="checkbox" checked={opts.deepfake_detection} onChange={() => setOpt('deepfake_detection')} /> Deepfake forensics {isMedia ? '' : '(media only)'}</label>
             </div>
-            <button className="btn-brutal action-btn red mt-20" onClick={verify} disabled={analyzing}>
-              {analyzing ? 'VERIFYING...' : 'VERIFY AUTHENTICITY'}
+            <button className="btn-brutal action-btn red mt-20" onClick={verify} disabled={busy}>
+              {busy ? 'RUNNING WATERFALL…' : 'VERIFY AUTHENTICITY'}
             </button>
-            <div className="model-info-bar mt-20">
-              <span>NLP: <strong>BERT-base</strong></span>
-              <span>Accuracy: <strong style={{ color: 'var(--green)' }}>92.3%</strong></span>
-              <span>Last trained: <strong>2026-04-18</strong></span>
-            </div>
+            {err && <div className="fn-err mt-14">⚠ {err}</div>}
           </div>
         </div>
+
         <div className="col-panel" style={{ gridColumn: 'span 2' }}>
           <div className="panel-header" style={{ background: '#111', color: '#fff' }}>ANALYSIS RESULT</div>
           <div className="panel-body">
-            {!result ? (
-              <EmptyState icon="📰" title="NO ANALYSIS YET" description="Paste an article, URL, or upload media to run full credibility analysis with claim extraction, source scoring, and bias detection." />
+            {busy ? (
+              <div className="fn-loading">
+                <div className="fn-scan"></div>
+                <div className="fn-load-txt">Running 5-layer waterfall — heuristics → classifiers → RAG/NLI fact-check → LLM rationale…</div>
+              </div>
+            ) : !result ? (
+              <EmptyState icon="📰" title="NO ANALYSIS YET"
+                description="Submit text, a URL, an image or a video. The waterfall runs heuristics, transformer classifiers, RAG fact-check with NLI, and (for high-risk) an LLM rationale — every value is computed live." />
             ) : (
               <>
-                <div className={`verdict-big ${result.verdict.includes('FAKE') ? 'fake' : 'real'}`}>
-                  <div className="verdict-icon">{result.verdict.includes('FAKE') ? '⚠' : '✓'}</div>
-                  <div>
-                    <div className="verdict-label">{result.verdict}</div>
-                    <div className="verdict-conf">Confidence: {result.confidence}%</div>
-                  </div>
-                  <button className="btn-brutal" style={{ marginLeft: 'auto', fontSize: 11, padding: '6px 14px' }}>⚠ REPORT</button>
-                </div>
-                <div className="section-divider mt-14"><span>CLAIM-BY-CLAIM</span><span className="small-meta">{result.claims.length} claims</span></div>
-                <div className="claim-list">
-                  {result.claims.map((c, i) => (
-                    <div key={i} className={`claim-card ${c.verdict.toLowerCase()}`}>
-                      <div className="claim-top">
-                        <span className={`claim-verdict-badge ${c.verdict.toLowerCase()}`}>{c.verdict}</span>
-                        <span className="claim-conf">{c.conf}%</span>
-                      </div>
-                      <div className="claim-text">"{c.text}"</div>
-                      <div className="claim-notes">{c.notes}</div>
+                {result.quota_exhausted && (
+                  <div className="fn-quota">⏳ LLM rationale paused — provider daily quota reached. The verdict below still stands: Layers 1–3 are local and were not affected.</div>
+                )}
+                <div className="fn-verdict" style={{ '--vc': v.c }}>
+                  <div className="fn-verdict-badge" style={{ background: v.c, color: v.fg }}>{v.icon}</div>
+                  <div className="fn-verdict-main">
+                    <div className="fn-verdict-label">{v.label}</div>
+                    <div className="fn-verdict-meta">
+                      Confidence {fnPct(result.confidence)}% · Risk {fnPct(result.risk_score)}%
+                      {result.needs_review && <span className="fn-chip">NEEDS HUMAN REVIEW</span>}
                     </div>
-                  ))}
+                  </div>
+                  <ProgressRing value={fnPct(result.confidence)} size={68} color={v.c} />
                 </div>
+
+                <div className="section-divider mt-14"><span>DETECTION WATERFALL</span></div>
+                <FakeNewsWaterfall layers={result.layers} verdict={result.verdict} />
+
+                {(result.claims || []).length > 0 && (
+                  <>
+                    <div className="section-divider mt-20"><span>CLAIM-BY-CLAIM</span>
+                      <span className="small-meta">{result.claims.length} claim(s)</span></div>
+                    <div className="claim-list">
+                      {result.claims.map((c, i) => {
+                        const cv = fnV(c.verdict === 'TRUE' ? 'REAL' : c.verdict === 'FALSE' ? 'FAKE'
+                          : c.verdict === 'MISLEADING' ? 'LIKELY_FAKE' : 'UNCERTAIN');
+                        return (
+                          <div key={i} className="fn-claim" style={{ '--cc': cv.c }}>
+                            <div className="fn-claim-top">
+                              <span className="fn-claim-badge" style={{ background: cv.c, color: cv.fg }}>{c.verdict}</span>
+                              {c.nli_label && <span className="fn-claim-nli">NLI: {c.nli_label}</span>}
+                              <span className="fn-claim-conf">{fnPct(c.confidence)}%</span>
+                            </div>
+                            <div className="fn-claim-text">“{c.text}”</div>
+                            {c.notes && <div className="fn-claim-notes">{c.notes}</div>}
+                            <FakeNewsEvidence items={c.supporting_evidence} kind="support" />
+                            <FakeNewsEvidence items={c.contradicting_evidence} kind="contra" />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
+
                 <div className="widgets-grid mt-20">
-                  <div className="analysis-widget">
-                    <div className="widget-title">SOURCE CREDIBILITY</div>
-                    <div style={{ textAlign: 'center' }}><ProgressRing value={result.sourceCred.score} color="var(--red)" /></div>
-                    <div className="source-details">
-                      <div><span>Publisher</span><strong>{result.sourceCred.publisher}</strong></div>
-                      <div><span>Domain</span><strong>{result.sourceCred.age}</strong></div>
-                      <div><span>Trust Rating</span><Badge variant="red">{result.sourceCred.trustRating}</Badge></div>
-                    </div>
-                  </div>
-                  <div className="analysis-widget">
-                    <div className="widget-title">BIAS PROFILE</div>
-                    <div className="bias-bar">
-                      <div className="bias-seg" style={{ width: `${result.bias.left}%`,   background: '#3B82F6' }}>L</div>
-                      <div className="bias-seg" style={{ width: `${result.bias.center}%`, background: '#888' }}>C</div>
-                      <div className="bias-seg" style={{ width: `${result.bias.right}%`,  background: '#EF4444' }}>R</div>
-                    </div>
-                    <div className="bias-labels"><span>LEFT</span><span>CENTER</span><span>RIGHT</span></div>
-                    <div className="widget-title mt-14">MANIPULATION</div>
-                    {Object.entries(result.manipulation).map(([k, v]) => (
-                      <div key={k} className="manipulation-row">
-                        <span>{k.toUpperCase()}</span>
-                        <div className="progress-bar"><div className="progress-fill" style={{ width: `${v}%`, background: v > 70 ? 'var(--red)' : v > 40 ? 'var(--gold)' : 'var(--green)' }}></div></div>
-                        <span className="progress-val">{v}</span>
+                  {sc && (
+                    <div className="analysis-widget">
+                      <div className="widget-title">SOURCE CREDIBILITY</div>
+                      <div style={{ textAlign: 'center' }}>
+                        <ProgressRing value={sc.score}
+                          color={sc.score >= 70 ? 'var(--green)' : sc.score >= 40 ? 'var(--gold)' : 'var(--red)'} />
                       </div>
-                    ))}
-                  </div>
-                </div>
-                <div className="section-divider mt-20"><span>RED FLAGS</span></div>
-                <div className="flags-list">
-                  {result.redFlags.map((f, i) => <div key={i} className="flag-item">⚠ {f}</div>)}
-                </div>
-                <div className="section-divider mt-20"><span>RELATED FACT-CHECKS</span></div>
-                <div className="related-list">
-                  {result.relatedArticles.map((a, i) => (
-                    <div key={i} className="related-item">
-                      <div>
-                        <div className="related-title">{a.title}</div>
-                        <div className="related-src">{a.src} · {a.date}</div>
+                      <div className="source-details">
+                        <div><span>Publisher</span><strong>{sc.publisher}</strong></div>
+                        <div><span>Domain age</span><strong>{sc.age_label || '—'}</strong></div>
+                        <div><span>Trust</span>
+                          <Badge variant={sc.trust_rating === 'HIGH' ? 'green' : sc.trust_rating === 'LOW' ? 'red' : 'gold'}>
+                            {sc.trust_rating}{sc.in_allowlist ? ' · ALLOWLIST' : sc.in_blocklist ? ' · BLOCKLIST' : ''}
+                          </Badge>
+                        </div>
                       </div>
-                      <button className="btn-brutal" style={{ fontSize: 11, padding: '6px 12px' }}>READ</button>
                     </div>
-                  ))}
+                  )}
+                  {mn && (
+                    <div className="analysis-widget">
+                      <div className="widget-title">MANIPULATION</div>
+                      {[['clickbait', mn.clickbait], ['urgency', mn.urgency],
+                        ['authority_claim', mn.authority_claim], ['emotional', mn.emotional]].map(([k, val]) => (
+                        <div key={k} className="manipulation-row">
+                          <span>{k.replace('_', ' ').toUpperCase()}</span>
+                          <div className="progress-bar"><div className="progress-fill"
+                            style={{ width: `${val}%`, background: val > 70 ? 'var(--red)' : val > 40 ? 'var(--gold)' : 'var(--green)' }}></div></div>
+                          <span className="progress-val">{val}</span>
+                        </div>
+                      ))}
+                      {se && (
+                        <>
+                          <div className="widget-title mt-14">SENTIMENT</div>
+                          <div className="bias-bar">
+                            <div className="bias-seg" style={{ width: `${se.positive}%`, background: 'var(--green)' }}>+</div>
+                            <div className="bias-seg" style={{ width: `${se.neutral}%`, background: '#888' }}>=</div>
+                            <div className="bias-seg" style={{ width: `${se.negative}%`, background: 'var(--red)' }}>−</div>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
                 </div>
+
+                {(result.red_flags || []).length > 0 && (
+                  <>
+                    <div className="section-divider mt-20"><span>RED FLAGS</span></div>
+                    <div className="flags-list">
+                      {result.red_flags.map((f, i) => <div key={i} className="flag-item">⚠ {f}</div>)}
+                    </div>
+                  </>
+                )}
+
+                {(result.related_fact_checks || []).length > 0 && (
+                  <>
+                    <div className="section-divider mt-20"><span>RELATED FACT-CHECKS</span></div>
+                    <div className="related-list">
+                      {result.related_fact_checks.map((a, i) => (
+                        <div key={i} className="related-item">
+                          <div>
+                            <div className="related-title">{a.title}</div>
+                            <div className="related-src">{a.publisher}{a.published_at ? ' · ' + a.published_at : ''}</div>
+                          </div>
+                          {a.url && <a className="btn-brutal" style={{ fontSize: 11, padding: '6px 12px', textDecoration: 'none' }}
+                            href={a.url} target="_blank" rel="noreferrer">READ ↗</a>}
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+
+                {(result.reasoning || []).length > 0 && (
+                  <>
+                    <div className="section-divider mt-20" style={{ cursor: 'pointer' }}
+                      onClick={() => setOpenTrace(o => !o)}>
+                      <span>REASONING TRACE</span>
+                      <span className="small-meta">{openTrace ? '▼ hide' : '▶ show'} · {result.reasoning.length} steps</span>
+                    </div>
+                    {openTrace && (
+                      <ol className="fn-trace">
+                        {result.reasoning.map((s, i) => <li key={i}>{s}</li>)}
+                      </ol>
+                    )}
+                  </>
+                )}
+
                 <div className="action-row mt-20">
-                  <button className="btn-brutal" style={{ fontSize: 11, padding: '8px 14px' }}>⬇ EXPORT REPORT</button>
-                  <button className="btn-brutal" style={{ fontSize: 11, padding: '8px 14px' }}>🔗 SHARE</button>
-                  <button className="btn-brutal action-btn" style={{ fontSize: 11, padding: '8px 14px', width: 'auto', background: 'var(--red)', color: '#fff' }}>⚠ REPORT TO PIB</button>
+                  <button className="btn-brutal" style={{ fontSize: 11, padding: '8px 14px' }}
+                    onClick={() => openReport('html')} title="Open HTML report">⬇ REPORT (HTML)</button>
+                  <button className="btn-brutal" style={{ fontSize: 11, padding: '8px 14px' }}
+                    onClick={() => openReport('pdf')} title="Download PDF report">⬇ PDF</button>
+                  <button className="btn-brutal" style={{ fontSize: 11, padding: '8px 14px' }}
+                    onClick={doShare} title="Create a signed 7-day link">🔗 SHARE</button>
+                  <button className="btn-brutal action-btn" style={{ fontSize: 11, padding: '8px 14px', width: 'auto', background: 'var(--red)', color: '#fff' }}
+                    onClick={doReport} title="Refer to PIB Fact Check">⚠ REPORT TO PIB</button>
                 </div>
               </>
             )}
@@ -6949,39 +7202,89 @@ const FakeNewsAnalyze = () => {
 };
 
 const FakeNewsBulk = () => {
-  const [urls, setUrls] = React.useState('https://unverified.info/free-phones\nhttps://trusted.gov.in/pib-statement\nhttps://questionable.blog/vaccine-hoax');
-  const [results, setResults] = React.useState(null);
-  const run = () => {
-    const list = urls.split('\n').filter(u => u.trim());
-    setResults(list.map((u, i) => ({
-      url: u,
-      verdict: i % 3 === 0 ? 'FAKE' : i % 3 === 1 ? 'REAL' : 'UNCERTAIN',
-      conf: 60 + Math.floor(Math.random() * 38),
-    })));
+  const [urls, setUrls] = React.useState('');
+  const [batch, setBatch] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState(null);
+  const fileRef = React.useRef(null);
+  const pollRef = React.useRef(null);
+
+  const poll = (id) => {
+    pollRef.current = setInterval(async () => {
+      try {
+        const r = await fnApi(`/bulk/${id}`);
+        setBatch(r.data);
+        if (r.data.status === 'done') { clearInterval(pollRef.current); setBusy(false); }
+      } catch (e) { clearInterval(pollRef.current); setBusy(false); }
+    }, 2500);
   };
+  React.useEffect(() => () => pollRef.current && clearInterval(pollRef.current), []);
+
+  const run = async () => {
+    const list = urls.split('\n').map(s => s.trim()).filter(Boolean).slice(0, 50);
+    if (!list.length) { setErr('Add at least one URL or text line.'); return; }
+    setBusy(true); setErr(null); setBatch(null);
+    try {
+      const r = await fnApi('/bulk', { json: { urls: list } });
+      setBatch({ id: r.data.id, total: r.data.total, completed: 0, status: 'running', items: [] });
+      poll(r.data.id);
+    } catch (e) { setErr(e.message || 'Bulk submit failed'); setBusy(false); }
+  };
+  const uploadCsv = async (f) => {
+    if (!f) return;
+    setBusy(true); setErr(null); setBatch(null);
+    try {
+      const fd = new FormData(); fd.append('file', f);
+      const r = await fnApi('/bulk/upload-csv', { form: fd });
+      setBatch({ id: r.data.id, total: r.data.total, completed: 0, status: 'running', items: [] });
+      poll(r.data.id);
+    } catch (e) { setErr(e.message || 'CSV upload failed'); setBusy(false); }
+  };
+  const pct = batch && batch.total ? Math.round(100 * batch.completed / batch.total) : 0;
+
   return (
     <div className="tab-pane">
       <div className="widgets-grid">
         <div className="widget-card">
-          <div className="widget-title">BATCH URL LIST</div>
-          <textarea className="brutal-textarea" rows={10} value={urls} onChange={e => setUrls(e.target.value)} placeholder="One URL per line..."></textarea>
+          <div className="widget-title">BATCH LIST · UP TO 50 URLs / MESSAGES</div>
+          <textarea className="brutal-textarea" rows={11} value={urls}
+            onChange={e => setUrls(e.target.value)}
+            placeholder={'https://example.com/article-1\nForwarded WhatsApp message text…\nhttps://example.com/article-2'} />
+          <input ref={fileRef} type="file" accept=".csv,.txt" style={{ display: 'none' }}
+            onChange={e => uploadCsv(e.target.files[0])} />
           <div className="action-row mt-14">
-            <button className="btn-brutal" style={{ fontSize: 11, padding: '8px 14px' }}>⬆ UPLOAD CSV</button>
-            <button className="btn-brutal action-btn red" style={{ fontSize: 12, padding: '8px 18px', width: 'auto' }} onClick={run}>RUN BATCH ANALYSIS</button>
+            <button className="btn-brutal" style={{ fontSize: 11, padding: '8px 14px' }}
+              onClick={() => fileRef.current && fileRef.current.click()} disabled={busy}>⬆ UPLOAD CSV</button>
+            <button className="btn-brutal action-btn red" style={{ fontSize: 12, padding: '8px 18px', width: 'auto' }}
+              onClick={run} disabled={busy}>{busy ? 'PROCESSING…' : 'RUN BATCH ANALYSIS'}</button>
           </div>
+          {err && <div className="fn-err mt-14">⚠ {err}</div>}
         </div>
         <div className="widget-card">
-          <div className="widget-title">RESULTS</div>
-          {!results ? <EmptyState icon="📊" description="Batch analysis results will appear here" /> : (
-            <div className="bulk-results">
-              {results.map((r, i) => (
-                <div key={i} className="bulk-row">
-                  <span className="bulk-url">{r.url}</span>
-                  <Badge variant={r.verdict === 'FAKE' ? 'red' : r.verdict === 'REAL' ? 'green' : 'gold'}>{r.verdict}</Badge>
-                  <span className="bulk-conf">{r.conf}%</span>
-                </div>
-              ))}
-            </div>
+          <div className="widget-title">RESULTS{batch ? ` · ${batch.completed}/${batch.total}` : ''}</div>
+          {!batch ? <EmptyState icon="📊" description="Submit a batch — each item runs the full waterfall asynchronously." /> : (
+            <>
+              <div className="progress-bar" style={{ marginBottom: 12 }}>
+                <div className="progress-fill" style={{ width: `${pct}%`, background: 'var(--red)' }}></div>
+              </div>
+              <div className="bulk-results">
+                {(batch.items || []).map((r, i) => {
+                  const bv = fnV(r.verdict);
+                  return (
+                    <div key={i} className="bulk-row">
+                      <span className="bulk-url" title={r.url}>{r.url}</span>
+                      <Badge variant={r.verdict === 'FAKE' ? 'red' : r.verdict === 'REAL' ? 'green'
+                        : r.verdict === 'ERROR' ? 'default' : 'gold'}>{bv.label}</Badge>
+                      <span className="bulk-conf">{r.analysis_id
+                        ? <a href={`${API_BASE}${FN_BASE}/analyses/${r.analysis_id}/report.html`}
+                            target="_blank" rel="noreferrer" title="Open report">{fnPct(r.confidence)}% ↗</a>
+                        : `${fnPct(r.confidence)}%`}</span>
+                    </div>
+                  );
+                })}
+                {batch.status !== 'done' && <div className="fn-load-txt" style={{ padding: 10 }}>Analyzing…</div>}
+              </div>
+            </>
           )}
         </div>
       </div>
@@ -6989,39 +7292,181 @@ const FakeNewsBulk = () => {
   );
 };
 
-const FakeNewsHistory = () => {
-  const history = [
-    { id: 1, title: 'Free phone giveaway claim',     verdict: 'FAKE',      conf: 96, date: '2 hours ago' },
-    { id: 2, title: 'PIB official scheme notice',    verdict: 'REAL',      conf: 98, date: 'Yesterday' },
-    { id: 3, title: 'Petrol price drop rumor',       verdict: 'UNCERTAIN', conf: 58, date: '3 days ago' },
-    { id: 4, title: 'Vaccine side-effect article',   verdict: 'FAKE',      conf: 89, date: '1 week ago' },
-    { id: 5, title: 'Budget announcement summary',   verdict: 'REAL',      conf: 95, date: '2 weeks ago' },
-  ];
+const FN_ROW = (r) => ({
+  id: r.id, verdict: r.verdict, confidence: r.confidence, risk_score: r.risk_score,
+  needs_review: r.needs_review, quota_exhausted: false, layers: r.layers || {},
+  red_flags: r.red_flags || [], reasoning: r.reasoning || [],
+  source_credibility: r.source_credibility, manipulation: r.manipulation,
+  sentiment: r.sentiment, related_fact_checks: [],
+  claims: (r.claims || []).map(c => ({
+    text: c.claim_text, verdict: c.verdict, confidence: c.confidence,
+    notes: c.notes, nli_label: c.nli_label,
+    supporting_evidence: c.supporting_evidence || [],
+    contradicting_evidence: c.contradicting_evidence || [],
+  })),
+});
+
+const FakeNewsHistory = ({ onReopen }) => {
+  const [stats, setStats] = React.useState(null);
+  const [rows, setRows] = React.useState([]);
+  const [page, setPage] = React.useState(1);
+  const [total, setTotal] = React.useState(0);
+  const [q, setQ] = React.useState('');
+  const [loading, setLoading] = React.useState(true);
+  const PS = 12;
+
+  const load = React.useCallback(() => {
+    setLoading(true);
+    fnApi('/history/stats').then(r => setStats(r.data)).catch(() => {});
+    fnApi('/history', { params: { page, page_size: PS, q: q || undefined } })
+      .then(r => { setRows(r.data || []); setTotal((r.meta && r.meta.total) || 0); })
+      .catch(() => setRows([]))
+      .finally(() => setLoading(false));
+  }, [page, q]);
+  React.useEffect(() => { load(); }, [load]);
+
+  const reopen = async (row) => {
+    try {
+      const r = await fnApi(`/analyses/${row.id}`);
+      onReopen(FN_ROW(r.data));
+    } catch (e) {}
+  };
+  const del = async (row, e) => {
+    e.stopPropagation();
+    try { await fnApi(`/history/${row.id}`, { method: 'DELETE' }); load(); } catch (er) {}
+  };
+
   return (
     <div className="tab-pane">
       <div className="kpi-grid-4">
-        <KPICard label="CHECKS RUN"        value="47" color="var(--gold)" />
-        <KPICard label="FAKE DETECTED"     value="18" color="var(--red)" />
-        <KPICard label="VERIFIED REAL"     value="21" color="var(--green)" />
-        <KPICard label="REPORTED TO PIB"   value="9"  color="var(--cyan)" />
+        <KPICard label="CHECKS RUN"      value={stats ? stats.checks_run : '—'}     color="var(--gold)" />
+        <KPICard label="FAKE / LIKELY"   value={stats ? stats.fake_detected : '—'}  color="var(--red)" />
+        <KPICard label="REAL / LIKELY"   value={stats ? stats.real_verified : '—'}  color="var(--green)" />
+        <KPICard label="REPORTED TO PIB" value={stats ? stats.reported_to_pib : '—'} color="var(--cyan)" />
       </div>
       <div className="widget-card mt-20">
-        <div className="widget-title">PAST CHECKS</div>
-        <DataTable
-          columns={[
-            { key: 'title',   label: 'TITLE' },
-            { key: 'verdict', label: 'VERDICT', width: 130, render: v => <Badge variant={v === 'FAKE' ? 'red' : v === 'REAL' ? 'green' : 'gold'}>{v}</Badge> },
-            { key: 'conf',    label: 'CONFIDENCE', width: 140, render: v => <ConfidenceBar value={v} compact /> },
-            { key: 'date',    label: 'WHEN', width: 120, align: 'right' },
-          ]}
-          rows={history}
-        />
+        <div className="widget-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>PAST CHECKS</span>
+          <input className="brutal-input" style={{ width: 240, padding: '6px 10px', fontSize: 12 }}
+            placeholder="Search excerpt…" value={q}
+            onChange={e => { setPage(1); setQ(e.target.value); }} />
+        </div>
+        {loading ? <div className="fn-load-txt" style={{ padding: 20 }}>Loading history…</div>
+          : rows.length === 0 ? <EmptyState icon="🗂" title="NO HISTORY YET"
+              description="Analyses you run appear here — searchable, re-openable, exportable." />
+          : (
+            <>
+              <DataTable
+                onRowClick={reopen}
+                columns={[
+                  { key: 'input_excerpt', label: 'CONTENT', render: v => <span title={v}>{(v || '').slice(0, 80) || '(media)'}</span> },
+                  { key: 'verdict', label: 'VERDICT', width: 130, render: v => {
+                      const vv = fnV(v);
+                      return <span className="fn-tag" style={{ background: vv.c, color: vv.fg }}>{vv.label}</span>; } },
+                  { key: 'confidence', label: 'CONF', width: 110, render: v => <ConfidenceBar value={fnPct(v)} compact /> },
+                  { key: 'submitted_at', label: 'WHEN', width: 150, align: 'right',
+                    render: v => v ? new Date(v).toLocaleString() : '' },
+                  { key: 'id', label: '', width: 50, sortable: false,
+                    render: (_v, r) => <button className="btn-brutal" title="Delete"
+                      style={{ fontSize: 10, padding: '3px 8px' }} onClick={(e) => del(r, e)}>✕</button> },
+                ]}
+                rows={rows}
+              />
+              <Pagination page={page} total={total} perPage={PS} onPage={setPage} />
+            </>
+          )}
       </div>
     </div>
   );
 };
 
-const FakeNewsLearn = () => (
+const FN_REVIEW_OPTS = ['REAL', 'LIKELY_REAL', 'UNCERTAIN', 'LIKELY_FAKE', 'FAKE'];
+
+const FakeNewsReview = () => {
+  const [queue, setQueue] = React.useState(null);
+  const [meta, setMeta] = React.useState(null);
+  const [draft, setDraft] = React.useState({});
+  const [toast, toastHost] = useToast();
+
+  const load = () => {
+    fnApi('/review-queue', { params: { status: 'pending' } })
+      .then(r => setQueue(r.data || [])).catch(() => setQueue([]));
+    apiFetch(`${FN_BASE}/meta/status`).then(r => setMeta(r.data)).catch(() => {});
+  };
+  React.useEffect(load, []);
+
+  const decide = async (item) => {
+    const d = draft[item.id] || {};
+    if (!d.verdict) { toast('Pick a verdict first', 'warn'); return; }
+    try {
+      await fnApi(`/review/${item.id}/decide`, { json: { human_verdict: d.verdict, notes: d.notes || '' } });
+      toast('Decision recorded — added to training feedback', 'success');
+      load();
+    } catch (e) { toast('Decision failed', 'error'); }
+  };
+  const refit = async () => {
+    try {
+      const r = await fnApi('/meta/refit', { json: {} });
+      toast(r.data.trained ? `Meta-classifier refit (${r.data.n_samples} samples)`
+        : `Refit deferred: ${r.data.reason}`, r.data.trained ? 'success' : 'info');
+      load();
+    } catch (e) { toast('Refit failed', 'error'); }
+  };
+
+  return (
+    <div className="tab-pane">
+      {toastHost}
+      <div className="widget-card">
+        <div className="widget-title" style={{ display: 'flex', justifyContent: 'space-between' }}>
+          <span>HUMAN-IN-THE-LOOP REVIEW QUEUE</span>
+          <span className="small-meta">low-confidence analyses awaiting a human verdict</span>
+        </div>
+        <div className="fn-meta-bar">
+          Meta-classifier: <strong>{meta && meta.trained ? `trained · ${meta.n_samples} samples`
+            : 'not yet trained (collecting feedback)'}</strong>
+          <button className="btn-brutal" style={{ fontSize: 10, padding: '4px 10px', marginLeft: 'auto' }}
+            onClick={refit}>REFIT FROM FEEDBACK</button>
+        </div>
+        {!queue ? <div className="fn-load-txt" style={{ padding: 20 }}>Loading queue…</div>
+          : queue.length === 0 ? <EmptyState icon="✓" title="QUEUE CLEAR"
+              description="No analyses are waiting for human review. Low-confidence results land here automatically." />
+          : queue.map(item => {
+            const mv = fnV(item.model_verdict);
+            const d = draft[item.id] || {};
+            return (
+              <div key={item.id} className="fn-review">
+                <div className="fn-review-top">
+                  <span className="fn-tag" style={{ background: mv.c, color: mv.fg }}>MODEL: {mv.label}</span>
+                  <span className="fn-review-reason">{item.reason}</span>
+                  <a className="fn-ev-link" title="Open report"
+                    href={`${API_BASE}${FN_BASE}/analyses/${item.analysis_id}/report.html`}
+                    target="_blank" rel="noreferrer">↗ view</a>
+                </div>
+                <SegmentedControl options={FN_REVIEW_OPTS} value={d.verdict || ''}
+                  onChange={(vv) => setDraft(s => ({ ...s, [item.id]: { ...d, verdict: vv } }))}
+                  accent="var(--red)" />
+                <div className="action-row mt-14">
+                  <input className="brutal-input" style={{ flex: 1, padding: '6px 10px', fontSize: 12 }}
+                    placeholder="Reviewer note (optional)" value={d.notes || ''}
+                    onChange={e => setDraft(s => ({ ...s, [item.id]: { ...d, notes: e.target.value } }))} />
+                  <button className="btn-brutal action-btn red" style={{ width: 'auto', fontSize: 11, padding: '8px 16px' }}
+                    onClick={() => decide(item)}>SUBMIT VERDICT</button>
+                </div>
+              </div>
+            );
+          })}
+      </div>
+    </div>
+  );
+};
+
+const FakeNewsLearn = () => {
+  const [sources, setSources] = React.useState(null);
+  React.useEffect(() => {
+    fnApi('/sources').then(r => setSources(r.data || [])).catch(() => setSources([]));
+  }, []);
+  const allow = (sources || []).filter(s => s.in_allowlist).slice(0, 10);
+  return (
   <div className="tab-pane">
     <div className="widgets-grid">
       <div className="widget-card">
@@ -7045,23 +7490,21 @@ const FakeNewsLearn = () => (
       <div className="widget-card">
         <div className="widget-title">✅ TRUSTED SOURCES</div>
         <div className="trusted-list">
-          {[
-            { name: 'PIB Fact Check',    url: 'pib.gov.in/factcheck',     cat: 'Government' },
-            { name: 'Press Information Bureau', url: 'pib.gov.in',       cat: 'Government' },
-            { name: 'Boom Live',          url: 'boomlive.in',             cat: 'Independent' },
-            { name: 'Alt News',           url: 'altnews.in',              cat: 'Independent' },
-            { name: 'Vishvas News',       url: 'vishvasnews.com',         cat: 'Independent' },
-            { name: 'The Wire FactCheck', url: 'thewire.in/factcheck',    cat: 'Independent' },
-          ].map((t, i) => (
+          {sources === null ? <div className="fn-load-txt" style={{ padding: 14 }}>Loading live allowlist…</div>
+            : allow.length === 0 ? <div className="fn-load-txt" style={{ padding: 14 }}>No allowlisted sources found.</div>
+            : allow.map((t, i) => (
             <div key={i} className="trusted-row">
               <span style={{ color: 'var(--green)' }}>✓</span>
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 700, fontFamily: 'var(--font-display)', fontSize: 13 }}>{t.name}</div>
-                <div style={{ fontSize: 10, fontFamily: 'var(--font-mono)', opacity: 0.5 }}>{t.url}</div>
+                <div style={{ fontWeight: 700, fontFamily: 'var(--font-display)', fontSize: 13 }}>{t.publisher_name || t.domain}</div>
+                <div style={{ fontSize: 10, fontFamily: 'var(--font-mono)', opacity: 0.5 }}>{t.domain}</div>
               </div>
-              <Badge variant="default">{t.cat}</Badge>
+              <Badge variant={t.trust_rating === 'HIGH' ? 'green' : 'default'}>{t.trust_rating || 'LISTED'}</Badge>
             </div>
           ))}
+        </div>
+        <div className="small-meta" style={{ padding: '8px 14px', opacity: 0.6 }}>
+          Live from the maintained source-credibility KB · officer-editable
         </div>
       </div>
     </div>
@@ -7086,7 +7529,8 @@ const FakeNewsLearn = () => (
       </div>
     </div>
   </div>
-);
+  );
+};
 
 /* ======================================================================
    CITIZEN MODULE 3 — SUPPORT TICKETS
