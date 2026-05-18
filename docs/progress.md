@@ -222,3 +222,14 @@ Plan: `tasks/todo.md` (9 phases). Contract: `docs/module-specs/06-fake-news-dete
 **Pending user action:** run `backend/sql/fake_news_schema.sql` in Supabase SQL editor (not blocking Phase 1, needed by Phase 4 persistence).
 
 **Env note:** torch IS used here (verified working on Py 3.14.3) — supersedes the "no torch" note in requirements.txt which was Doc-Intel-era.
+
+### Phase 1 — Layer 1 (heuristics + adversarial + schemas) (2026-05-18)
+| File | Purpose | Status |
+|------|---------|--------|
+| `modules/fake_news/adversarial.py` | Homoglyph/leetspeak/zero-width/letter-spacing normalizer → match-variant + evasion signals (zero-width built from codepoints; interior-only de-leet) | OK |
+| `modules/fake_news/heuristics.py` | L1: clickbait/urgency/authority/emotional/conspiracy lexicons, caps/exclamation metrics, financial-lure + phishing, keyless RDAP domain age, suspicious-TLD, sha256 + 64-bit SimHash + `fn_debunked` near-dup match, peak-driven risk + scam-triad boost | OK |
+| `modules/fake_news/schemas.py` | Full spec-06 shapes (AnalyzeIn/Options, AnalysisOut, ClaimAnalysis, SourceCredibility, Bias/Sentiment/Manipulation, RelatedFactCheck, Bulk*) + additive prod fields (risk_score/needs_review/quota_exhausted/nli_label/layers/reasoning); input sanitation | OK |
+| `modules/fake_news/service.py` | L1 waterfall orchestrator: URL fetch + readability extract, normalize → heuristics → honest preliminary verdict (`_verdict_from_l1`), credibility-from-domain, best-effort persist to `analyses` | OK |
+| `modules/fake_news/router.py` | `POST /api/v1/fake-news/analyze` (run_in_threadpool; 422 on bad input) | OK |
+
+**Verified (live HTTP):** scam text → LIKELY_FAKE conf 0.56 risk 0.74 + scam-triad + 6 red flags + needs_review; clean → LIKELY_REAL risk 0.0; obfuscated → leetspeak captured, L1 stays conservative (L2's job); `https://www.bbc.com/news` → article text extracted + RDAP credibility (36 yr, score 95 HIGH); missing text → 422; IMAGE → graceful "Phase 5" notice. No mock values — every field computed.

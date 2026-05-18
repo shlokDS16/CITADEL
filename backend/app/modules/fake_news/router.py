@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
+from starlette.concurrency import run_in_threadpool
 
 from app.modules.fake_news import schemas, service
 
@@ -34,3 +35,33 @@ async def health() -> schemas.HealthResponse:
     except Exception as e:  # noqa: BLE001
         log.exception("fake-news health failed")
         raise HTTPException(status_code=500, detail=f"health failed: {e}")
+
+
+@router.post(
+    "/v1/fake-news/analyze",
+    response_model=schemas.AnalysisOut,
+    tags=[_TAG],
+    summary="Analyze text / URL (Phase 1: Layer-1 heuristics waterfall)",
+)
+async def analyze(
+    body: schemas.AnalyzeIn,
+    x_user_id: str | None = Header(default=None),
+    x_user_role: str | None = Header(default=None),
+) -> schemas.AnalysisOut:
+    """Run the misinformation analysis waterfall on text or a URL.
+
+    Blocking work (URL fetch, RDAP, hashing, later ML) runs in a threadpool
+    so the event loop stays free — same pattern as citizen_assistant.
+    """
+    try:
+        return await run_in_threadpool(
+            service.analyze,
+            body,
+            x_user_id,
+            (x_user_role or "citizen"),
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=422, detail=str(ve))
+    except Exception as e:  # noqa: BLE001
+        log.exception("fake-news analyze failed")
+        raise HTTPException(status_code=500, detail=f"analyze failed: {e}")
