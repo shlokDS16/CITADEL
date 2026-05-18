@@ -77,6 +77,11 @@ context.md
 backend/.vendor_pageindex/
 backend/.citizen_index/
 
+# Fake News Detector — HF model cache (auto-downloaded) + runtime artifacts
+backend/models/
+backend/.fn_uploads/
+backend/.fn_cache/
+
 # Claude worktrees + transient agent data
 .claude/worktrees/
 .claude/__claude_resume__/

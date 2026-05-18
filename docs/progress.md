@@ -196,3 +196,29 @@ curl http://127.0.0.1:8000/api/templates  # returns 10 seeded templates
 # 7. OpenAPI docs
 open http://127.0.0.1:8000/api/v1/docs
 ```
+
+---
+
+## Module: Fake News Detector (Citizen M2)
+### Status: 🟡 IN PROGRESS — Phase 0 (Foundation) shipped & verified
+
+Plan: `tasks/todo.md` (9 phases). Contract: `docs/module-specs/06-fake-news-detector.md` (honored + extended). Architecture: 5-layer waterfall (heuristics → fast transformers → RAG/NLI → LLM rationale) + multi-modal forensics + ingest-fed CIB + HITL + drift.
+
+### Phase 0 — Foundation (2026-05-18)
+| File | Purpose | Status |
+|------|---------|--------|
+| `backend/requirements.txt` | +torch/transformers/hf_hub/scipy/sklearn/tldextract/readability-lxml (production ML, declared for deploy) | OK |
+| `backend/app/config.py` | +`GOOGLE_FACTCHECK_API_KEY` + `FN_*` settings (model pins, thresholds, feeds) | OK |
+| `.gitignore` | +`backend/models/` + `.fn_*` runtime artifacts | OK |
+| `backend/sql/fake_news_schema.sql` | 11-table DDL (spec-06 + `fn_*` extensions), idempotent — **user runs in Supabase** | OK |
+| `backend/app/modules/fake_news/__init__.py` | Router export | OK |
+| `backend/app/modules/fake_news/router.py` | Thin HTTP layer; `/api/v1/fake-news/health` | OK |
+| `backend/app/modules/fake_news/schemas.py` | `HealthResponse` (full analysis schemas → Phase 1) | OK |
+| `backend/app/modules/fake_news/service.py` | Real readiness probe (ML runtime / models dir / Supabase tables / keys) | OK |
+| `backend/app/main.py` | Mounted `fake_news_router` under `/api` | OK |
+
+**Verified:** `GET /api/v1/fake-news/health` → 200. torch 2.11.0 / transformers 5.3.0 / onnxruntime 1.26.0 / hf_hub 1.5.0 / sklearn 1.8.0 on Python 3.14.3. Groq + Google Fact Check keys detected. Tables correctly reported missing until user runs the DDL (graceful degrade confirmed).
+
+**Pending user action:** run `backend/sql/fake_news_schema.sql` in Supabase SQL editor (not blocking Phase 1, needed by Phase 4 persistence).
+
+**Env note:** torch IS used here (verified working on Py 3.14.3) — supersedes the "no torch" note in requirements.txt which was Doc-Intel-era.

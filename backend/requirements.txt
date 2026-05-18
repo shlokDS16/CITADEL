@@ -61,3 +61,18 @@ bcrypt>=4.2
 pytest>=8.3
 pytest-asyncio>=0.24
 ruff>=0.7
+
+# =====================================================
+# Fake News Detector (Citizen Module 2) — production ML
+# NOTE: this module DOES require torch. The "no torch" note above was a
+# Document-Intelligence-era decision; torch 2.11 cpu is verified working on
+# Python 3.14.3, so the production transformer stack is used here. These are
+# declared so deployment installs them (the dev env already has them).
+# =====================================================
+torch>=2.11                  # CPU wheel; transformer backend
+transformers>=5.3            # DistilRoBERTa / DeBERTa-v3 / SigLIP2 inference
+huggingface_hub>=1.5         # model download into FN_MODELS_DIR
+scipy>=1.13                  # Jensen-Shannon divergence (concept drift)
+scikit-learn>=1.5            # refittable logistic meta-classifier (HITL)
+tldextract>=5.3              # registrable-domain parsing (source credibility)
+readability-lxml>=0.8        # clean article text extraction for URL mode

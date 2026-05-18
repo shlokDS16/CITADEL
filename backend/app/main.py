@@ -24,6 +24,7 @@ from app.modules.resume import router as resume_router
 from app.modules.traffic_violations import router as traffic_router
 from app.modules.anomaly_monitoring import router as anomaly_router
 from app.modules.citizen_assistant import router as citizen_router
+from app.modules.fake_news import router as fake_news_router
 
 # ---- logging ----
 logging.basicConfig(
@@ -103,6 +104,7 @@ app.include_router(resume_router,    prefix="/api", tags=["resume-screening"])
 app.include_router(traffic_router,   prefix="/api", tags=["traffic-violations"])
 app.include_router(anomaly_router,   prefix="/api", tags=["anomaly-monitoring"])
 app.include_router(citizen_router,   prefix="/api", tags=["citizen-assistant"])
+app.include_router(fake_news_router, prefix="/api", tags=["fake-news"])
 
 
 # ---- root: friendly landing JSON so visiting `/` doesn't 404 ----

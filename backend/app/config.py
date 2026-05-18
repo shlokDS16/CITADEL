@@ -65,7 +65,34 @@ class Settings(BaseSettings):
     COST_PER_HIRE_RUPEES: int = 18000
     RESUME_AUTO_SHORTLIST_DEFAULT: float = 70.0
 
+    # ---- Fake News Detector (Citizen Module 2) ----
+    GOOGLE_FACTCHECK_API_KEY: str = Field("", description="Google Fact Check Tools API key (optional)")
+    FN_MODELS_DIR: str = str(BACKEND_ROOT / "models")
+    FN_ENABLE_HEAVY_MODELS: bool = True          # propaganda / NLI / deepfake
+    FN_HIGH_RISK_THRESHOLD: float = 0.55         # escalate to LLM rationale above this risk
+    FN_AUTO_VERDICT_CONFIDENCE: float = 0.80     # below → route to human review (HITL)
+    FN_MODEL_FAKE: str = "vikram71198/distilroberta-base-finetuned-fake-news-detection"
+    FN_MODEL_CLICKBAIT: str = "valurank/distilroberta-clickbait"
+    FN_MODEL_PROPAGANDA: str = "QCRI/PropagandaTechniquesAnalysis-en-BERT"
+    FN_MODEL_NLI: str = "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
+    FN_MODEL_BIAS: str = "d4data/bias-detection-model"
+    FN_MODEL_DEEPFAKE: str = "prithivMLmods/AI-vs-Deepfake-vs-Real-Siglip2"
+    FN_MODEL_DEEPFAKE_FALLBACK: str = "dima806/deepfake_vs_real_image_detection"
+    FN_FACTCHECK_FEEDS: str = (
+        "https://factly.in/feed/,"
+        "https://www.boomlive.in/fact-check/feed,"
+        "https://www.altnews.in/feed/"
+    )
+
     # --- derived helpers ---
+    @property
+    def fn_models_path(self) -> Path:
+        return Path(self.FN_MODELS_DIR)
+
+    @property
+    def fn_factcheck_feed_list(self) -> list[str]:
+        return [u.strip() for u in self.FN_FACTCHECK_FEEDS.split(",") if u.strip()]
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
