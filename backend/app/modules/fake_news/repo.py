@@ -371,6 +371,48 @@ def refit_meta() -> dict:
         return {"trained": False, "reason": str(e)}
 
 
+def save_propagation_run(requester_id: str | None, source_name: str,
+                         result: dict) -> str | None:
+    sb = _sb()
+    if sb is None:
+        return None
+    try:
+        import uuid as _uuid
+
+        rid = str(_uuid.uuid4())
+        sb.table("fn_propagation_runs").insert({
+            "id": rid, "requester_id": requester_id,
+            "source_name": source_name,
+            "n_nodes": result.get("n_nodes"), "n_edges": result.get("n_edges"),
+            "burst_score": result.get("burst_score"),
+            "coordination_score": result.get("coordination_score"),
+            "bot_likeness_score": result.get("bot_likeness_score"),
+            "cib_verdict": result.get("cib_verdict"),
+            "clusters": result.get("clusters"),
+            "metrics": {k: result.get(k) for k in
+                        ("cib_score", "structural_score", "n_events",
+                         "n_accounts", "time_span_seconds", "explanation")},
+            "created_at": _now(),
+        }).execute()
+        return rid
+    except Exception as e:  # noqa: BLE001
+        log.debug("propagation persist skipped: %s", e)
+        return None
+
+
+def list_propagation_runs(limit: int = 50) -> list[dict]:
+    sb = _sb()
+    if sb is None:
+        return []
+    try:
+        return (sb.table("fn_propagation_runs").select("*")
+                .order("created_at", desc=True).limit(limit).execute().data
+                or [])
+    except Exception as e:  # noqa: BLE001
+        log.debug("list_propagation_runs failed: %s", e)
+        return []
+
+
 def meta_status() -> dict:
     sb = _sb()
     if sb is None:

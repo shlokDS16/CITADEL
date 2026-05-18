@@ -278,3 +278,42 @@ async def meta_status() -> dict:
     from app.modules.fake_news import repo
 
     return {"data": await run_in_threadpool(repo.meta_status)}
+
+
+# ---- CIB / propagation (Phase 6, ingest-fed) ----
+@router.post("/v1/fake-news/propagation/analyze", tags=[_TAG],
+             summary="Analyze an uploaded share-graph for coordinated "
+                     "inauthentic behaviour")
+async def propagation_analyze(
+    file: UploadFile = File(...),
+    x_user_id: str | None = Header(default=None),
+) -> dict:
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=422, detail="empty file")
+    if len(raw) > settings.max_upload_bytes:
+        raise HTTPException(status_code=413, detail="file too large")
+
+    def _work() -> dict:
+        from app.modules.fake_news import propagation, repo
+
+        res = propagation.run(raw, file.filename or "")
+        if not res.get("ok"):
+            return {"_error": res.get("error", "could not analyze graph")}
+        res["run_id"] = repo.save_propagation_run(
+            x_user_id, file.filename or "upload", res)
+        return res
+
+    out = await run_in_threadpool(_work)
+    if "_error" in out:
+        raise HTTPException(status_code=422, detail=out["_error"])
+    return {"data": out}
+
+
+@router.get("/v1/fake-news/propagation/runs", tags=[_TAG],
+            summary="Recent propagation/CIB analysis runs")
+async def propagation_runs() -> dict:
+    from app.modules.fake_news import repo
+
+    rows = await run_in_threadpool(repo.list_propagation_runs, 50)
+    return {"data": rows, "meta": {"total": len(rows)}}

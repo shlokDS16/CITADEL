@@ -289,3 +289,13 @@ Plan: `tasks/todo.md` (9 phases). Contract: `docs/module-specs/06-fake-news-dete
 
 **Probe-verified:** primary `prithivMLmods/AI-vs-Deepfake-vs-Real-Siglip2` (SiglipForImageClassification, AI/Deepfake/Real); fallback `dima806/deepfake_vs_real_image_detection` (ViT, Real/Fake) — both load, label mapping robust.
 **Verified (live HTTP):** synthetic PNG → FAKE 0.9992 (SigLIP2 AI 0.993) + "No EXIF metadata" flag; image+scam caption → FAKE with caption run through full text waterfall & merged ("worst-case of media vs text"); 15-frame video → 8 frames sampled+aggregated, verdict produced; empty file → 422. Persisted; no mocks; no 5xx.
+
+### Phase 6 — CIB / propagation (ingest-fed) (2026-05-18)
+| File | Purpose | Status |
+|------|---------|--------|
+| `modules/fake_news/propagation.py` | Parse uploaded share-graph (CSV/JSON, flexible column names); 4 signals — burst (peak-window rate + relative concentration), coordination (≥3 accounts, same content, ≤90s → clusters), bot-likeness (mass-created/low-follower/hyperactive), structural (union-find fragmentation vs connected cascade); CIB verdict ORGANIC/SUSPICIOUS/COORDINATED. Honest: GNN-*inspired* heuristics, clear error if input lacks fields (no fabricated metrics) | OK |
+| `modules/fake_news/repo.py` | `save_propagation_run` / `list_propagation_runs` → `fn_propagation_runs` | OK |
+| `modules/fake_news/router.py` | `POST /api/v1/fake-news/propagation/analyze` (multipart, size-capped), `GET /propagation/runs` | OK |
+
+**Bug found+fixed in verify:** `_burst` degenerated (0.0 then 1.0 false-positive) when total span < window / lone-event window — now requires a real ≥3-event cluster for the density term.
+**Verified (live HTTP):** coordinated graph (12 mass-created low-follower bots, same content in a 55 s burst) → **COORDINATED cib 0.95** (burst 1.0 / coord 1.0 / bot 0.8 / struct 1.0, 1 cluster); organic graph (varied ages, 3-day spread, connected reshare chain) → **ORGANIC cib 0.068** (all signals low); malformed input → 422 with actionable message; runs persisted + listable.
