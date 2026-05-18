@@ -70,6 +70,9 @@ test-*.docx
 test-*.pdf
 netlify-drop/
 
+# Full project handoff context — contains real credentials, never commit
+context.md
+
 # Citizen Assistant — vendored PageIndex (auto-cloned at runtime) + tree cache
 backend/.vendor_pageindex/
 backend/.citizen_index/
