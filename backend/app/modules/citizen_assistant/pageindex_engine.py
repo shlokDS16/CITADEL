@@ -192,10 +192,17 @@ def corpus_catalog() -> list[dict[str, Any]]:
     return out
 
 
-async def build_ephemeral_tree(md_text: str, name: str = "uploaded") -> Optional[dict[str, Any]]:
+async def build_ephemeral_tree(md_text: str, name: str = "uploaded",
+                                lite: bool = True) -> Optional[dict[str, Any]]:
     """
-    Build a one-off tree for an uploaded (OCR'd) document. Not cached to
-    the corpus — lives only for this request.
+    Build a one-off tree for an uploaded document. Not cached.
+
+    lite=True (default for user uploads): NO per-node LLM summaries and
+    NO doc-description. md_to_tree then does pure structural parsing —
+    ZERO Groq tokens for a 100-page PDF — exactly the user's design
+    (extraction/chunking is key-less & model-free; the LLM is used only
+    to compose the final answer). `if_add_node_text='yes'` keeps the real
+    page text in every node so the reasoner still answers accurately.
     """
     try:
         from pageindex import md_to_tree
@@ -207,11 +214,11 @@ async def build_ephemeral_tree(md_text: str, name: str = "uploaded") -> Optional
         tmp.write_text(md_text, encoding="utf-8")
         tree = await md_to_tree(
             str(tmp),
-            if_add_node_summary="yes",
+            if_add_node_summary="no" if lite else "yes",
             summary_token_threshold=200,   # PageIndex crashes if left None
             if_add_node_id="yes",
             if_add_node_text="yes",
-            if_add_doc_description="yes",
+            if_add_doc_description="no" if lite else "yes",
             model=PI_MODEL,
         )
         return {

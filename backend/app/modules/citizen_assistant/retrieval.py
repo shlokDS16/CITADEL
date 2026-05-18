@@ -215,6 +215,45 @@ _REFUSAL = (
 )
 
 
+_STOP = {"the", "a", "an", "is", "are", "was", "were", "of", "to", "in",
+         "on", "for", "and", "or", "what", "which", "how", "do", "i",
+         "my", "me", "it", "this", "that", "with", "from", "at", "be",
+         "can", "you", "your", "does", "about", "tell", "give", "please"}
+
+
+def _rank_chunks(query: str, chunks: list[dict]) -> list[dict]:
+    """
+    Key-less, zero-token lexical ranker. Picks the document chunks most
+    relevant to the query so a 100-page PDF doesn't have to be fed whole.
+    Title hits weigh more; exact multi-word phrase + number hits get a
+    bonus. Falls back to original order if nothing matches.
+    """
+    q = re.findall(r"[a-z0-9]+", (query or "").lower())
+    terms = [t for t in q if len(t) > 2 and t not in _STOP]
+    nums = [t for t in q if t.isdigit()]
+    phrases = [" ".join(q[i:i + 2]) for i in range(len(q) - 1)]
+    if not terms:
+        return chunks
+    scored = []
+    for i, c in enumerate(chunks):
+        title = (c.get("title") or "").lower()
+        body = (c.get("text") or c.get("summary") or "").lower()
+        s = 0
+        for t in terms:
+            s += body.count(t) + title.count(t) * 4
+        for n in nums:
+            s += body.count(n) * 3
+        for ph in phrases:
+            if ph and ph in body:
+                s += 6
+        if s:
+            scored.append((s, i, c))
+    if not scored:
+        return chunks
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    return [c for _, _, c in scored]
+
+
 def _answer_prompt(query, lang, ctx_blocks, history_note, uploaded):
     parts = [
         "You are CITADEL's citizen assistant — accurate, concise, polite, "
@@ -278,22 +317,41 @@ def answer(
         }
 
     # ---- STEP 1: reasoning tree-search + access decision ----
-    try:
-        sel = _select(query, flat)
-    except _QuotaExhausted as q:
-        return _quota(q.retry_hint)
-    if (sel.get("access") or "allowed").lower() == "restricted":
-        reasoning.append(f"Access check → restricted ({sel.get('reason','policy')}).")
-        return {
-            "answer": _REFUSAL, "restricted": True, "reasoning": reasoning,
-            "sources": [], "used_web": False, "confidence": 95,
-        }
-
-    chosen = [by_id[k] for k in (sel.get("node_keys") or []) if k in by_id]
     if uploaded_tree:
-        # Always include the uploaded doc's sections up front.
+        # The user uploaded their OWN document and is asking about it.
+        # That is never "another person's private data" — skip the
+        # restriction classifier (it was false-refusing resume/report
+        # questions) and the extra Groq call. Answer from the document.
+        reasoning.append("User-provided document — answering from its content.")
         up = [r for r in flat if r["corpus"] == "__uploaded__"]
-        chosen = up[:6] + [c for c in chosen if c["corpus"] != "__uploaded__"]
+        if len(up) > 6:
+            # Big doc (e.g. 100-page PDF): can't feed every page. The
+            # lite tree has page-only titles, so LLM tree-search over bare
+            # page numbers is useless — instead rank chunks by lexical
+            # overlap with the query (key-less, zero-token) and feed the
+            # best ones. PageIndex supplies the chunks; this picks them;
+            # the LLM only composes the answer.
+            ranked = _rank_chunks(query, up)
+            chosen = ranked[:6]
+            reasoning.append(
+                f"Scanned {len(up)} document sections; selected the "
+                f"{len(chosen)} most relevant ("
+                + ", ".join(c["title"] for c in chosen[:6]) + ").")
+        else:
+            chosen = up[:6]
+        sel = {"need_web": True}
+    else:
+        try:
+            sel = _select(query, flat)
+        except _QuotaExhausted as q:
+            return _quota(q.retry_hint)
+        if (sel.get("access") or "allowed").lower() == "restricted":
+            reasoning.append(f"Access check → restricted ({sel.get('reason','policy')}).")
+            return {
+                "answer": _REFUSAL, "restricted": True, "reasoning": reasoning,
+                "sources": [], "used_web": False, "confidence": 95,
+            }
+        chosen = [by_id[k] for k in (sel.get("node_keys") or []) if k in by_id]
     if not chosen:
         # Never answer from an empty context (that caused degenerate
         # runaway output on sparse/non-Latin queries). Seed with the
