@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -18,7 +19,14 @@ import httpx
 
 from app import __version__
 from app.config import settings
-from app.modules.fake_news import adversarial, heuristics, pipeline as ml, schemas
+from app.modules.fake_news import (
+    adversarial,
+    credibility,
+    fact_check,
+    heuristics,
+    pipeline as ml,
+    schemas,
+)
 
 log = logging.getLogger("citadel.fake_news.service")
 
@@ -180,33 +188,6 @@ def _fetch_article(url: str) -> tuple[str, str, str]:
         return "", "", url
 
 
-def _credibility_from_domain(dom: dict | None) -> schemas.SourceCredibility | None:
-    """Phase-1 credibility approximation from domain signals only.
-
-    Phase 3 replaces this with the maintained source_credibility_db lookup
-    (allowlist/blocklist). Kept honest: no invented publisher reputations.
-    """
-    if not dom:
-        return None
-    risk = float(dom.get("risk", 0.0))
-    if dom.get("official_gov"):
-        score, rating = 92, "HIGH"
-    else:
-        score = int(round(100 * (1.0 - risk)))
-        score = max(5, min(95, score))
-        rating = "HIGH" if score >= 70 else "MEDIUM" if score >= 40 else "LOW"
-    return schemas.SourceCredibility(
-        publisher=dom.get("publisher", "unknown"),
-        publisher_known=bool(dom.get("official_gov")),
-        domain_age_days=dom.get("domain_age_days"),
-        age_label=dom.get("age_label", ""),
-        score=score,
-        trust_rating=rating,
-        in_allowlist=bool(dom.get("official_gov")),
-        in_blocklist=False,
-    )
-
-
 def _l2_run(text: str) -> dict:
     """Run the Layer-2 transformer + lexicon classifiers (each degrades)."""
     return {
@@ -229,9 +210,12 @@ def _combine_verdict(
     fake = l2["fake"].get("score") if l2["fake"].get("available") else None
     prop = l2["propaganda"].get("score", 0.0) if l2["propaganda"].get("available") else 0.0
 
-    parts: list[tuple[float, float]] = [(0.45, l1_risk)]
+    # L1 (verified strong) weighted above the L2 fake-news head, which is a
+    # known-noisy public model (flags some true short facts as fabrication).
+    # Real verification comes from Layer 3, applied in _final_verdict.
+    parts: list[tuple[float, float]] = [(0.50, l1_risk)]
     if fake is not None:
-        parts.append((0.40, float(fake)))
+        parts.append((0.30, float(fake)))
     parts.append((0.15, float(prop)))
     wsum = sum(w for w, _ in parts)
     combined = sum(w * v for w, v in parts) / wsum
@@ -255,6 +239,52 @@ def _combine_verdict(
         verdict, conf = "LIKELY_REAL", 0.66
     needs_review = verdict == "UNCERTAIN" or conf < settings.FN_AUTO_VERDICT_CONFIDENCE
     return combined, verdict, round(conf, 4), needs_review
+
+
+def _final_verdict(
+    combined_risk: float, l2_verdict: str, l2_conf: float,
+    claims: list[dict], debunked: dict | None,
+) -> tuple[float, str, float, bool, str]:
+    """Fuse the style risk with Layer-3 fact verification.
+
+    This is the only path (besides an exact debunk hash) that may emit a
+    high-confidence REAL or FAKE — because here the claims were actually
+    checked against external evidence, not just scored for style.
+    """
+    fc_false = any(c["verdict"] == "FALSE" and c["confidence"] >= 0.85
+                   for c in claims)
+    weak_false = any(c["verdict"] in ("FALSE", "SUSPICIOUS") for c in claims)
+    disputed = any(c["verdict"] == "MISLEADING" for c in claims)
+    corroborated = (
+        any(c["verdict"] == "TRUE" and c["confidence"] >= 0.80 for c in claims)
+        and not any(c["verdict"] in ("FALSE", "SUSPICIOUS", "MISLEADING")
+                    for c in claims)
+    )
+
+    if debunked and debunked.get("kind") == "exact":
+        return 0.97, "FAKE", 0.97, False, "Exact match to known debunked content."
+    if fc_false:
+        return (max(combined_risk, 0.95), "FAKE", 0.93, False,
+                "A credible fact-checker rated a central claim false.")
+    if weak_false and combined_risk >= 0.4:
+        return (max(combined_risk, 0.7), "LIKELY_FAKE", 0.82, False,
+                "Independent evidence contradicts a central claim.")
+    if disputed:
+        return (combined_risk, "UNCERTAIN", 0.55, True,
+                "Claims are disputed — supporting and contradicting evidence.")
+    if corroborated and combined_risk < 0.4:
+        return (min(combined_risk, 0.15), "REAL", 0.86, False,
+                "Central claims corroborated by credible sources.")
+    if corroborated:
+        return (min(combined_risk, 0.3), "LIKELY_REAL", 0.74, False,
+                "Claims corroborated, though style signals are mixed.")
+    # no decisive verification → fall back to the style verdict, but a
+    # genuine verification *attempt* slightly de-risks pure-style calls.
+    conf = round(min(0.78, l2_conf + (0.05 if claims else 0.0)), 4)
+    nr = l2_verdict == "UNCERTAIN" or conf < settings.FN_AUTO_VERDICT_CONFIDENCE
+    note = ("Claims checked but evidence was inconclusive."
+            if claims else "No check-worthy claims extracted.")
+    return combined_risk, l2_verdict, conf, nr, note
 
 
 def _persist(out: schemas.AnalysisOut, hashes: dict[str, str], url: str | None) -> None:
@@ -425,30 +455,74 @@ def analyze(
         reasoning.append(
             f"Sentiment (VADER): pos {se['positive']}% / neg {se['negative']}% / "
             f"neu {se['neutral']}% (compound {se.get('compound', 0)}).")
-    reasoning.append("Layer 3 (RAG fact-check + NLI claim verification) is not yet "
-                     "active — this verdict is style/pattern based, not fact-checked.")
+    # ---- Layer 3: RAG fact verification (claims + NLI + Google FC) ----
+    fc: dict = {"claims": [], "related_fact_checks": []}
+    if req.options.cross_reference and req.options.claim_by_claim:
+        try:
+            fc = fact_check.analyze_claims(text, max_claims=4)
+        except Exception as e:  # noqa: BLE001
+            log.warning("fact-check layer failed: %s", e)
+
+    claim_objs = [
+        schemas.ClaimAnalysis(
+            id=c["id"], text=c["text"], verdict=c["verdict"],
+            confidence=c["confidence"], notes=c["notes"],
+            nli_label=c.get("nli_label"),
+            supporting_evidence=[schemas.Source(**s) for s in c["supporting_evidence"]],
+            contradicting_evidence=[schemas.Source(**s)
+                                    for s in c["contradicting_evidence"]],
+        )
+        for c in fc.get("claims", [])
+    ]
+    related_objs = [schemas.RelatedFactCheck(**r)
+                    for r in fc.get("related_fact_checks", [])]
+
+    final_risk, verdict, confidence, needs_review, fc_note = _final_verdict(
+        combined_risk, verdict, confidence, fc.get("claims", []), h.debunked_match)
+
+    if fc.get("claims"):
+        vc: dict[str, int] = {}
+        for c in fc["claims"]:
+            vc[c["verdict"]] = vc.get(c["verdict"], 0) + 1
+        reasoning.append(
+            f"Layer 3: extracted {len(fc['claims'])} claim(s); verdicts "
+            + ", ".join(f"{k}x{n}" for k, n in vc.items()) + f". {fc_note}")
+    else:
+        reasoning.append("Layer 3: " + fc_note)
+    reasoning.append("Layer 4 (LLM rationale, high-risk only) wires in Phase 4.")
+
+    cred_obj = None
+    if req.options.source_credibility:
+        dom = h.domain or {}
+        cinfo = credibility.score_for(
+            (dom.get("publisher") if dom else None) or url,
+            dom.get("domain_age_days") if dom else None)
+        cred_obj = schemas.SourceCredibility(
+            publisher=cinfo["publisher"], publisher_known=cinfo["publisher_known"],
+            domain_age_days=cinfo["domain_age_days"], age_label=cinfo["age_label"],
+            score=cinfo["score"], trust_rating=cinfo["trust_rating"],
+            in_allowlist=cinfo["in_allowlist"], in_blocklist=cinfo["in_blocklist"])
+        if cinfo.get("in_blocklist"):
+            red_flags.insert(0, f"Publisher on blocklist: {cinfo['publisher']}")
+        elif cinfo.get("in_allowlist"):
+            reasoning.append(f"Publisher {cinfo['publisher']} is a known credible "
+                             f"source (credibility {cinfo['score']}/100).")
 
     out = schemas.AnalysisOut(
-        id=aid,
-        requester_id=requester_id,
+        id=aid, requester_id=requester_id,
         requester_role=requester_role,  # type: ignore[arg-type]
-        submitted_at=now,
-        completed_at=datetime.now(timezone.utc),
-        mode=req.mode,
-        input_excerpt=(norm.normalized or text)[:_EXCERPT],
+        submitted_at=now, completed_at=datetime.now(timezone.utc),
+        mode=req.mode, input_excerpt=(norm.normalized or text)[:_EXCERPT],
         verdict=verdict,  # type: ignore[arg-type]
-        confidence=confidence,
-        risk_score=combined_risk,
-        needs_review=needs_review,
-        quota_exhausted=False,
-        claims=[],                                  # Phase 3-4
-        source_credibility=_credibility_from_domain(h.domain)
-        if req.options.source_credibility else None,
-        bias_profile=None,                          # political-lean model: later phase
+        confidence=confidence, risk_score=round(final_risk, 4),
+        needs_review=needs_review, quota_exhausted=False,
+        claims=claim_objs,
+        source_credibility=cred_obj,
+        bias_profile=None,
         sentiment=sentiment_obj,
-        red_flags=red_flags,
+        red_flags=list(dict.fromkeys(red_flags)),
         manipulation=schemas.ManipulationProfile(**manip),
-        related_fact_checks=[],                     # Phase 3
+        related_fact_checks=related_objs,
         reasoning=reasoning,
         layers={
             "adversarial": {"signals": norm.signals,
@@ -456,11 +530,14 @@ def analyze(
             "heuristics": {"l1_risk": h.l1_risk, "metrics": h.metrics,
                            "signals": h.signals, "domain": h.domain,
                            "debunked_match": h.debunked_match},
-            "classifier": l2["fake"],
-            "clickbait": l2["clickbait"],
-            "bias": l2["bias"],
-            "propaganda": l2["propaganda"],
+            "classifier": l2["fake"], "clickbait": l2["clickbait"],
+            "bias": l2["bias"], "propaganda": l2["propaganda"],
             "sentiment": l2["sentiment"],
+            "fact_check": {
+                "n_claims": len(fc.get("claims", [])),
+                "related": len(related_objs),
+                "google_fc": bool(settings.GOOGLE_FACTCHECK_API_KEY),
+            },
         },
         model_versions={
             "adversarial": "1.0", "heuristics": _L1_VERSION,
@@ -468,10 +545,104 @@ def analyze(
             "clickbait": settings.FN_MODEL_CLICKBAIT,
             "bias": settings.FN_MODEL_BIAS,
             "propaganda": settings.FN_MODEL_PROPAGANDA,
+            "nli": settings.FN_MODEL_NLI, "claims": "spacy-en_core_web_sm",
             "sentiment": "vader-3",
         },
         response_time_ms=int((time.perf_counter() - t0) * 1000),
     )
     _persist(out, h.hashes, url)
     return out
+
+
+# ==========================================================================
+# Background: curated-credibility seed + fact-check feed refresh (<=6h).
+# Mirrors the anomaly module's daemon pattern; degrades if tables absent.
+# ==========================================================================
+_FEED_STOP = threading.Event()
+_FEED_THREAD: threading.Thread | None = None
+_FEED_INTERVAL = 6 * 3600
+
+
+def _parse_feed(xml_text: str) -> list[dict]:
+    import html as _html
+    import re as _re
+    import xml.etree.ElementTree as ET
+
+    items: list[dict] = []
+    try:
+        root = ET.fromstring(xml_text)
+    except Exception:  # noqa: BLE001
+        return items
+    for el in root.iter():
+        if el.tag.split("}")[-1].lower() not in ("item", "entry"):
+            continue
+        d: dict = {}
+        for ch in el:
+            ctag = ch.tag.split("}")[-1].lower()
+            if ctag == "title":
+                d["title"] = (ch.text or "").strip()
+            elif ctag == "link":
+                d["url"] = (ch.get("href") or ch.text or "").strip()
+            elif ctag in ("description", "summary", "content"):
+                txt = _re.sub(r"<[^>]+>", "", ch.text or "")
+                d["body"] = _html.unescape(txt).strip()[:500]
+        if d.get("title") and d.get("url"):
+            items.append(d)
+    return items
+
+
+def refresh_fact_check_feed() -> dict:
+    """Pull recent debunks from configured fact-check RSS into fact_check_feed."""
+    sb = _get_sb()
+    if sb is None:
+        return {"ok": False, "reason": "no supabase"}
+    total = 0
+    for feed_url in settings.fn_factcheck_feed_list:
+        try:
+            with httpx.Client(timeout=12.0, follow_redirects=True,
+                              headers={"User-Agent": _UA}) as c:
+                r = c.get(feed_url)
+            if r.status_code != 200:
+                continue
+            pub = feed_url.split("/")[2] if "//" in feed_url else feed_url
+            rows = [{
+                "publisher": pub, "url": it["url"],
+                "title": it.get("title", "")[:500],
+                "body_excerpt": it.get("body", "")[:500],
+                "claim_norm": (it.get("title", "") or "").lower()[:300],
+                "published_at": None,
+            } for it in _parse_feed(r.text)[:30]]
+            if rows:
+                sb.table("fact_check_feed").upsert(rows, on_conflict="url").execute()
+                total += len(rows)
+        except Exception as e:  # noqa: BLE001
+            log.debug("feed refresh failed for %s: %s", feed_url, e)
+    return {"ok": True, "ingested": total}
+
+
+def _feed_loop() -> None:
+    try:
+        credibility.seed()
+    except Exception as e:  # noqa: BLE001
+        log.warning("credibility seed failed: %s", e)
+    while not _FEED_STOP.is_set():
+        try:
+            log.info("fact-check feed refresh: %s", refresh_fact_check_feed())
+        except Exception as e:  # noqa: BLE001
+            log.warning("feed loop error: %s", e)
+        _FEED_STOP.wait(timeout=_FEED_INTERVAL)
+
+
+def start_background_feed_refresh() -> None:
+    global _FEED_THREAD
+    if _FEED_THREAD is not None and _FEED_THREAD.is_alive():
+        return
+    _FEED_STOP.clear()
+    _FEED_THREAD = threading.Thread(target=_feed_loop, name="fn-feed-refresh",
+                                    daemon=True)
+    _FEED_THREAD.start()
+
+
+def stop_background_feed_refresh() -> None:
+    _FEED_STOP.set()
 

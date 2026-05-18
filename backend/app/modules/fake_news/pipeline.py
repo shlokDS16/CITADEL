@@ -261,8 +261,55 @@ def sentiment(text: str) -> dict:
                 "compound": 0.0}
 
 
+# --------------------------------------------------------------------------
+# Layer 3 helper — NLI claim verification (DeBERTa-v3 MNLI/FEVER/ANLI)
+# --------------------------------------------------------------------------
+@lru_cache(maxsize=1)
+def _nli_pipe():  # noqa: ANN202
+    from transformers import pipeline as hf_pipeline
+
+    mid = settings.FN_MODEL_NLI
+    with _LOAD_LOCK:
+        log.info("loading NLI model: %s", mid)
+        return hf_pipeline("text-classification", model=mid, tokenizer=mid,
+                           top_k=None, device=_DEVICE, truncation=True,
+                           max_length=_MAX_LEN)
+
+
+def nli(premise: str, hypothesis: str) -> dict:
+    """Does `premise` entail / contradict / stay neutral to `hypothesis`?
+
+    Used for FEVER-style claim verification: premise = retrieved evidence,
+    hypothesis = the extracted claim. Label mapping is by name (robust to
+    id ordering). Never raises.
+    """
+    try:
+        pipe = _nli_pipe()
+        out = pipe({"text": premise[:1600], "text_pair": hypothesis[:400]})
+        if out and isinstance(out[0], list):
+            out = out[0]
+        sc = {d["label"].lower(): float(d["score"]) for d in out}
+
+        def pick(*keys: str) -> float:
+            for k, v in sc.items():
+                if any(x in k for x in keys):
+                    return v
+            return 0.0
+
+        ent, con, neu = pick("entail"), pick("contradict"), pick("neutral", "neu")
+        label = max((("entailment", ent), ("contradiction", con),
+                     ("neutral", neu)), key=lambda t: t[1])[0]
+        return {"available": True, "entailment": round(ent, 4),
+                "neutral": round(neu, 4), "contradiction": round(con, 4),
+                "label": label, "raw": {k: round(v, 4) for k, v in sc.items()}}
+    except Exception as e:  # noqa: BLE001
+        log.warning("NLI inference failed: %s", e)
+        return {"available": False, "error": str(e), "entailment": 0.0,
+                "neutral": 1.0, "contradiction": 0.0, "label": "neutral"}
+
+
 def warmup() -> dict:
-    """Eagerly load + calibrate every L2 model. Used by the warmup endpoint
+    """Eagerly load + calibrate every model. Used by the warmup endpoint
     and (optionally) the lifespan pre-warm so the first request is fast."""
     status: dict[str, object] = {}
     for name, fn in (
@@ -270,6 +317,7 @@ def warmup() -> dict:
         ("clickbait", lambda: classify_clickbait("warmup probe sentence for the model loader.")),
         ("bias", lambda: classify_bias("warmup probe sentence for the model loader.")),
         ("propaganda", lambda: detect_propaganda("warmup probe sentence for the model loader.")),
+        ("nli", lambda: nli("The sky is blue today.", "It is a clear day.")),
         ("sentiment", lambda: sentiment("warmup probe sentence.")),
     ):
         try:

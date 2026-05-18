@@ -82,3 +82,57 @@ async def warmup() -> dict:
     except Exception as e:  # noqa: BLE001
         log.exception("fake-news warmup failed")
         raise HTTPException(status_code=500, detail=f"warmup failed: {e}")
+
+
+@router.get("/v1/fake-news/sources", tags=[_TAG],
+            summary="List the source-credibility KB (allowlist/blocklist)")
+async def list_sources() -> dict:
+    from app.modules.fake_news import credibility
+
+    rows = await run_in_threadpool(credibility.all_rows, 500)
+    return {"data": rows, "meta": {"total": len(rows)}}
+
+
+@router.get("/v1/fake-news/sources/{domain}", tags=[_TAG],
+            summary="Credibility for one domain (KB row + age heuristic)")
+async def get_source(domain: str) -> dict:
+    from app.modules.fake_news import credibility
+
+    info = await run_in_threadpool(credibility.score_for, domain, None)
+    return {"data": info}
+
+
+@router.put("/v1/fake-news/sources/{domain}", tags=[_TAG],
+            summary="Officer edit of a credibility row (runtime-editable)")
+async def put_source(
+    domain: str,
+    body: schemas.SourceUpdate,
+    x_user_id: str | None = Header(default=None),
+) -> dict:
+    from app.modules.fake_news import credibility
+
+    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not fields:
+        raise HTTPException(status_code=422, detail="no fields to update")
+    try:
+        row = await run_in_threadpool(credibility.upsert, domain, fields, x_user_id)
+        if row is None:
+            raise HTTPException(status_code=503,
+                                detail="credibility store unavailable")
+        return {"data": row}
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        log.exception("put_source failed")
+        raise HTTPException(status_code=500, detail=f"update failed: {e}")
+
+
+@router.get("/v1/fake-news/related-fact-checks", tags=[_TAG],
+            summary="Search fact-check feeds + Google Fact Check for a query")
+async def related_fact_checks(q: str) -> dict:
+    from app.modules.fake_news import fact_check
+
+    if not q or not q.strip():
+        raise HTTPException(status_code=422, detail="q is required")
+    rows = await run_in_threadpool(fact_check.search, q.strip())
+    return {"data": rows, "meta": {"total": len(rows)}}

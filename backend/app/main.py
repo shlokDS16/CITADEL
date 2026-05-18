@@ -63,6 +63,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("Failed to start citizen assistant build: %s", e)
 
+    # Fake News Detector (Citizen M2) — seed credibility KB + fact-check
+    # feed refresh loop (<=6h). Degrades if Supabase tables are absent.
+    try:
+        from app.modules.fake_news.service import start_background_feed_refresh
+        start_background_feed_refresh()
+    except Exception as e:
+        log.warning("Failed to start fake-news feed refresh: %s", e)
+
     yield
     try:
         from app.modules.traffic_violations.service import stop_background_detection
@@ -72,6 +80,11 @@ async def lifespan(app: FastAPI):
     try:
         from app.modules.anomaly_monitoring.service import stop_background_refresh
         stop_background_refresh()
+    except Exception:
+        pass
+    try:
+        from app.modules.fake_news.service import stop_background_feed_refresh
+        stop_background_feed_refresh()
     except Exception:
         pass
     log.info("CITADEL backend shutting down")

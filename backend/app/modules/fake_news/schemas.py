@@ -106,6 +106,17 @@ class BulkIn(BaseModel):
     options: AnalyzeOptions = AnalyzeOptions()
 
 
+class SourceUpdate(BaseModel):
+    """Officer edit of a source-credibility row (runtime-editable)."""
+    publisher_name: str | None = None
+    trust_rating: Optional[Literal["LOW", "MEDIUM", "HIGH"]] = None
+    score: int | None = Field(None, ge=0, le=100)
+    in_allowlist: bool | None = None
+    in_blocklist: bool | None = None
+    bias_lean: Optional[Literal["left", "center", "right"]] = None
+    notes: str | None = None
+
+
 # --------------------------------------------------------------------------
 # Response sub-shapes (spec-06)
 # --------------------------------------------------------------------------

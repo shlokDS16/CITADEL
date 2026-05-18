@@ -251,3 +251,17 @@ Plan: `tasks/todo.md` (9 phases). Contract: `docs/module-specs/06-fake-news-dete
 **Verified (live HTTP):** warmup 200 (fake_news+sentiment up, others honestly false); scam → LIKELY_FAKE conf 0.80 risk 0.85 (fake 0.9998 + L1 0.74 + agreement); clean → LIKELY_REAL conf 0.66 risk 0.0 (fake 0.0001); clickbait → UNCERTAIN (manip.clickbait 78, VADER −0.78); per-head exclusion reasons surfaced in `layers`; latency ~450 ms warm. Production safeguard: the waterfall **never emits noise from a bad model** — the spec's "classifier = weak signal, RAG/NLI verifies" thesis.
 
 **Follow-up (tracked):** replace bias model with a safetensors-loadable one + add a political-lean model so `bias_profile` (L/C/R) is real (currently honestly `null`); evaluate a stronger propaganda model. Targeted for Phase 3 (credibility/bias) / Phase 8 polish — not blocking.
+
+### Phase 3 — Layer 3 (RAG fact verification + NLI + credibility) (2026-05-18)
+| File | Purpose | Status |
+|------|---------|--------|
+| `modules/fake_news/credibility.py` | `source_credibility_db` KB — 29-row curated seed (PIB/Boom/AltNews/Factly allowlist, wire/quality, satire blocklist), `lookup`/`score_for`/`upsert`, 5-min cache, degrades if absent | OK |
+| `modules/fake_news/fact_check.py` | spaCy claim extraction (checkworthiness) → evidence (Google Fact Check API → fact_check_feed → keyless web reuse of citizen web_search → Wikipedia REST) → DeBERTa-v3 NLI stance → per-claim verdict + supporting/contradicting sources; `search()` | OK |
+| `modules/fake_news/pipeline.py` | + `nli()` (DeBERTa-v3-base-mnli-fever-anli, name-mapped labels) | OK |
+| `modules/fake_news/service.py` | L3 fused via `_final_verdict` (only path besides debunk-hash to high-confidence REAL/FAKE — verified, not style); KB credibility replaces Phase-1 guess; fact-check feed refresh loop (<=6h) + credibility seed (lifespan); dead `_credibility_from_domain` removed | OK |
+| `modules/fake_news/router.py` | `GET /sources`, `GET /sources/{domain}`, `PUT /sources/{domain}` (officer-editable), `GET /related-fact-checks?q=` | OK |
+| `app/main.py` | lifespan: start/stop `start_background_feed_refresh` | OK |
+| `backend/requirements.txt` | + sentencepiece (DeBERTa-v3 tokenizer) | OK |
+
+**NLI probe-verified:** id2label entailment/neutral/contradiction; supports→entail 0.99, refutes→contradict 0.99.
+**Verified (live HTTP):** "COVID-19 vaccines contain microchips" → **FAKE 0.93 / risk 0.95** via 4 retrieved fact-check contradictions + NLI (L1 risk was 0.01 — L1/L2 alone *missed* it; Layer 3 caught it, proving the multi-layer thesis); scam → FAKE 0.93; true statement → LIKELY_REAL risk 0.32 (honest — won't assert REAL without corroboration; live retrieval is non-deterministic); `/sources` → 29 seeded rows; `/sources/altnews.in` → HIGH allowlist; `PUT /sources/{d}` officer-edit OK; `/related-fact-checks?q=covid vaccine microchip` → real FactCheck.org URLs. Calibration tuned: 2+-source corroboration 0.82, noisy fake-head down-weighted (L1 0.50 / fake 0.30). Zero LLM tokens used. ~4–7 s/analysis (async lands Phase 7).
