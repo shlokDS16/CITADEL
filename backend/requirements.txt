@@ -76,3 +76,4 @@ scipy>=1.13                  # Jensen-Shannon divergence (concept drift)
 scikit-learn>=1.5            # refittable logistic meta-classifier (HITL)
 tldextract>=5.3              # registrable-domain parsing (source credibility)
 readability-lxml>=0.8        # clean article text extraction for URL mode
+vaderSentiment>=3.3          # lexicon sentiment (spec-06 §262, no model)

@@ -233,3 +233,21 @@ Plan: `tasks/todo.md` (9 phases). Contract: `docs/module-specs/06-fake-news-dete
 | `modules/fake_news/router.py` | `POST /api/v1/fake-news/analyze` (run_in_threadpool; 422 on bad input) | OK |
 
 **Verified (live HTTP):** scam text → LIKELY_FAKE conf 0.56 risk 0.74 + scam-triad + 6 red flags + needs_review; clean → LIKELY_REAL risk 0.0; obfuscated → leetspeak captured, L1 stays conservative (L2's job); `https://www.bbc.com/news` → article text extracted + RDAP credibility (36 yr, score 95 HIGH); missing text → 422; IMAGE → graceful "Phase 5" notice. No mock values — every field computed.
+
+### Phase 2 — Layer 2 (transformer classifiers + VADER) (2026-05-18)
+| File | Purpose | Status |
+|------|---------|--------|
+| `modules/fake_news/pipeline.py` | Lazy `@lru_cache` HF singletons; **self-calibration** (each binary head auto-detects its risk label by scoring canonical pos/neg) + discrimination guard (`_CAL_MIN_GAP=0.10`) + architecture guard; VADER sentiment; `warmup()` | OK |
+| `modules/fake_news/service.py` | L2 fused into waterfall (`_l2_run`, `_combine_verdict`): peak L1 + classifier + propaganda, agreement boost; clickbait→manipulation via max(); honest reasoning of which heads are live | OK |
+| `modules/fake_news/router.py` | `POST /api/v1/fake-news/warmup` (prod readiness, threadpool) | OK |
+| `backend/requirements.txt` | + vaderSentiment | OK |
+
+**Model probe outcome (verified, not assumed — HF label conventions/quality differ):**
+- `vikram71198` fake-news: opaque `LABEL_0/1`; **discriminative with the canonical calibration pair** (gap 0.9998 — clean→0.0001, scam→0.9998). Self-calibration adapted; kept & contributing.
+- `valurank` clickbait: loads but near-flat (gap 0.008) → **auto-excluded**; L1 lexical clickbait carries it (manip.clickbait 78 on clickbait sample).
+- `QCRI` propaganda: custom `BertForTokenAndSequenceJointClassification` (not pipeline-safe) → **arch-guarded, excluded** with clear reason.
+- `d4data` bias: repo has **no PyTorch/safetensors weights** → load-fails gracefully, honest reason.
+
+**Verified (live HTTP):** warmup 200 (fake_news+sentiment up, others honestly false); scam → LIKELY_FAKE conf 0.80 risk 0.85 (fake 0.9998 + L1 0.74 + agreement); clean → LIKELY_REAL conf 0.66 risk 0.0 (fake 0.0001); clickbait → UNCERTAIN (manip.clickbait 78, VADER −0.78); per-head exclusion reasons surfaced in `layers`; latency ~450 ms warm. Production safeguard: the waterfall **never emits noise from a bad model** — the spec's "classifier = weak signal, RAG/NLI verifies" thesis.
+
+**Follow-up (tracked):** replace bias model with a safetensors-loadable one + add a political-lean model so `bias_profile` (L/C/R) is real (currently honestly `null`); evaluate a stronger propaganda model. Targeted for Phase 3 (credibility/bias) / Phase 8 polish — not blocking.

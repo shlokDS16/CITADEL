@@ -65,3 +65,20 @@ async def analyze(
     except Exception as e:  # noqa: BLE001
         log.exception("fake-news analyze failed")
         raise HTTPException(status_code=500, detail=f"analyze failed: {e}")
+
+
+@router.post(
+    "/v1/fake-news/warmup",
+    tags=[_TAG],
+    summary="Eagerly load + calibrate the L2 models (prod readiness)",
+)
+async def warmup() -> dict:
+    """Pre-load every L2 model so the first real request isn't slow."""
+    try:
+        from app.modules.fake_news import pipeline as ml
+
+        status = await run_in_threadpool(ml.warmup)
+        return {"status": "ok", "models": status}
+    except Exception as e:  # noqa: BLE001
+        log.exception("fake-news warmup failed")
+        raise HTTPException(status_code=500, detail=f"warmup failed: {e}")

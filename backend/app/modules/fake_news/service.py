@@ -18,7 +18,7 @@ import httpx
 
 from app import __version__
 from app.config import settings
-from app.modules.fake_news import adversarial, heuristics, schemas
+from app.modules.fake_news import adversarial, heuristics, pipeline as ml, schemas
 
 log = logging.getLogger("citadel.fake_news.service")
 
@@ -207,29 +207,54 @@ def _credibility_from_domain(dom: dict | None) -> schemas.SourceCredibility | No
     )
 
 
-def _verdict_from_l1(risk: float, debunked: dict | None) -> tuple[str, float, bool]:
-    """Map the L1 risk to a *preliminary* verdict + honest confidence.
+def _l2_run(text: str) -> dict:
+    """Run the Layer-2 transformer + lexicon classifiers (each degrades)."""
+    return {
+        "fake": ml.classify_fake_news(text),
+        "clickbait": ml.classify_clickbait(text),
+        "bias": ml.classify_bias(text),
+        "propaganda": ml.detect_propaganda(text),
+        "sentiment": ml.sentiment(text),
+    }
 
-    L1 alone cannot prove truth/falsity (it detects scam *patterns* and known
-    debunked matches), so non-debunked confidence is deliberately capped —
-    later layers raise it. needs_review follows the HITL threshold.
+
+def _combine_verdict(
+    l1_risk: float, l2: dict, debunked: dict | None
+) -> tuple[float, str, float, bool]:
+    """Fuse L1 risk with the L2 style classifiers into a verdict.
+
+    Still pre-fact-check: these are *style/pattern* signals, so confidence is
+    bounded below "verified" until Layer 3 (RAG/NLI) lands in Phase 3.
     """
-    if debunked and debunked.get("kind") == "exact":
-        return "FAKE", 0.97, False
+    fake = l2["fake"].get("score") if l2["fake"].get("available") else None
+    prop = l2["propaganda"].get("score", 0.0) if l2["propaganda"].get("available") else 0.0
+
+    parts: list[tuple[float, float]] = [(0.45, l1_risk)]
+    if fake is not None:
+        parts.append((0.40, float(fake)))
+    parts.append((0.15, float(prop)))
+    wsum = sum(w for w, _ in parts)
+    combined = sum(w * v for w, v in parts) / wsum
+    if l1_risk >= 0.6 and (fake or 0.0) >= 0.6:        # L1 & L2 agree → reinforce
+        combined = min(1.0, combined + 0.12)
     if debunked:
-        return "LIKELY_FAKE", 0.86, False
-    if risk >= 0.80:
-        verdict, conf = "LIKELY_FAKE", min(0.74, 0.45 + 0.35 * risk)
-    elif risk >= 0.55:
-        verdict, conf = "LIKELY_FAKE", 0.56
-    elif risk >= 0.35:
-        verdict, conf = "UNCERTAIN", 0.42
-    elif risk >= 0.15:
-        verdict, conf = "LIKELY_REAL", 0.46
+        combined = max(combined, 0.97 if debunked.get("kind") == "exact" else 0.90)
+    combined = round(min(1.0, combined), 4)
+
+    if debunked and debunked.get("kind") == "exact":
+        verdict, conf = "FAKE", 0.97
+    elif combined >= 0.82:
+        verdict, conf = "LIKELY_FAKE", 0.80
+    elif combined >= 0.60:
+        verdict, conf = "LIKELY_FAKE", 0.70
+    elif combined >= 0.42:
+        verdict, conf = "UNCERTAIN", 0.50
+    elif combined >= 0.22:
+        verdict, conf = "LIKELY_REAL", 0.60
     else:
-        verdict, conf = "LIKELY_REAL", 0.52
+        verdict, conf = "LIKELY_REAL", 0.66
     needs_review = verdict == "UNCERTAIN" or conf < settings.FN_AUTO_VERDICT_CONFIDENCE
-    return verdict, round(conf, 4), needs_review
+    return combined, verdict, round(conf, 4), needs_review
 
 
 def _persist(out: schemas.AnalysisOut, hashes: dict[str, str], url: str | None) -> None:
@@ -342,7 +367,66 @@ def analyze(
                      "LLM rationale) are not yet active — this is a preliminary "
                      "Layer-1 screening result.")
 
-    verdict, confidence, needs_review = _verdict_from_l1(h.l1_risk, h.debunked_match)
+    # ---- Layer 2: transformer style classifiers + VADER sentiment ----
+    l2 = _l2_run(text)
+    red_flags = list(h.red_flags)
+    manip = dict(h.manipulation)
+
+    cb = l2["clickbait"]
+    if cb.get("available") and "score" in cb:
+        manip["clickbait"] = max(manip.get("clickbait", 0),
+                                 int(round(cb["score"] * 100)))
+    fk = l2["fake"]
+    if fk.get("available") and fk.get("score", 0.0) >= 0.65:
+        red_flags.append(
+            f"Fabrication-style language flagged by classifier "
+            f"({int(round(fk['score'] * 100))}% — a style signal, not proof)"
+        )
+    pr = l2["propaganda"]
+    if pr.get("available") and pr.get("techniques"):
+        red_flags.append("Propaganda techniques: " + ", ".join(pr["techniques"][:4]))
+    bi = l2["bias"]
+    if bi.get("available") and bi.get("score", 0.0) >= 0.60:
+        red_flags.append(
+            f"Loaded / biased language ({int(round(bi['score'] * 100))}% "
+            f"intensity — not a political-lean score)"
+        )
+    red_flags = list(dict.fromkeys(red_flags))
+
+    se = l2["sentiment"]
+    sentiment_obj = (
+        schemas.SentimentBreakdown(
+            positive=se.get("positive", 0), negative=se.get("negative", 0),
+            neutral=se.get("neutral", 100))
+        if se.get("available") else None
+    )
+
+    combined_risk, verdict, confidence, needs_review = _combine_verdict(
+        h.l1_risk, l2, h.debunked_match)
+
+    l2_bits: list[str] = []
+    if fk.get("available"):
+        l2_bits.append(f"fabrication-style {int(round(fk.get('score', 0) * 100))}%")
+    elif fk.get("discriminative") is False:
+        l2_bits.append("fabrication classifier excluded (not discriminative on "
+                       "general text — RAG/NLI in Layer 3 does verification)")
+    if cb.get("available"):
+        l2_bits.append(f"clickbait {manip['clickbait']}%")
+    if bi.get("available"):
+        l2_bits.append(f"bias {int(round((bi.get('score') or 0) * 100))}%")
+    if pr.get("available"):
+        l2_bits.append(f"propaganda {int(round(pr.get('score', 0) * 100))}%")
+    reasoning.append(
+        "Layer 2: "
+        + (", ".join(l2_bits) if l2_bits else "no classifier signals available")
+        + f". Combined risk {combined_risk:.2f}."
+    )
+    if se.get("available"):
+        reasoning.append(
+            f"Sentiment (VADER): pos {se['positive']}% / neg {se['negative']}% / "
+            f"neu {se['neutral']}% (compound {se.get('compound', 0)}).")
+    reasoning.append("Layer 3 (RAG fact-check + NLI claim verification) is not yet "
+                     "active — this verdict is style/pattern based, not fact-checked.")
 
     out = schemas.AnalysisOut(
         id=aid,
@@ -354,32 +438,38 @@ def analyze(
         input_excerpt=(norm.normalized or text)[:_EXCERPT],
         verdict=verdict,  # type: ignore[arg-type]
         confidence=confidence,
-        risk_score=h.l1_risk,
+        risk_score=combined_risk,
         needs_review=needs_review,
         quota_exhausted=False,
         claims=[],                                  # Phase 3-4
         source_credibility=_credibility_from_domain(h.domain)
         if req.options.source_credibility else None,
-        bias_profile=None,                          # Phase 2
-        sentiment=None,                             # Phase 2
-        red_flags=h.red_flags,
-        manipulation=schemas.ManipulationProfile(**h.manipulation),
+        bias_profile=None,                          # political-lean model: later phase
+        sentiment=sentiment_obj,
+        red_flags=red_flags,
+        manipulation=schemas.ManipulationProfile(**manip),
         related_fact_checks=[],                     # Phase 3
         reasoning=reasoning,
         layers={
-            "adversarial": {
-                "signals": norm.signals,
-                "obfuscation_score": norm.obfuscation_score,
-            },
-            "heuristics": {
-                "l1_risk": h.l1_risk,
-                "metrics": h.metrics,
-                "signals": h.signals,
-                "domain": h.domain,
-                "debunked_match": h.debunked_match,
-            },
+            "adversarial": {"signals": norm.signals,
+                            "obfuscation_score": norm.obfuscation_score},
+            "heuristics": {"l1_risk": h.l1_risk, "metrics": h.metrics,
+                           "signals": h.signals, "domain": h.domain,
+                           "debunked_match": h.debunked_match},
+            "classifier": l2["fake"],
+            "clickbait": l2["clickbait"],
+            "bias": l2["bias"],
+            "propaganda": l2["propaganda"],
+            "sentiment": l2["sentiment"],
         },
-        model_versions={"adversarial": "1.0", "heuristics": _L1_VERSION},
+        model_versions={
+            "adversarial": "1.0", "heuristics": _L1_VERSION,
+            "fake_news": settings.FN_MODEL_FAKE,
+            "clickbait": settings.FN_MODEL_CLICKBAIT,
+            "bias": settings.FN_MODEL_BIAS,
+            "propaganda": settings.FN_MODEL_PROPAGANDA,
+            "sentiment": "vader-3",
+        },
         response_time_ms=int((time.perf_counter() - t0) * 1000),
     )
     _persist(out, h.hashes, url)
