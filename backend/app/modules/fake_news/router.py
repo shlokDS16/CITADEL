@@ -26,6 +26,7 @@ from fastapi.responses import HTMLResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
+from app.shared.filetype import assert_upload_kind
 from app.shared.ratelimit import rate_limit
 
 from app.modules.fake_news import schemas, service
@@ -133,6 +134,7 @@ async def analyze_media(
 ) -> schemas.AnalysisOut:
     _require_ext(file.filename, _IMG_EXT + _VID_EXT)
     content = await _read_capped(file, settings.max_upload_bytes)
+    assert_upload_kind(file.filename, content, {"image", "video"})
     try:
         return await run_in_threadpool(
             service.analyze_media_content, content, file.filename or "media",
@@ -345,6 +347,7 @@ async def propagation_analyze(
 ) -> dict:
     _require_ext(file.filename, _DATA_EXT)
     raw = await _read_capped(file, settings.max_upload_bytes)
+    assert_upload_kind(file.filename, raw, {"text"})
 
     def _work() -> dict:
         from app.modules.fake_news import propagation, repo
@@ -407,6 +410,7 @@ async def bulk_csv(
 ) -> dict:
     _require_ext(file.filename, _DATA_EXT)
     raw = await _read_capped(file, settings.max_upload_bytes)
+    assert_upload_kind(file.filename, raw, {"text"})
     lines = [ln.strip().strip(",") for ln in
              raw.decode("utf-8", "replace").splitlines() if ln.strip()]
     if lines and lines[0].lower() in ("url", "urls", "text"):
