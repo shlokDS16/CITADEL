@@ -328,6 +328,13 @@ def _final_verdict(
     """
     fc_false = any(c["verdict"] == "FALSE" and c["confidence"] >= 0.85
                    for c in claims)
+    # An NLI / fact-check contradiction at >=0.70 is decisive verification.
+    # L3 is the authority here (the public L2 classifier is noisy by
+    # design), so an L3-contradicted claim must NOT be gated behind the L2
+    # *style* risk the way weak_false was — a fact-checked-false claim with
+    # clean prose was wrongly surfacing as UNCERTAIN.
+    strong_false = any(c["verdict"] == "FALSE" and c["confidence"] >= 0.70
+                       for c in claims)
     weak_false = any(c["verdict"] in ("FALSE", "SUSPICIOUS") for c in claims)
     disputed = any(c["verdict"] == "MISLEADING" for c in claims)
     corroborated = (
@@ -341,9 +348,14 @@ def _final_verdict(
     if fc_false:
         return (max(combined_risk, 0.95), "FAKE", 0.93, False,
                 "A credible fact-checker rated a central claim false.")
-    if weak_false and combined_risk >= 0.4:
-        return (max(combined_risk, 0.7), "LIKELY_FAKE", 0.82, False,
-                "Independent evidence contradicts a central claim.")
+    if strong_false:
+        return (max(combined_risk, 0.80), "LIKELY_FAKE", 0.82, False,
+                "Layer-3 evidence (fact-check / NLI) contradicts a "
+                "central claim.")
+    if weak_false:
+        return (max(combined_risk, 0.60), "LIKELY_FAKE", 0.72, True,
+                "Independent evidence contradicts a central claim — "
+                "routed for human review.")
     if disputed:
         return (combined_risk, "UNCERTAIN", 0.55, True,
                 "Claims are disputed — supporting and contradicting evidence.")
