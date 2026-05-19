@@ -43,6 +43,26 @@ _TAG = "fake-news"
 _RL_HEAVY = Depends(rate_limit("fn:heavy", 10, 60))
 _RL_STD = Depends(rate_limit("fn:std", 60, 60))
 
+
+def _max_body(content_length: str | None = Header(default=None)) -> None:
+    """Reject an over-cap upload from its Content-Length *before* Starlette
+    spools the multipart body to a temp file. Route dependencies resolve
+    before the File() param, so this runs pre-buffer; _read_capped remains
+    the streaming defense for chunked / no-Content-Length requests."""
+    if content_length is None:
+        return
+    try:
+        n = int(content_length)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid Content-Length")
+    if n > settings.max_upload_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"file exceeds {settings.MAX_UPLOAD_SIZE_MB} MB limit")
+
+
+_BODY_CAP = Depends(_max_body)
+
 _IMG_EXT = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff")
 _VID_EXT = (".mp4", ".mov", ".avi", ".webm", ".mkv", ".m4v")
 _DATA_EXT = (".csv", ".json", ".txt")
@@ -114,9 +134,9 @@ async def analyze(
         )
     except ValueError as ve:
         raise HTTPException(status_code=422, detail=str(ve))
-    except Exception as e:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         log.exception("fake-news analyze failed")
-        raise HTTPException(status_code=500, detail=f"analyze failed: {e}")
+        raise HTTPException(status_code=500, detail="analyze failed")
 
 
 @router.post(
@@ -124,7 +144,7 @@ async def analyze(
     response_model=schemas.AnalysisOut,
     tags=[_TAG],
     summary="Deepfake / AI-image (and video) forensics on an uploaded file",
-    dependencies=[_RL_HEAVY],
+    dependencies=[_RL_HEAVY, _BODY_CAP],
 )
 async def analyze_media(
     file: UploadFile = File(...),
@@ -139,9 +159,9 @@ async def analyze_media(
         return await run_in_threadpool(
             service.analyze_media_content, content, file.filename or "media",
             query, x_user_id, (x_user_role or "citizen"))
-    except Exception as e:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         log.exception("analyze_media failed")
-        raise HTTPException(status_code=500, detail=f"media analysis failed: {e}")
+        raise HTTPException(status_code=500, detail="media analysis failed")
 
 
 @router.post(
@@ -157,9 +177,9 @@ async def warmup() -> dict:
 
         status = await run_in_threadpool(ml.warmup)
         return {"status": "ok", "models": status}
-    except Exception as e:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         log.exception("fake-news warmup failed")
-        raise HTTPException(status_code=500, detail=f"warmup failed: {e}")
+        raise HTTPException(status_code=500, detail="warmup failed")
 
 
 @router.get("/v1/fake-news/sources", tags=[_TAG],
@@ -340,7 +360,7 @@ async def meta_status() -> dict:
 @router.post("/v1/fake-news/propagation/analyze", tags=[_TAG],
              summary="Analyze an uploaded share-graph for coordinated "
                      "inauthentic behaviour",
-             dependencies=[_RL_HEAVY])
+             dependencies=[_RL_HEAVY, _BODY_CAP])
 async def propagation_analyze(
     file: UploadFile = File(...),
     x_user_id: str | None = Header(default=None),
@@ -404,7 +424,7 @@ async def bulk(
 
 @router.post("/v1/fake-news/bulk/upload-csv", tags=[_TAG], status_code=202,
              summary="Submit a CSV (1 URL/text per line) for batch analysis",
-             dependencies=[_RL_HEAVY])
+             dependencies=[_RL_HEAVY, _BODY_CAP])
 async def bulk_csv(
     file: UploadFile = File(...), x_user_id: str | None = Header(default=None),
 ) -> dict:

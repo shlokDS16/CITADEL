@@ -32,6 +32,38 @@ def test_detect_kind(blob: bytes, want: str):
     assert detect_kind(blob) == want
 
 
+@pytest.mark.parametrize("blob", [
+    b"col1ftypcol2,value\n1,2\n",          # 'ftyp' at [4:8] in a CSV
+    b"url,free\nhttps://example.com,1\n",   # 'free' box-name collision
+    b'{"mdat":"x","a":1}\n',                # 'mdat' inside JSON
+])
+def test_iso_bmff_text_collision_not_video(blob: bytes):
+    # The size-prefix guard must keep these as text (regression: a benign
+    # CSV/JSON whose bytes[4:8] spell a box name was 415'd as video).
+    assert detect_kind(blob) == "text"
+
+
+@pytest.mark.parametrize("bom", [
+    b"\xff\xfe",                # UTF-16 LE
+    b"\xfe\xff",                # UTF-16 BE
+    b"\xff\xfe\x00\x00",        # UTF-32 LE
+    b"\x00\x00\xfe\xff",        # UTF-32 BE
+])
+def test_utf16_32_bom_text_is_text(bom: bytes):
+    # BOM'd Unicode text (Excel "Unicode Text", Notepad "Unicode") is
+    # NUL-dense; the BOM makes it unambiguously text, must not 415.
+    assert detect_kind(bom + b"url\nhttps://example.com/a\n") == "text"
+
+
+@pytest.mark.parametrize("enc", ["utf-16", "utf-32"])
+def test_codec_bom_roundtrip_is_text(enc: str):
+    assert detect_kind("url\nhttps://x/a\n".encode(enc)) == "text"
+
+
+def test_real_mp4_still_video():
+    assert detect_kind(MP4) == "video"
+
+
 def test_assert_upload_kind_match_returns_kind():
     assert assert_upload_kind("a.png", PNG, {"image", "video"}) == "image"
 

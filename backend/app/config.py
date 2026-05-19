@@ -5,6 +5,7 @@ directly elsewhere in the codebase.
 """
 from __future__ import annotations
 
+import ipaddress
 from functools import lru_cache
 from pathlib import Path
 
@@ -51,6 +52,14 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE_MB: int = 10
     MAX_BATCH_SIZE: int = 10
 
+    # ---- Rate limiting ----
+    # Comma list of trusted reverse-proxy IPs / CIDRs. X-Forwarded-For is
+    # honored ONLY when the socket peer is inside this set; otherwise the
+    # real socket IP is used and XFF is ignored (prevents trivial IP
+    # spoofing of the per-IP rate-limit backstop on a direct deployment).
+    # Empty (default) = direct deploy, always use the socket peer.
+    RL_TRUSTED_PROXIES: str = ""
+
     # ---- Embeddings ----
     EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"
     EMBEDDING_DIM: int = 384
@@ -96,6 +105,21 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
+
+    @property
+    def rl_trusted_proxy_nets(
+        self,
+    ) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+        nets: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+        for tok in self.RL_TRUSTED_PROXIES.split(","):
+            tok = tok.strip()
+            if not tok:
+                continue
+            try:
+                nets.append(ipaddress.ip_network(tok, strict=False))
+            except ValueError:
+                continue
+        return nets
 
     @property
     def max_upload_bytes(self) -> int:

@@ -47,15 +47,28 @@ _BINARY_SIGS: list[bytes] = [
     b"\xd0\xcf\x11\xe0",                      # legacy MS Office (OLE)
 ]
 
+# A real ISO-BMFF top-level box (ftyp/…) declares a small size; ASCII
+# text read as a big-endian uint32 is always huge (≥ ~0x20202020 ≈ 538M
+# for 4 printable bytes), so this ceiling cleanly separates a genuine box
+# prefix from a text/CSV collision without needing the whole file.
+_MAX_BOX = 1 << 20
+
 
 def detect_kind(content: bytes) -> str:
     """Best-effort content family from magic bytes:
     ``image`` | ``video`` | ``binary`` | ``text``."""
     head = content[:64]
 
-    # ISO-BMFF (mp4/mov/m4v): a box-size prefix then a known box at [4:8]
+    # ISO-BMFF (mp4/mov/m4v): a known box type at [4:8] AND a *valid*
+    # 32-bit big-endian box-size prefix at [0:4]. Without the size check,
+    # any text whose 5th-8th bytes spell e.g. "ftyp"/"free" (a CSV column
+    # header, a JSON key at that offset) false-classifies as video and
+    # gets a spurious 415. Real box sizes: 1 = 64-bit size follows,
+    # 0 = box runs to EOF, else the box length in bytes.
     if len(content) >= 8 and content[4:8] in _MP4_BOXES:
-        return "video"
+        box_size = int.from_bytes(content[:4], "big")
+        if box_size in (0, 1) or 8 <= box_size <= _MAX_BOX:
+            return "video"
     # RIFF container — disambiguate WEBP (image) vs AVI (video) by FourCC
     if head[:4] == b"RIFF" and len(content) >= 12:
         fourcc = content[8:12]
@@ -77,6 +90,12 @@ def detect_kind(content: bytes) -> str:
     # sample must be overwhelmingly printable (tolerates latin-1 CSVs).
     sample = content[:65536]
     if not sample:
+        return "text"
+    # UTF-16/UTF-32 text is NUL-dense; a BOM makes it unambiguous. Excel
+    # "Unicode Text (.txt)" and Notepad "Unicode" export UTF-16LE — a real
+    # citizen upload that must not 415 as "binary".
+    if (sample[:2] in (b"\xff\xfe", b"\xfe\xff")
+            or sample[:4] in (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
         return "text"
     if b"\x00" in sample:
         return "binary"

@@ -1,18 +1,23 @@
-"""Shared sliding-window rate limiter (app/shared/ratelimit.py)."""
+"""Shared sliding-window rate limiter (app/shared/ratelimit.py).
+
+Covers the post-review hardening: per-IP backstop, X-Forwarded-For trust
+gate, idle-key eviction, and an injected clock (no global monkeypatch)."""
 from __future__ import annotations
 
 import httpx
-import pytest
 from fastapi import Depends, FastAPI
 
 from app.shared import ratelimit
 from app.shared.ratelimit import rate_limit
 
 
-def _app(bucket: str, limit: int, window: int = 60) -> FastAPI:
+def _app(bucket: str, limit: int, window: int = 60, *,
+         ip_limit: int | None = None, clock=None) -> FastAPI:
     a = FastAPI()
+    dep = rate_limit(bucket, limit, window, ip_limit=ip_limit,
+                     clock=clock or __import__("time").monotonic)
 
-    @a.get("/x", dependencies=[Depends(rate_limit(bucket, limit, window))])
+    @a.get("/x", dependencies=[Depends(dep)])
     async def x():
         return {"ok": True}
 
@@ -51,7 +56,7 @@ async def test_429_carries_retry_after_and_zero_remaining():
 
 
 async def test_identity_isolation():
-    app = _app("b4", 1)
+    app = _app("b4", 1)            # ip_limit defaults to 5x → bob not capped
     await _get(app, **{"x-user-id": "alice"})
     again = await _get(app, **{"x-user-id": "alice"})
     other = await _get(app, **{"x-user-id": "bob"})
@@ -67,11 +72,41 @@ async def test_ip_fallback_without_user_id():
     assert r2.status_code == 429
 
 
-async def test_window_expiry(monkeypatch):
+async def test_ip_backstop_caps_identity_rotation():
+    # Per-user budget is huge, but the per-IP backstop must stop an
+    # attacker rotating X-User-Id to mint fresh budgets.
+    app = _app("bp", 100, ip_limit=2)
+    c1 = await _get(app, **{"x-user-id": "a"})
+    c2 = await _get(app, **{"x-user-id": "b"})
+    c3 = await _get(app, **{"x-user-id": "c"})
+    assert (c1.status_code, c2.status_code, c3.status_code) == (200, 200, 429)
+
+
+async def test_xff_ignored_without_trusted_proxy():
+    # No trusted proxy configured → spoofed X-Forwarded-For must NOT yield
+    # a fresh per-IP bucket; both requests map to the socket peer.
+    app = _app("bx", 1)
+    r1 = await _get(app, **{"x-forwarded-for": "1.1.1.1"})
+    r2 = await _get(app, **{"x-forwarded-for": "2.2.2.2"})
+    assert r1.status_code == 200
+    assert r2.status_code == 429
+
+
+async def test_window_expiry_with_injected_clock():
     clock = {"v": 1000.0}
-    monkeypatch.setattr(ratelimit.time, "monotonic", lambda: clock["v"])
-    app = _app("b6", 1, window=60)
+    app = _app("b6", 1, window=60, clock=lambda: clock["v"])
     assert (await _get(app, **{"x-user-id": "u"})).status_code == 200
     assert (await _get(app, **{"x-user-id": "u"})).status_code == 429
     clock["v"] += 61
     assert (await _get(app, **{"x-user-id": "u"})).status_code == 200
+
+
+async def test_idle_keys_evicted():
+    clock = {"v": 1000.0}
+    app = _app("ev", 1, window=10, clock=lambda: clock["v"])
+    await _get(app, **{"x-user-id": "u"})
+    assert any(k.startswith("ev|") for k in ratelimit._HITS)
+    clock["v"] += 11                       # window fully drained
+    with ratelimit._LOCK:
+        ratelimit._gc_locked(clock["v"])
+    assert not any(k.startswith("ev|") for k in ratelimit._HITS)
