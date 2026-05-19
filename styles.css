@@ -2321,10 +2321,13 @@ body {
 }
 .related-list { display: flex; flex-direction: column; gap: 6px; }
 .related-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: 8px 10px; border: 2px solid #000; background: #fff; cursor: pointer;
 }
+.related-item > div { min-width: 0; flex: 1; }
+.related-item > a { flex: none; }
 .related-item:hover { background: #fafaf5; }
-.related-title { font-family: 'Chakra Petch', sans-serif; font-weight: 700; font-size: 12px; color: #000; }
+.related-title { font-family: 'Chakra Petch', sans-serif; font-weight: 700; font-size: 12px; color: #000; overflow-wrap: anywhere; }
 .related-src { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #666; margin-top: 2px; }
 
 /* === FLAG GUIDE / TRUSTED / VERIFY STEPS === */
@@ -2339,10 +2342,11 @@ body {
 .flag-guide-desc { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #555; line-height: 1.5; }
 .trusted-list { display: flex; flex-direction: column; gap: 6px; }
 .trusted-row {
-  display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center;
+  display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center;
   padding: 8px 10px; border: 2px solid #000; background: #fff;
   font-family: 'JetBrains Mono', monospace; font-size: 12px;
 }
+.trusted-row > div { min-width: 0; }
 .verify-steps { display: flex; flex-direction: column; gap: 10px; }
 .verify-step {
   display: grid; grid-template-columns: 42px 1fr; gap: 12px; align-items: flex-start;
@@ -2568,6 +2572,7 @@ button:focus-visible, [role="button"]:focus-visible, a:focus-visible {
 }
 @media (max-width: 600px) {
   .kpi-grid-4 { grid-template-columns: 1fr; }
+  .widgets-grid { grid-template-columns: 1fr; }
   .summary-grid { grid-template-columns: 1fr; }
   .notif-drawer { width: 100vw; }
   .cmd-palette { width: 95vw; }
