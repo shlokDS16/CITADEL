@@ -14,6 +14,7 @@ import logging
 
 from fastapi import (
     APIRouter,
+    Depends,
     File,
     Form,
     Header,
@@ -25,6 +26,7 @@ from fastapi.responses import HTMLResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
+from app.shared.ratelimit import rate_limit
 
 from app.modules.fake_news import schemas, service
 
@@ -32,6 +34,13 @@ log = logging.getLogger("citadel.fake_news.router")
 router = APIRouter()
 
 _TAG = "fake-news"
+
+# Per .claude/rules/security-baseline.md: ML / external-cost endpoints get
+# the tight per-user budget (shared across all heavy routes so a caller
+# can't fan out across them); everything else gets the standard budget.
+# Identity = X-User-Id else client IP (see app.shared.ratelimit).
+_RL_HEAVY = Depends(rate_limit("fn:heavy", 10, 60))
+_RL_STD = Depends(rate_limit("fn:std", 60, 60))
 
 _IMG_EXT = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff")
 _VID_EXT = (".mp4", ".mov", ".avi", ".webm", ".mkv", ".m4v")
@@ -83,6 +92,7 @@ async def health() -> schemas.HealthResponse:
     response_model=schemas.AnalysisOut,
     tags=[_TAG],
     summary="Analyze text / URL (Phase 1: Layer-1 heuristics waterfall)",
+    dependencies=[_RL_HEAVY],
 )
 async def analyze(
     body: schemas.AnalyzeIn,
@@ -113,6 +123,7 @@ async def analyze(
     response_model=schemas.AnalysisOut,
     tags=[_TAG],
     summary="Deepfake / AI-image (and video) forensics on an uploaded file",
+    dependencies=[_RL_HEAVY],
 )
 async def analyze_media(
     file: UploadFile = File(...),
@@ -135,6 +146,7 @@ async def analyze_media(
     "/v1/fake-news/warmup",
     tags=[_TAG],
     summary="Eagerly load + calibrate the L2 models (prod readiness)",
+    dependencies=[_RL_HEAVY],
 )
 async def warmup() -> dict:
     """Pre-load every L2 model so the first real request isn't slow."""
@@ -149,7 +161,8 @@ async def warmup() -> dict:
 
 
 @router.get("/v1/fake-news/sources", tags=[_TAG],
-            summary="List the source-credibility KB (allowlist/blocklist)")
+            summary="List the source-credibility KB (allowlist/blocklist)",
+            dependencies=[_RL_STD])
 async def list_sources() -> dict:
     from app.modules.fake_news import credibility
 
@@ -158,7 +171,8 @@ async def list_sources() -> dict:
 
 
 @router.get("/v1/fake-news/sources/{domain}", tags=[_TAG],
-            summary="Credibility for one domain (KB row + age heuristic)")
+            summary="Credibility for one domain (KB row + age heuristic)",
+            dependencies=[_RL_STD])
 async def get_source(domain: str) -> dict:
     from app.modules.fake_news import credibility
 
@@ -167,7 +181,8 @@ async def get_source(domain: str) -> dict:
 
 
 @router.put("/v1/fake-news/sources/{domain}", tags=[_TAG],
-            summary="Officer edit of a credibility row (runtime-editable)")
+            summary="Officer edit of a credibility row (runtime-editable)",
+            dependencies=[_RL_STD])
 async def put_source(
     domain: str,
     body: schemas.SourceUpdate,
@@ -192,7 +207,8 @@ async def put_source(
 
 
 @router.get("/v1/fake-news/related-fact-checks", tags=[_TAG],
-            summary="Search fact-check feeds + Google Fact Check for a query")
+            summary="Search fact-check feeds + Google Fact Check for a query",
+            dependencies=[_RL_HEAVY])
 async def related_fact_checks(q: str) -> dict:
     from app.modules.fake_news import fact_check
 
@@ -204,7 +220,8 @@ async def related_fact_checks(q: str) -> dict:
 
 # ---- history / persistence (Phase 4) ----
 @router.get("/v1/fake-news/analyses/{analysis_id}", tags=[_TAG],
-            summary="Full stored analysis (with claim rows)")
+            summary="Full stored analysis (with claim rows)",
+            dependencies=[_RL_STD])
 async def get_analysis(
     analysis_id: str, x_user_id: str | None = Header(default=None),
 ) -> dict:
@@ -216,7 +233,8 @@ async def get_analysis(
     return {"data": row}
 
 
-@router.get("/v1/fake-news/history", tags=[_TAG], summary="Past checks (paged)")
+@router.get("/v1/fake-news/history", tags=[_TAG], summary="Past checks (paged)",
+            dependencies=[_RL_STD])
 async def history(
     page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100),
     q: str | None = None, verdict: str | None = None,
@@ -231,7 +249,8 @@ async def history(
 
 
 @router.get("/v1/fake-news/history/stats", tags=[_TAG],
-            summary="History KPIs (checks run / fake / real / reported)")
+            summary="History KPIs (checks run / fake / real / reported)",
+            dependencies=[_RL_STD])
 async def history_stats(x_user_id: str | None = Header(default=None)) -> dict:
     from app.modules.fake_news import repo
 
@@ -239,7 +258,8 @@ async def history_stats(x_user_id: str | None = Header(default=None)) -> dict:
 
 
 @router.delete("/v1/fake-news/history/{analysis_id}", tags=[_TAG],
-               summary="Soft-delete an analysis from the requester's history")
+               summary="Soft-delete an analysis from the requester's history",
+               dependencies=[_RL_STD])
 async def delete_history(
     analysis_id: str, x_user_id: str | None = Header(default=None),
 ) -> dict:
@@ -254,7 +274,8 @@ async def delete_history(
 
 # ---- HITL review queue + feedback (Phase 4) ----
 @router.get("/v1/fake-news/review-queue", tags=[_TAG],
-            summary="Low-confidence analyses awaiting human review")
+            summary="Low-confidence analyses awaiting human review",
+            dependencies=[_RL_STD])
 async def review_queue(status: str = "pending") -> dict:
     from app.modules.fake_news import repo
 
@@ -263,7 +284,8 @@ async def review_queue(status: str = "pending") -> dict:
 
 
 @router.post("/v1/fake-news/review/{queue_id}/decide", tags=[_TAG],
-             summary="Resolve a review item (ground-truth for retraining)")
+             summary="Resolve a review item (ground-truth for retraining)",
+             dependencies=[_RL_STD])
 async def review_decide(
     queue_id: str, body: schemas.ReviewDecision,
     x_user_id: str | None = Header(default=None),
@@ -279,7 +301,8 @@ async def review_decide(
 
 
 @router.post("/v1/fake-news/feedback", tags=[_TAG],
-             summary="Direct ground-truth feedback on an analysis")
+             summary="Direct ground-truth feedback on an analysis",
+             dependencies=[_RL_STD])
 async def feedback(
     body: schemas.FeedbackIn, x_user_id: str | None = Header(default=None),
 ) -> dict:
@@ -294,7 +317,8 @@ async def feedback(
 
 
 @router.post("/v1/fake-news/meta/refit", tags=[_TAG],
-             summary="Refit the logistic meta-classifier from feedback")
+             summary="Refit the logistic meta-classifier from feedback",
+             dependencies=[_RL_STD])
 async def meta_refit() -> dict:
     from app.modules.fake_news import repo
 
@@ -302,7 +326,8 @@ async def meta_refit() -> dict:
 
 
 @router.get("/v1/fake-news/meta/status", tags=[_TAG],
-            summary="Latest meta-classifier training status")
+            summary="Latest meta-classifier training status",
+            dependencies=[_RL_STD])
 async def meta_status() -> dict:
     from app.modules.fake_news import repo
 
@@ -312,7 +337,8 @@ async def meta_status() -> dict:
 # ---- CIB / propagation (Phase 6, ingest-fed) ----
 @router.post("/v1/fake-news/propagation/analyze", tags=[_TAG],
              summary="Analyze an uploaded share-graph for coordinated "
-                     "inauthentic behaviour")
+                     "inauthentic behaviour",
+             dependencies=[_RL_HEAVY])
 async def propagation_analyze(
     file: UploadFile = File(...),
     x_user_id: str | None = Header(default=None),
@@ -337,7 +363,8 @@ async def propagation_analyze(
 
 
 @router.get("/v1/fake-news/propagation/runs", tags=[_TAG],
-            summary="Recent propagation/CIB analysis runs")
+            summary="Recent propagation/CIB analysis runs",
+            dependencies=[_RL_STD])
 async def propagation_runs() -> dict:
     from app.modules.fake_news import repo
 
@@ -347,7 +374,8 @@ async def propagation_runs() -> dict:
 
 # ---- concept drift (Phase 7) ----
 @router.get("/v1/fake-news/drift", tags=[_TAG],
-            summary="Concept-drift status (Jensen-Shannon vs reference window)")
+            summary="Concept-drift status (Jensen-Shannon vs reference window)",
+            dependencies=[_RL_STD])
 async def drift_status(recompute: bool = False) -> dict:
     from app.modules.fake_news import drift
 
@@ -358,7 +386,8 @@ async def drift_status(recompute: bool = False) -> dict:
 
 # ---- bulk (Phase 7) ----
 @router.post("/v1/fake-news/bulk", tags=[_TAG], status_code=202,
-             summary="Submit <=50 URLs/texts for async batch analysis")
+             summary="Submit <=50 URLs/texts for async batch analysis",
+             dependencies=[_RL_HEAVY])
 async def bulk(
     body: schemas.BulkIn, x_user_id: str | None = Header(default=None),
     x_user_role: str | None = Header(default=None),
@@ -371,7 +400,8 @@ async def bulk(
 
 
 @router.post("/v1/fake-news/bulk/upload-csv", tags=[_TAG], status_code=202,
-             summary="Submit a CSV (1 URL/text per line) for batch analysis")
+             summary="Submit a CSV (1 URL/text per line) for batch analysis",
+             dependencies=[_RL_HEAVY])
 async def bulk_csv(
     file: UploadFile = File(...), x_user_id: str | None = Header(default=None),
 ) -> dict:
@@ -389,7 +419,8 @@ async def bulk_csv(
 
 
 @router.get("/v1/fake-news/bulk/{batch_id}", tags=[_TAG],
-            summary="Batch status + per-item verdicts")
+            summary="Batch status + per-item verdicts",
+            dependencies=[_RL_STD])
 async def bulk_get(batch_id: str) -> dict:
     res = await run_in_threadpool(service.bulk_status, batch_id)
     if res is None:
@@ -399,7 +430,8 @@ async def bulk_get(batch_id: str) -> dict:
 
 # ---- exports / report / share (Phase 7) ----
 @router.get("/v1/fake-news/analyses/{analysis_id}/report.html", tags=[_TAG],
-            summary="Self-contained HTML analysis report")
+            summary="Self-contained HTML analysis report",
+            dependencies=[_RL_STD])
 async def report_html(
     analysis_id: str, x_user_id: str | None = Header(default=None),
     uid: str | None = Query(default=None),
@@ -419,7 +451,8 @@ async def report_html(
 
 
 @router.get("/v1/fake-news/analyses/{analysis_id}/report.pdf", tags=[_TAG],
-            summary="PDF analysis report")
+            summary="PDF analysis report",
+            dependencies=[_RL_STD])
 async def report_pdf(
     analysis_id: str, x_user_id: str | None = Header(default=None),
     uid: str | None = Query(default=None),
@@ -442,7 +475,8 @@ async def report_pdf(
 
 
 @router.post("/v1/fake-news/analyses/{analysis_id}/report", tags=[_TAG],
-             summary="Refer the analysis to PIB Fact Check (logs + notifies)")
+             summary="Refer the analysis to PIB Fact Check (logs + notifies)",
+             dependencies=[_RL_STD])
 async def report_pib(
     analysis_id: str, x_user_id: str | None = Header(default=None),
 ) -> dict:
@@ -454,7 +488,8 @@ async def report_pib(
 
 
 @router.post("/v1/fake-news/analyses/{analysis_id}/share", tags=[_TAG],
-             summary="Generate a signed read-only share link (7-day TTL)")
+             summary="Generate a signed read-only share link (7-day TTL)",
+             dependencies=[_RL_STD])
 async def share(
     analysis_id: str, x_user_id: str | None = Header(default=None),
 ) -> dict:
@@ -469,7 +504,8 @@ async def share(
 
 
 @router.get("/v1/fake-news/shared/{token}", tags=[_TAG],
-            summary="Resolve a signed share link → read-only analysis")
+            summary="Resolve a signed share link → read-only analysis",
+            dependencies=[_RL_STD])
 async def shared(token: str) -> dict:
     from app.modules.fake_news import repo
 
