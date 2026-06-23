@@ -56,6 +56,55 @@ def list_cameras(gateway: Optional[str] = None, status: Optional[str] = None) ->
     return q.execute().data or []
 
 
+def delete_camera(cam_id: str, actor: str = "rsd") -> Optional[dict[str, Any]]:
+    """Remove a camera from the fleet.
+
+    `tv_incidents.cam_id` REFERENCES tv_cameras(id) with no ON DELETE clause
+    (Postgres default = RESTRICT), so a raw delete is blocked once a camera
+    has incidents. We first unlink those incidents (cam_id -> NULL — the
+    ON DELETE SET NULL the FK should have declared), which preserves every
+    incident's evidence/plate/violation while letting the camera row go.
+    Audited to tv_audit_log. Returns None if the camera doesn't exist.
+
+    No background job re-seeds tv_cameras, so a delete is permanent (the
+    snapshot loop reads the table live and simply stops polling the cam).
+    """
+    sb = get_supabase()
+    existing = (
+        sb.table("tv_cameras").select("*").eq("id", cam_id).limit(1).execute()
+    ).data or []
+    if not existing:
+        return None
+    cam = existing[0]
+
+    unlinked = 0
+    try:
+        res = (
+            sb.table("tv_incidents").update({"cam_id": None})
+            .eq("cam_id", cam_id).execute()
+        )
+        unlinked = len(res.data or [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("Unlinking incidents for camera %s failed: %s", cam_id, e)
+
+    sb.table("tv_cameras").delete().eq("id", cam_id).execute()
+
+    try:
+        sb.table("tv_audit_log").insert({
+            "entity_type": "camera", "entity_id": cam_id,
+            "action": "camera_deleted", "actor": actor,
+            "payload": {"name": cam.get("name"), "gateway": cam.get("gateway"),
+                        "unlinked_incidents": unlinked},
+        }).execute()
+    except Exception:  # noqa: BLE001
+        pass
+
+    log.info("Camera deleted: %s (%s) by %s — unlinked %d incident(s)",
+             cam_id, cam.get("name"), actor, unlinked)
+    return {"deleted": cam_id, "name": cam.get("name"),
+            "unlinked_incidents": unlinked}
+
+
 # ============================================================
 # Header stats (camera_count + detections_today)
 # ============================================================

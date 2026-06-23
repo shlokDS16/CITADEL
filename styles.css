@@ -3133,3 +3133,20 @@ body.dark .tv-timeline-row { background: #0f0f0f; }
 @media (prefers-reduced-motion: reduce) {
   .fn-scan::after { animation: none; width: 50%; }
 }
+
+/* === TRAFFIC — CAMERA DELETE (Live Feed tile control) === */
+.cam-del-btn {
+  position: absolute; top: 6px; right: 6px; z-index: 5;
+  width: 24px; height: 24px; padding: 0; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--red); color: #fff;
+  border: 2px solid #000; box-shadow: 2px 2px 0 #000;
+  font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700;
+  cursor: pointer; opacity: 0.55; transition: opacity 0.12s, transform 0.12s;
+}
+.camera-tile:hover .cam-del-btn { opacity: 1; }
+.cam-del-btn:hover { transform: translate(1px, 1px); box-shadow: 1px 1px 0 #000; }
+.cam-del-btn:focus-visible { opacity: 1; outline: 3px solid var(--cyan); outline-offset: 2px; }
+/* keep the live FPS / fresh badge clear of the ✕ control */
+.cam-overlay-tr { right: 34px; }
+@media (prefers-reduced-motion: reduce) { .cam-del-btn { transition: none; } }

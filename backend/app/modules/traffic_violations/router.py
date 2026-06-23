@@ -30,7 +30,7 @@ import logging
 from typing import Optional
 
 from pathlib import Path
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 
 from app.modules.traffic_violations import schemas, service
@@ -61,6 +61,22 @@ async def list_cameras(
     except Exception as e:
         log.exception("list_cameras failed")
         raise HTTPException(status_code=500, detail=f"Camera list failed: {e}")
+
+
+@router.delete("/traffic-violations/cameras/{cam_id}", tags=["traffic-violations"])
+async def delete_camera(cam_id: str, x_user_id: Optional[str] = Header(default=None)):
+    """Remove a camera from the fleet (e.g. a Singapore feed cam that went
+    dark). Incidents are unlinked, not destroyed; audited to tv_audit_log."""
+    try:
+        res = service.delete_camera(cam_id, actor=(x_user_id or "rsd"))
+        if res is None:
+            raise HTTPException(status_code=404, detail="Camera not found")
+        return {"data": res}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("delete_camera failed")
+        raise HTTPException(status_code=500, detail=f"Delete camera failed: {e}")
 
 
 @router.get("/traffic-violations/header-stats", response_model=schemas.HeaderStats, tags=["traffic-violations"])

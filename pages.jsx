@@ -3216,7 +3216,7 @@ function tvLoadTracks(loop_id, tracks_url) {
   return p;
 }
 
-const CameraTile = ({ cam, index, snapshot, detections, violationLabels = [] }) => {
+const CameraTile = ({ cam, index, snapshot, detections, violationLabels = [], onDelete }) => {
   const videoRef = React.useRef(null);
   const hlsRef = React.useRef(null);
   const [playing, setPlaying] = React.useState(false);
@@ -3340,6 +3340,14 @@ const CameraTile = ({ cam, index, snapshot, detections, violationLabels = [] }) 
   return (
     <div className="camera-tile" style={{ animationDelay: `${index * 0.04}s` }}>
       <div className="cam-feed">
+        {onDelete && (
+          <button
+            className="cam-del-btn"
+            title={`Remove camera ${cam.name || cam.id}`}
+            aria-label={`Remove camera ${cam.name || cam.id}`}
+            onClick={(e) => { e.stopPropagation(); onDelete(cam); }}
+          >✕</button>
+        )}
         {hasLoop ? (
           <>
             <video
@@ -3539,10 +3547,25 @@ const TrafficLive = ({ navHint }) => {
   const [liveLabels, setLiveLabels] = React.useState({});
   const [liveIncidentsRecent, setLiveIncidentsRecent] = React.useState([]);
 
-  React.useEffect(() => {
+  const loadCameras = React.useCallback(() => {
     apiFetch('/api/traffic-violations/cameras', TRAFFIC_AUTH)
       .then(d => setCameras(d.cameras || []))
       .catch(() => setCameras([]));
+  }, []);
+
+  const deleteCam = React.useCallback((cam) => {
+    if (!window.confirm(
+      `Remove camera "${cam.name || cam.id}" from the fleet?\n\n` +
+      `Past incidents are kept (unlinked from this camera). This can't be undone here.`
+    )) return;
+    apiFetch(`/api/traffic-violations/cameras/${encodeURIComponent(cam.id)}`,
+      { ...TRAFFIC_AUTH, method: 'DELETE' })
+      .then(() => loadCameras())
+      .catch((e) => window.alert(`Could not remove camera: ${e.message || 'failed'}`));
+  }, [loadCameras]);
+
+  React.useEffect(() => {
+    loadCameras();
     apiFetch('/api/traffic-violations/incidents', { ...TRAFFIC_AUTH, params: { limit: 20 } })
       .then(d => setRecent(d.incidents || []))
       .catch(() => setRecent([]));
@@ -3630,6 +3653,7 @@ const TrafficLive = ({ navHint }) => {
             snapshot={snapshots[c.id]}
             detections={detections[c.id]}
             violationLabels={liveLabels[c.id] || []}
+            onDelete={deleteCam}
           />
         ))}
           </div>
