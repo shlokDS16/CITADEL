@@ -381,14 +381,17 @@ def offender_timeline(plate: str) -> dict[str, Any]:
     if inc_ids or ch_ids:
         try:
             ent_ids = inc_ids + ch_ids
+            # tv_audit_log's timestamp column is `ts`, not `created_at`.
+            # Alias it so downstream event shaping keeps its `created_at` key.
             audit = (
                 sb.table("tv_audit_log")
-                .select("*")
+                .select("*, created_at:ts")
                 .in_("entity_id", ent_ids)
-                .order("created_at", desc=False)
+                .order("ts", desc=False)
                 .execute()
             ).data or []
         except Exception:
+            log.exception("offender_timeline: tv_audit_log lookup failed")
             audit = []
 
     driver_row = _driver_for(plate)
@@ -764,12 +767,13 @@ def analytics_full(days: int = 30) -> dict[str, Any]:
     try:
         recent_audit = (
             sb.table("tv_audit_log")
-            .select("entity_type, entity_id, action, actor, created_at")
-            .order("created_at", desc=True)
+            .select("entity_type, entity_id, action, actor, created_at:ts")
+            .order("ts", desc=True)
             .limit(12)
             .execute()
         ).data or []
     except Exception:
+        log.exception("analytics: recent_audit lookup failed")
         recent_audit = []
 
     return {
