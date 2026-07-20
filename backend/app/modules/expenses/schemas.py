@@ -148,6 +148,47 @@ class ExpenseListOut(BaseModel):
 
 
 # --------------------------------------------------------------------------
+# Reports
+# --------------------------------------------------------------------------
+class FySummaryOut(BaseModel):
+    fy: str = Field(..., examples=["FY27"])
+    fy_start: date
+    total_spend_inr: float
+    tax_deductible_inr: float
+    txn_count: int
+    top_category: Optional[str] = None
+    avg_monthly_inr: float
+    savings_pct: Optional[float] = Field(
+        default=None,
+        description="Requires income data the platform does not hold — always null in v1.",
+    )
+    net_worth_delta_inr: Optional[float] = Field(
+        default=None,
+        description="Requires assets/income data — always null in v1. The UI shows '—'.",
+    )
+
+
+class MonthPointOut(BaseModel):
+    month: str = Field(..., examples=["2026-04"])
+    label: str = Field(..., examples=["APR"])
+    total_inr: float
+
+
+class TaxSummaryOut(BaseModel):
+    fy: str
+    section_80c_inr: float
+    section_80d_inr: float
+    business_inr: float
+    hra_inr: float
+    other_deductible_inr: float = Field(
+        ..., description="tax_deductible=true rows with no section tagged."
+    )
+    total_deductible_inr: float
+    breakdown_by_month: dict[str, float] = Field(default_factory=dict)
+    note: str
+
+
+# --------------------------------------------------------------------------
 # Imports
 # --------------------------------------------------------------------------
 class ImportRowOut(BaseModel):

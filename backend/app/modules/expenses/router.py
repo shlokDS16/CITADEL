@@ -496,6 +496,72 @@ async def delete_budget(budget_id: str, citizen: str = Depends(_citizen)) -> Non
         raise HTTPException(status_code=404, detail=str(le))
 
 
+# ---- reports ----
+@router.get(
+    "/v1/expenses/reports/fy-summary",
+    response_model=schemas.FySummaryOut,
+    tags=[_TAG],
+    dependencies=[_RL_STD],
+    summary="FY spend + tax figures (savings/net-worth honestly null — no income data)",
+)
+async def fy_summary(citizen: str = Depends(_citizen)) -> schemas.FySummaryOut:
+    return schemas.FySummaryOut(**await run_in_threadpool(service.fy_summary, citizen))
+
+
+@router.get(
+    "/v1/expenses/reports/monthly-trend",
+    response_model=list[schemas.MonthPointOut],
+    tags=[_TAG],
+    dependencies=[_RL_STD],
+    summary="Spend per month, last 12 months",
+)
+async def monthly_trend(citizen: str = Depends(_citizen)) -> list[schemas.MonthPointOut]:
+    rows = await run_in_threadpool(service.monthly_trend, citizen)
+    return [schemas.MonthPointOut(**r) for r in rows]
+
+
+@router.get(
+    "/v1/expenses/reports/tax-summary",
+    response_model=schemas.TaxSummaryOut,
+    tags=[_TAG],
+    dependencies=[_RL_STD],
+    summary="80C/80D/business/HRA breakdown from tax-tagged expenses",
+)
+async def tax_summary(citizen: str = Depends(_citizen)) -> schemas.TaxSummaryOut:
+    return schemas.TaxSummaryOut(**await run_in_threadpool(service.tax_summary, citizen))
+
+
+@router.get(
+    "/v1/expenses/reports/export",
+    tags=[_TAG],
+    dependencies=[Depends(rate_limit("expenses:export", 5, 60))],
+    summary="Download FY export — format=csv|xlsx|tax_package (sync, spec's async job dropped: a citizen-FY builds in <1s)",
+)
+async def export_report(
+    format: str = Query(default="csv", pattern="^(csv|xlsx|tax_package)$"),
+    citizen: str = Depends(_citizen),
+):
+    from fastapi.responses import Response
+
+    builders = {
+        "csv": (service.export_csv, "text/csv; charset=utf-8"),
+        "xlsx": (service.export_xlsx,
+                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        "tax_package": (service.export_tax_package, "application/zip"),
+    }
+    fn, media = builders[format]
+    try:
+        content, filename = await run_in_threadpool(fn, citizen)
+    except Exception as e:  # noqa: BLE001
+        log.exception("export failed")
+        raise HTTPException(status_code=500, detail=str(e))
+    return Response(
+        content=content,
+        media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 # ---- list / detail / edit / delete ----
 @router.get(
     "/v1/expenses",

@@ -759,6 +759,191 @@ def delete_budget(citizen_id: str, budget_id: str) -> None:
 
 
 # --------------------------------------------------------------------------
+# Reports
+# --------------------------------------------------------------------------
+def _fy_bounds(today: Optional[date] = None) -> tuple[date, date, str]:
+    t = today or date.today()
+    start = date(t.year if t.month >= 4 else t.year - 1, 4, 1)
+    return start, t, f"FY{(start.year + 1) % 100}"
+
+
+def fy_summary(citizen_id: str) -> dict[str, Any]:
+    """FY spend + tax figures from real rows. savings_pct and
+    net_worth_delta stay null — they need income/asset data the platform
+    does not hold, and the mock's 22% / +₹18k were fiction."""
+    start, today, fy = _fy_bounds()
+    rows = repo.expenses_between(citizen_id, start, today)
+    total = sum(int(r["amount_paise"]) for r in rows)
+    deductible = sum(int(r["amount_paise"]) for r in rows if r.get("tax_deductible"))
+    months = max(1, (today.year - start.year) * 12 + today.month - start.month + 1)
+    by_cat: dict[str, int] = {}
+    for r in rows:
+        by_cat[r.get("category") or "Other"] = by_cat.get(r.get("category") or "Other", 0) + int(r["amount_paise"])
+    top = max(by_cat.items(), key=lambda kv: kv[1])[0] if by_cat else None
+    return {
+        "fy": fy,
+        "fy_start": start,
+        "total_spend_inr": _inr(total),
+        "tax_deductible_inr": _inr(deductible),
+        "txn_count": len(rows),
+        "top_category": top,
+        "avg_monthly_inr": _inr(total / months),
+        "savings_pct": None,
+        "net_worth_delta_inr": None,
+    }
+
+
+def monthly_trend(citizen_id: str, months: int = 12) -> list[dict[str, Any]]:
+    today = date.today()
+    # first day of the window month
+    y, m = today.year, today.month - (months - 1)
+    while m <= 0:
+        m += 12
+        y -= 1
+    start = date(y, m, 1)
+    rows = repo.expenses_between(citizen_id, start, today)
+    per_month: dict[str, int] = {}
+    for r in rows:
+        key = str(r["spent_at"])[:7]
+        per_month[key] = per_month.get(key, 0) + int(r["amount_paise"])
+    out = []
+    yy, mm = y, m
+    for _ in range(months):
+        key = f"{yy:04d}-{mm:02d}"
+        out.append({
+            "month": key,
+            "label": date(yy, mm, 1).strftime("%b").upper(),
+            "total_inr": _inr(per_month.get(key, 0)),
+        })
+        mm += 1
+        if mm > 12:
+            mm = 1
+            yy += 1
+    return out
+
+
+def tax_summary(citizen_id: str) -> dict[str, Any]:
+    start, today, fy = _fy_bounds()
+    rows = repo.expenses_between(citizen_id, start, today)
+    buckets = {"80C": 0, "80D": 0, "BUSINESS": 0, "HRA": 0, "OTHER": 0}
+    by_month: dict[str, int] = {}
+    for r in rows:
+        if not r.get("tax_deductible"):
+            continue
+        amt = int(r["amount_paise"])
+        sec = (r.get("tax_section") or "").upper()
+        buckets[sec if sec in ("80C", "80D", "BUSINESS", "HRA") else "OTHER"] += amt
+        mk = str(r["spent_at"])[:7]
+        by_month[mk] = by_month.get(mk, 0) + amt
+    total = sum(buckets.values())
+    return {
+        "fy": fy,
+        "section_80c_inr": _inr(buckets["80C"]),
+        "section_80d_inr": _inr(buckets["80D"]),
+        "business_inr": _inr(buckets["BUSINESS"]),
+        "hra_inr": _inr(buckets["HRA"]),
+        "other_deductible_inr": _inr(buckets["OTHER"]),
+        "total_deductible_inr": _inr(total),
+        "breakdown_by_month": {k: _inr(v) for k, v in sorted(by_month.items())},
+        "note": (
+            "Computed from expenses you marked tax-deductible with their "
+            "section. This is a working summary, not tax advice — verify "
+            "against receipts before ITR filing."
+        ),
+    }
+
+
+_EXPORT_COLUMNS = (
+    "spent_at", "description", "merchant", "category", "amount_inr",
+    "tax_deductible", "tax_section", "is_anomaly", "source", "notes",
+)
+
+
+def _export_rows(citizen_id: str) -> list[dict[str, Any]]:
+    start, today, _ = _fy_bounds()
+    rows = repo.expenses_between(citizen_id, start, today)
+    rows.sort(key=lambda r: str(r.get("spent_at")))
+    return [
+        {
+            "spent_at": str(r.get("spent_at"))[:10],
+            "description": r.get("description") or "",
+            "merchant": r.get("merchant") or "",
+            "category": r.get("category") or "",
+            "amount_inr": _inr(r.get("amount_paise")),
+            "tax_deductible": bool(r.get("tax_deductible")),
+            "tax_section": r.get("tax_section") or "",
+            "is_anomaly": bool(r.get("is_anomaly")),
+            "source": r.get("source") or "",
+            "notes": r.get("notes") or "",
+        }
+        for r in rows
+    ]
+
+
+def export_csv(citizen_id: str) -> tuple[bytes, str]:
+    import csv as _csv
+    import io as _io
+
+    rows = _export_rows(citizen_id)
+    buf = _io.StringIO()
+    w = _csv.DictWriter(buf, fieldnames=_EXPORT_COLUMNS)
+    w.writeheader()
+    w.writerows(rows)
+    _, _, fy = _fy_bounds()
+    return buf.getvalue().encode("utf-8-sig"), f"citadel-expenses-{fy}.csv"
+
+
+def export_xlsx(citizen_id: str) -> tuple[bytes, str]:
+    import io as _io
+
+    from openpyxl import Workbook
+
+    rows = _export_rows(citizen_id)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Expenses"
+    ws.append([c for c in _EXPORT_COLUMNS])
+    for r in rows:
+        ws.append([r[c] for c in _EXPORT_COLUMNS])
+    ts = tax_summary(citizen_id)
+    ws2 = wb.create_sheet("Tax Summary")
+    for label, key in (("Section 80C", "section_80c_inr"), ("Section 80D", "section_80d_inr"),
+                       ("Business", "business_inr"), ("HRA", "hra_inr"),
+                       ("Other deductible", "other_deductible_inr"),
+                       ("TOTAL DEDUCTIBLE", "total_deductible_inr")):
+        ws2.append([label, ts[key]])
+    buf = _io.BytesIO()
+    wb.save(buf)
+    _, _, fy = _fy_bounds()
+    return buf.getvalue(), f"citadel-expenses-{fy}.xlsx"
+
+
+def export_tax_package(citizen_id: str) -> tuple[bytes, str]:
+    """ZIP: full CSV + tax summary JSON + deductible-only CSV — the bundle
+    a citizen hands their CA before ITR filing."""
+    import io as _io
+    import json as _json
+    import zipfile
+
+    csv_bytes, csv_name = export_csv(citizen_id)
+    ts = tax_summary(citizen_id)
+    deductible = [r for r in _export_rows(citizen_id) if r["tax_deductible"]]
+
+    import csv as _csv
+    dbuf = _io.StringIO()
+    w = _csv.DictWriter(dbuf, fieldnames=_EXPORT_COLUMNS)
+    w.writeheader()
+    w.writerows(deductible)
+
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(csv_name, csv_bytes)
+        z.writestr(f"tax-summary-{ts['fy']}.json", _json.dumps(ts, indent=2, default=str))
+        z.writestr(f"deductible-only-{ts['fy']}.csv", dbuf.getvalue().encode("utf-8-sig"))
+    return buf.getvalue(), f"citadel-tax-package-{ts['fy']}.zip"
+
+
+# --------------------------------------------------------------------------
 # Health
 # --------------------------------------------------------------------------
 def health() -> dict[str, Any]:
