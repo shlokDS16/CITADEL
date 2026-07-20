@@ -302,6 +302,118 @@ def dashboard_anomalies(citizen_id: str, limit: int = 20) -> list[dict[str, Any]
 
 
 # --------------------------------------------------------------------------
+# Budgets
+# --------------------------------------------------------------------------
+def _period_bounds(period: str, today: Optional[date] = None) -> tuple[date, date, str]:
+    """(start, end, label) of the CURRENT period. Spend against a budget is
+    always computed live from expenses inside these bounds — there is no
+    stored spent counter to drift."""
+    t = today or date.today()
+    if period == "weekly":
+        start = t - timedelta(days=t.weekday())
+        return start, t, f"WEEK OF {start.strftime('%d %b').upper()}"
+    if period == "yearly":
+        # Indian financial year: 1 April – 31 March
+        fy_start = date(t.year if t.month >= 4 else t.year - 1, 4, 1)
+        return fy_start, t, f"FY{(fy_start.year + 1) % 100}"
+    start = t.replace(day=1)
+    return start, t, t.strftime("%B %Y").upper()
+
+
+def _shape_budget(row: dict[str, Any], spent_paise: int) -> dict[str, Any]:
+    amount_paise = int(row.get("amount_paise") or 1)
+    pct = round(spent_paise * 100.0 / amount_paise, 1)
+    threshold = int(row.get("alert_threshold_pct") or 80)
+    status = "over" if pct > 100 else ("near" if pct >= threshold else "under")
+    _, _, label = _period_bounds(row.get("period") or "monthly")
+    return {
+        "id": str(row.get("id")),
+        "category": row.get("category"),
+        "amount_inr": _inr(amount_paise),
+        "period": row.get("period") or "monthly",
+        "spent_inr": _inr(spent_paise),
+        "pct_used": pct,
+        "status": status,
+        "alert_threshold_pct": threshold,
+        "remaining_inr": _inr(amount_paise - spent_paise),
+        "period_label": label,
+        "created_at": row.get("created_at"),
+    }
+
+
+def list_budgets(citizen_id: str) -> list[dict[str, Any]]:
+    rows = repo.list_budgets(citizen_id)
+    if not rows:
+        return []
+    # one expenses fetch covers every budget's window (widest wins)
+    starts = [_period_bounds(r.get("period") or "monthly")[0] for r in rows]
+    window_start = min(starts)
+    expenses = repo.expenses_between(citizen_id, window_start, date.today())
+    out = []
+    for r in rows:
+        start, end, _ = _period_bounds(r.get("period") or "monthly")
+        spent = sum(
+            int(e["amount_paise"]) for e in expenses
+            if e.get("category") == r.get("category")
+            and start.isoformat() <= str(e["spent_at"])[:10] <= end.isoformat()
+        )
+        out.append(_shape_budget(r, spent))
+    return out
+
+
+def create_budget(citizen_id: str, payload: schemas.BudgetCreateIn) -> dict[str, Any]:
+    cat = schemas.normalize_expense_category(payload.category)
+    if cat is None:
+        raise ValueError(f"unknown category {payload.category!r}")
+    try:
+        row = repo.insert_budget({
+            "citizen_id": citizen_id,
+            "category": cat,
+            "amount_paise": _paise(payload.amount_inr),
+            "period": payload.period,
+            "alert_threshold_pct": payload.alert_threshold_pct,
+        })
+    except Exception as e:
+        if "23505" in str(e) or "duplicate key" in str(e).lower():
+            raise ValueError(
+                f"an active {payload.period} budget for {cat} already exists — edit it instead"
+            ) from e
+        raise
+    return list_budget_one(citizen_id, row)
+
+
+def list_budget_one(citizen_id: str, row: dict[str, Any]) -> dict[str, Any]:
+    start, end, _ = _period_bounds(row.get("period") or "monthly")
+    expenses = repo.expenses_between(citizen_id, start, end)
+    spent = sum(
+        int(e["amount_paise"]) for e in expenses
+        if e.get("category") == row.get("category")
+    )
+    return _shape_budget(row, spent)
+
+
+def update_budget(citizen_id: str, budget_id: str, payload: schemas.BudgetUpdateIn) -> dict[str, Any]:
+    patch: dict[str, Any] = {}
+    if payload.amount_inr is not None:
+        patch["amount_paise"] = _paise(payload.amount_inr)
+    if payload.period is not None:
+        patch["period"] = payload.period
+    if payload.alert_threshold_pct is not None:
+        patch["alert_threshold_pct"] = payload.alert_threshold_pct
+    if not patch:
+        raise ValueError("nothing to update")
+    row = repo.update_budget(citizen_id, budget_id, patch)
+    if row is None:
+        raise LookupError(f"budget {budget_id} not found")
+    return list_budget_one(citizen_id, row)
+
+
+def delete_budget(citizen_id: str, budget_id: str) -> None:
+    if not repo.deactivate_budget(citizen_id, budget_id):
+        raise LookupError(f"budget {budget_id} not found")
+
+
+# --------------------------------------------------------------------------
 # Health
 # --------------------------------------------------------------------------
 def health() -> dict[str, Any]:

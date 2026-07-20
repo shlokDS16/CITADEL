@@ -162,6 +162,75 @@ async def dashboard_anomalies(citizen: str = Depends(_citizen)) -> list[schemas.
     return [schemas.ExpenseOut(**r) for r in rows]
 
 
+# ---- budgets ----
+@router.get(
+    "/v1/expenses/budgets",
+    response_model=list[schemas.BudgetOut],
+    tags=[_TAG],
+    dependencies=[_RL_STD],
+    summary="Budgets with live spent/pct/status for the current period",
+)
+async def list_budgets(citizen: str = Depends(_citizen)) -> list[schemas.BudgetOut]:
+    rows = await run_in_threadpool(service.list_budgets, citizen)
+    return [schemas.BudgetOut(**r) for r in rows]
+
+
+@router.post(
+    "/v1/expenses/budgets",
+    response_model=schemas.BudgetOut,
+    status_code=201,
+    tags=[_TAG],
+    dependencies=[_RL_STD],
+    summary="Create a per-category budget",
+)
+async def create_budget(
+    payload: schemas.BudgetCreateIn, citizen: str = Depends(_citizen),
+) -> schemas.BudgetOut:
+    try:
+        return schemas.BudgetOut(**await run_in_threadpool(service.create_budget, citizen, payload))
+    except ValueError as ve:
+        # duplicate active budget is a state conflict, not bad syntax
+        code = 409 if "already exists" in str(ve) else 400
+        raise HTTPException(status_code=code, detail=str(ve))
+    except Exception as e:  # noqa: BLE001
+        log.exception("create budget failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch(
+    "/v1/expenses/budgets/{budget_id}",
+    response_model=schemas.BudgetOut,
+    tags=[_TAG],
+    dependencies=[_RL_STD],
+    summary="Update amount / period / alert threshold",
+)
+async def update_budget(
+    budget_id: str, payload: schemas.BudgetUpdateIn, citizen: str = Depends(_citizen),
+) -> schemas.BudgetOut:
+    try:
+        return schemas.BudgetOut(
+            **await run_in_threadpool(service.update_budget, citizen, budget_id, payload)
+        )
+    except LookupError as le:
+        raise HTTPException(status_code=404, detail=str(le))
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+
+
+@router.delete(
+    "/v1/expenses/budgets/{budget_id}",
+    status_code=204,
+    tags=[_TAG],
+    dependencies=[_RL_STD],
+    summary="Deactivate a budget (frees the category slot, keeps history)",
+)
+async def delete_budget(budget_id: str, citizen: str = Depends(_citizen)) -> None:
+    try:
+        await run_in_threadpool(service.delete_budget, citizen, budget_id)
+    except LookupError as le:
+        raise HTTPException(status_code=404, detail=str(le))
+
+
 # ---- list / detail / edit / delete ----
 @router.get(
     "/v1/expenses",

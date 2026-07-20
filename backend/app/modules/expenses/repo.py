@@ -211,6 +211,60 @@ def expenses_between(
         return []
 
 
+# --------------------------------------------------------------------------
+# Budgets
+# --------------------------------------------------------------------------
+def list_budgets(citizen_id: str) -> list[dict[str, Any]]:
+    sb = _sb()
+    if sb is None:
+        return []
+    try:
+        return (
+            sb.table("budgets").select("*")
+            .eq("citizen_id", citizen_id).eq("active", True)
+            .order("created_at").execute()
+        ).data or []
+    except Exception as e:  # noqa: BLE001
+        log.debug("list_budgets failed: %s", e)
+        return []
+
+
+def insert_budget(row: dict[str, Any]) -> dict[str, Any]:
+    sb = _sb()
+    if sb is None:
+        raise RuntimeError("Supabase unavailable — cannot create budget")
+    res = sb.table("budgets").insert(row).execute()
+    data = res.data or []
+    if not data:
+        raise RuntimeError("budget insert returned no row")
+    return data[0]
+
+
+def update_budget(citizen_id: str, budget_id: str, patch: dict[str, Any]) -> Optional[dict[str, Any]]:
+    sb = _sb()
+    if sb is None:
+        raise RuntimeError("Supabase unavailable — cannot update budget")
+    res = (
+        sb.table("budgets").update(patch)
+        .eq("id", budget_id).eq("citizen_id", citizen_id).execute()
+    )
+    data = res.data or []
+    return data[0] if data else None
+
+
+def deactivate_budget(citizen_id: str, budget_id: str) -> bool:
+    """Soft-remove: active=false keeps the unique-per-category slot free
+    for a future budget while preserving history."""
+    sb = _sb()
+    if sb is None:
+        raise RuntimeError("Supabase unavailable — cannot remove budget")
+    res = (
+        sb.table("budgets").update({"active": False})
+        .eq("id", budget_id).eq("citizen_id", citizen_id).eq("active", True).execute()
+    )
+    return bool(res.data)
+
+
 def cache_stats() -> dict[str, Any]:
     sb = _sb()
     if sb is None:

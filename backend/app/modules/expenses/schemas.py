@@ -148,6 +148,39 @@ class ExpenseListOut(BaseModel):
 
 
 # --------------------------------------------------------------------------
+# Budgets
+# --------------------------------------------------------------------------
+BudgetPeriod = Literal["monthly", "weekly", "yearly"]
+
+
+class BudgetCreateIn(BaseModel):
+    category: str
+    amount_inr: float = Field(..., gt=0)
+    period: BudgetPeriod = "monthly"
+    alert_threshold_pct: int = Field(default=80, ge=1, le=100)
+
+
+class BudgetUpdateIn(BaseModel):
+    amount_inr: Optional[float] = Field(default=None, gt=0)
+    period: Optional[BudgetPeriod] = None
+    alert_threshold_pct: Optional[int] = Field(default=None, ge=1, le=100)
+
+
+class BudgetOut(BaseModel):
+    id: str
+    category: Category
+    amount_inr: float
+    period: BudgetPeriod
+    spent_inr: float = Field(..., description="Spend in the CURRENT period, computed live.")
+    pct_used: float
+    status: Literal["under", "near", "over"]
+    alert_threshold_pct: int
+    remaining_inr: float = Field(..., description="Negative when over budget.")
+    period_label: str = Field(..., examples=["JULY 2026"])
+    created_at: datetime
+
+
+# --------------------------------------------------------------------------
 # Dashboard
 # --------------------------------------------------------------------------
 class DashboardKpisOut(BaseModel):
