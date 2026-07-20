@@ -26,6 +26,10 @@ from app.modules.anomaly_monitoring import router as anomaly_router
 from app.modules.citizen_assistant import router as citizen_router
 from app.modules.fake_news import router as fake_news_router
 from app.modules.tickets import router as tickets_router
+# NOTE: expenses/__init__ lazy-exports via PEP-562 __getattr__, but the
+# from-import machinery binds the SUBMODULE named `router` onto the package
+# first, shadowing it — so import the APIRouter explicitly.
+from app.modules.expenses.router import router as expenses_router
 
 # ---- logging ----
 logging.basicConfig(
@@ -124,6 +128,7 @@ app.include_router(anomaly_router,   prefix="/api", tags=["anomaly-monitoring"])
 app.include_router(citizen_router,   prefix="/api", tags=["citizen-assistant"])
 app.include_router(fake_news_router, prefix="/api", tags=["fake-news"])
 app.include_router(tickets_router,   prefix="/api", tags=["support-tickets"])
+app.include_router(expenses_router,  prefix="/api", tags=["expenses"])
 
 
 # ---- root: friendly landing JSON so visiting `/` doesn't 404 ----
