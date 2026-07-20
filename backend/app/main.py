@@ -25,6 +25,7 @@ from app.modules.traffic_violations import router as traffic_router
 from app.modules.anomaly_monitoring import router as anomaly_router
 from app.modules.citizen_assistant import router as citizen_router
 from app.modules.fake_news import router as fake_news_router
+from app.modules.tickets import router as tickets_router
 
 # ---- logging ----
 logging.basicConfig(
@@ -104,6 +105,10 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
+    # Hosted frontend (Vercel) → this backend (often via an ngrok tunnel):
+    # allow any *.vercel.app origin so preview + production deploy URLs work
+    # without re-listing each one. Scoped to vercel.app, not a wildcard.
+    allow_origin_regex=r"https://[a-z0-9-]+\.vercel\.app",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -118,6 +123,7 @@ app.include_router(traffic_router,   prefix="/api", tags=["traffic-violations"])
 app.include_router(anomaly_router,   prefix="/api", tags=["anomaly-monitoring"])
 app.include_router(citizen_router,   prefix="/api", tags=["citizen-assistant"])
 app.include_router(fake_news_router, prefix="/api", tags=["fake-news"])
+app.include_router(tickets_router,   prefix="/api", tags=["support-tickets"])
 
 
 # ---- root: friendly landing JSON so visiting `/` doesn't 404 ----
