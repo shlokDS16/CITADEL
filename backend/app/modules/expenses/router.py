@@ -162,11 +162,9 @@ async def dashboard_anomalies(citizen: str = Depends(_citizen)) -> list[schemas.
     return [schemas.ExpenseOut(**r) for r in rows]
 
 
-# ---- receipts ----
-_RECEIPT_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
-
-
 def _max_body(content_length: Optional[str] = Header(default=None)) -> None:
+    """Reject oversized uploads from Content-Length before Starlette
+    spools the body. Shared by imports + receipts."""
     if content_length is None:
         return
     try:
@@ -177,6 +175,112 @@ def _max_body(content_length: Optional[str] = Header(default=None)) -> None:
 
     if n > settings.max_upload_bytes:
         raise HTTPException(status_code=413, detail="upload exceeds size limit")
+
+
+# ---- imports (bank statements) ----
+@router.post(
+    "/v1/expenses/imports/csv",
+    response_model=schemas.ImportBatchOut,
+    status_code=201,
+    tags=[_TAG],
+    summary="Upload a bank/card CSV — parsed, classified, duplicate-flagged",
+    dependencies=[Depends(rate_limit("expenses:import", 5, 60)), Depends(_max_body)],
+)
+async def import_csv(
+    file: UploadFile = File(...),
+    citizen: str = Depends(_citizen),
+) -> schemas.ImportBatchOut:
+    name = file.filename or "statement.csv"
+    if not name.lower().endswith(".csv"):
+        raise HTTPException(status_code=415, detail="expected a .csv file")
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="empty file")
+    try:
+        row = await run_in_threadpool(service.create_import, citizen, content, name, "bank_csv")
+        return schemas.ImportBatchOut(**row)
+    except ValueError as ve:
+        raise HTTPException(status_code=422, detail=str(ve))
+    except Exception as e:  # noqa: BLE001
+        log.exception("csv import failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/v1/expenses/imports/pdf",
+    response_model=schemas.ImportBatchOut,
+    status_code=201,
+    tags=[_TAG],
+    summary="Upload a bank PDF statement (text layer required — scans refused)",
+    dependencies=[Depends(rate_limit("expenses:import", 5, 60)), Depends(_max_body)],
+)
+async def import_pdf(
+    file: UploadFile = File(...),
+    citizen: str = Depends(_citizen),
+) -> schemas.ImportBatchOut:
+    from app.shared.filetype import assert_upload_kind
+
+    name = file.filename or "statement.pdf"
+    if not name.lower().endswith(".pdf"):
+        raise HTTPException(status_code=415, detail="expected a .pdf file")
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="empty file")
+    assert_upload_kind(name, content, {"pdf"})
+    try:
+        row = await run_in_threadpool(service.create_import, citizen, content, name, "bank_pdf")
+        return schemas.ImportBatchOut(**row)
+    except ValueError as ve:
+        raise HTTPException(status_code=422, detail=str(ve))
+    except Exception as e:  # noqa: BLE001
+        log.exception("pdf import failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/v1/expenses/imports/{batch_id}",
+    response_model=schemas.ImportBatchOut,
+    tags=[_TAG],
+    dependencies=[_RL_STD],
+    summary="Import batch status + per-row classification and duplicate flags",
+)
+async def get_import(batch_id: str, citizen: str = Depends(_citizen)) -> schemas.ImportBatchOut:
+    row = await run_in_threadpool(service.get_import, citizen, batch_id)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"import batch {batch_id} not found")
+    return schemas.ImportBatchOut(**row)
+
+
+@router.post(
+    "/v1/expenses/imports/{batch_id}/confirm",
+    response_model=schemas.ImportConfirmOut,
+    tags=[_TAG],
+    dependencies=[_RL_STD],
+    summary="Commit selected rows to expenses (duplicates skipped unless opted in)",
+)
+async def confirm_import(
+    batch_id: str,
+    payload: schemas.ImportConfirmIn,
+    citizen: str = Depends(_citizen),
+) -> schemas.ImportConfirmOut:
+    try:
+        result = await run_in_threadpool(service.confirm_import, citizen, batch_id, payload)
+        return schemas.ImportConfirmOut(
+            batch=schemas.ImportBatchOut(**result["batch"]),
+            committed=result["committed"],
+            skipped_duplicates=result["skipped_duplicates"],
+        )
+    except LookupError as le:
+        raise HTTPException(status_code=404, detail=str(le))
+    except ValueError as ve:
+        raise HTTPException(status_code=409, detail=str(ve))
+    except Exception as e:  # noqa: BLE001
+        log.exception("confirm import failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---- receipts ----
+_RECEIPT_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
 
 
 @router.post(

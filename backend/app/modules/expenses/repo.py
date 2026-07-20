@@ -166,6 +166,25 @@ def category_history_paise(
         return []
 
 
+def all_recent_expenses(citizen_id: str, days: int = 90) -> list[dict[str, Any]]:
+    """id/merchant/description/amount/date of recent expenses — the
+    duplicate-detection index for imports."""
+    sb = _sb()
+    if sb is None:
+        return []
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+        return (
+            sb.table("expenses")
+            .select("id, merchant, description, amount_paise, spent_at")
+            .eq("citizen_id", citizen_id).is_("deleted_at", "null")
+            .gte("spent_at", cutoff).limit(1000).execute()
+        ).data or []
+    except Exception as e:  # noqa: BLE001
+        log.debug("all_recent_expenses failed: %s", e)
+        return []
+
+
 def all_history_paise(
     citizen_id: str, days: int = 90, exclude_id: Optional[str] = None,
 ) -> list[int]:
@@ -209,6 +228,102 @@ def expenses_between(
     except Exception as e:  # noqa: BLE001
         log.debug("expenses_between failed: %s", e)
         return []
+
+
+# --------------------------------------------------------------------------
+# Import batches
+# --------------------------------------------------------------------------
+def insert_batch(row: dict[str, Any]) -> dict[str, Any]:
+    sb = _sb()
+    if sb is None:
+        raise RuntimeError("Supabase unavailable — cannot create import batch")
+    res = sb.table("import_batches").insert(row).execute()
+    data = res.data or []
+    if not data:
+        raise RuntimeError("batch insert returned no row")
+    return data[0]
+
+
+def insert_batch_rows(batch_id: str, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    sb = _sb()
+    if sb is None:
+        raise RuntimeError("Supabase unavailable — cannot store import rows")
+    payload = []
+    for r in rows:
+        payload.append({
+            "batch_id": batch_id,
+            "raw": r.get("raw") or {},
+            "parsed_description": r.get("parsed_description"),
+            "parsed_merchant": r.get("parsed_merchant"),
+            "parsed_amount_paise": r.get("parsed_amount_paise"),
+            "parsed_date": r["parsed_date"].isoformat() if r.get("parsed_date") else None,
+            "predicted_category": r.get("predicted_category"),
+            "predicted_confidence": r.get("predicted_confidence"),
+            "is_duplicate_of": r.get("is_duplicate_of"),
+            "selected_for_commit": r.get("is_duplicate_of") is None,
+        })
+    # chunk inserts to keep request bodies sane
+    for i in range(0, len(payload), 200):
+        sb.table("import_rows").insert(payload[i:i + 200]).execute()
+
+
+def get_batch(citizen_id: str, batch_id: str) -> Optional[dict[str, Any]]:
+    sb = _sb()
+    if sb is None:
+        return None
+    try:
+        rows = (
+            sb.table("import_batches").select("*")
+            .eq("id", batch_id).eq("citizen_id", citizen_id).limit(1).execute()
+        ).data or []
+        return rows[0] if rows else None
+    except Exception as e:  # noqa: BLE001
+        log.debug("get_batch failed: %s", e)
+        return None
+
+
+def get_batch_rows(batch_id: str) -> list[dict[str, Any]]:
+    sb = _sb()
+    if sb is None:
+        return []
+    try:
+        return (
+            sb.table("import_rows").select("*")
+            .eq("batch_id", batch_id).order("parsed_date").limit(MAX_BATCH_FETCH)
+            .execute()
+        ).data or []
+    except Exception as e:  # noqa: BLE001
+        log.debug("get_batch_rows failed: %s", e)
+        return []
+
+
+MAX_BATCH_FETCH = 2000
+
+
+def update_batch(citizen_id: str, batch_id: str, patch: dict[str, Any]) -> None:
+    sb = _sb()
+    if sb is None:
+        return
+    try:
+        sb.table("import_batches").update(patch).eq("id", batch_id).eq(
+            "citizen_id", citizen_id
+        ).execute()
+    except Exception as e:  # noqa: BLE001
+        log.warning("update_batch failed: %s", e)
+
+
+def mark_row_committed(row_id: str, expense_id: str) -> None:
+    sb = _sb()
+    if sb is None:
+        return
+    try:
+        sb.table("import_rows").update(
+            {"expense_id": expense_id, "selected_for_commit": True}
+        ).eq("id", row_id).execute()
+    except Exception as e:  # noqa: BLE001
+        log.warning("mark_row_committed failed: %s", e)
 
 
 # --------------------------------------------------------------------------

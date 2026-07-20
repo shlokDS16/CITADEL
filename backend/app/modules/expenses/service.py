@@ -302,6 +302,151 @@ def dashboard_anomalies(citizen_id: str, limit: int = 20) -> list[dict[str, Any]
 
 
 # --------------------------------------------------------------------------
+# Imports
+# --------------------------------------------------------------------------
+def _shape_import_row(r: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(r.get("id")),
+        "description": r.get("parsed_description"),
+        "merchant": r.get("parsed_merchant"),
+        "amount_inr": _inr_opt(r.get("parsed_amount_paise")),
+        "spent_at": r.get("parsed_date"),
+        "predicted_category": r.get("predicted_category"),
+        "predicted_confidence": r.get("predicted_confidence"),
+        "is_duplicate": r.get("is_duplicate_of") is not None,
+        "duplicate_of": str(r["is_duplicate_of"]) if r.get("is_duplicate_of") else None,
+        "selected_for_commit": bool(r.get("selected_for_commit")),
+        "committed_expense_id": str(r["expense_id"]) if r.get("expense_id") else None,
+    }
+
+
+def _shape_batch(
+    row: dict[str, Any],
+    rows: Optional[list[dict[str, Any]]] = None,
+    notes: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    return {
+        "id": str(row.get("id")),
+        "source": row.get("source"),
+        "source_label": row.get("source_label"),
+        "status": row.get("status") or "pending",
+        "total_rows": int(row.get("total_rows") or 0),
+        "parsed_rows": int(row.get("parsed_rows") or 0),
+        "duplicate_rows": int(row.get("duplicate_rows") or 0),
+        "committed_rows": int(row.get("committed_rows") or 0),
+        "notes": notes or [],
+        "rows": [_shape_import_row(r) for r in (rows or [])],
+        "uploaded_at": row.get("uploaded_at"),
+        "committed_at": row.get("committed_at"),
+    }
+
+
+def create_import(
+    citizen_id: str, content: bytes, filename: str, source: str,
+) -> dict[str, Any]:
+    """Parse, classify (LLM-capped), duplicate-flag, persist as a batch in
+    'parsed' for the citizen to review. Inline: a 2000-row statement
+    parses in well under the 30s budget."""
+    from app.modules.expenses import imports as imp
+
+    if source == "bank_csv":
+        rows, notes = imp.parse_csv(content)
+    else:
+        rows, notes = imp.parse_pdf(content)
+
+    if not rows:
+        raise ValueError("; ".join(notes) if notes else "no rows recognised")
+
+    imp.classify_rows(rows)
+    existing = repo.all_recent_expenses(citizen_id)
+    dupes = imp.flag_duplicates(rows, existing)
+
+    batch = repo.insert_batch({
+        "citizen_id": citizen_id,
+        "source": source,
+        "source_label": filename[:64],
+        "total_rows": len(rows),
+        "parsed_rows": len(rows),
+        "duplicate_rows": dupes,
+        "status": "parsed",
+    })
+    repo.insert_batch_rows(str(batch["id"]), rows)
+    stored = repo.get_batch_rows(str(batch["id"]))
+    return _shape_batch(batch, rows=stored, notes=notes)
+
+
+def get_import(citizen_id: str, batch_id: str) -> Optional[dict[str, Any]]:
+    batch = repo.get_batch(citizen_id, batch_id)
+    if not batch:
+        return None
+    return _shape_batch(batch, rows=repo.get_batch_rows(batch_id))
+
+
+def confirm_import(
+    citizen_id: str, batch_id: str, payload: schemas.ImportConfirmIn,
+) -> dict[str, Any]:
+    batch = repo.get_batch(citizen_id, batch_id)
+    if not batch:
+        raise LookupError(f"import batch {batch_id} not found")
+    if batch.get("status") == "committed":
+        raise ValueError("batch already committed")
+
+    rows = repo.get_batch_rows(batch_id)
+    wanted: Optional[set[str]] = set(payload.row_ids) if payload.row_ids else None
+
+    committed = 0
+    skipped_dupes = 0
+    for r in rows:
+        rid = str(r.get("id"))
+        if r.get("expense_id"):
+            continue  # already committed earlier
+        if wanted is not None and rid not in wanted:
+            continue
+        if r.get("is_duplicate_of") and not payload.include_duplicates:
+            skipped_dupes += 1
+            continue
+        amount = r.get("parsed_amount_paise")
+        spent = r.get("parsed_date")
+        if not amount or not spent:
+            continue
+        category = r.get("predicted_category") or "Other"
+        history = repo.category_history_paise(citizen_id, category)
+        overall = (
+            repo.all_history_paise(citizen_id)
+            if len(history) < anomaly.MIN_SAMPLES_STAT else None
+        )
+        is_anom, reason = anomaly.score(int(amount), category, history, overall)
+        expense = repo.insert_expense({
+            "citizen_id": citizen_id,
+            "description": (r.get("parsed_description") or "Imported transaction")[:255],
+            "merchant": r.get("parsed_merchant"),
+            "amount_paise": int(amount),
+            "category": category,
+            "category_was_auto": True,
+            "category_confidence": r.get("predicted_confidence"),
+            "spent_at": str(spent)[:10],
+            "is_anomaly": is_anom,
+            "anomaly_reason": reason,
+            "source": batch.get("source") or "bank_csv",
+            "import_batch_id": batch_id,
+        })
+        repo.mark_row_committed(rid, str(expense["id"]))
+        committed += 1
+
+    repo.update_batch(citizen_id, batch_id, {
+        "status": "committed",
+        "committed_rows": int(batch.get("committed_rows") or 0) + committed,
+        "committed_at": datetime.now(timezone.utc).isoformat(),
+    })
+    fresh = repo.get_batch(citizen_id, batch_id) or batch
+    return {
+        "batch": _shape_batch(fresh, rows=repo.get_batch_rows(batch_id)),
+        "committed": committed,
+        "skipped_duplicates": skipped_dupes,
+    }
+
+
+# --------------------------------------------------------------------------
 # Receipts
 # --------------------------------------------------------------------------
 def _inr_opt(paise: Any) -> Optional[float]:

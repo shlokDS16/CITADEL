@@ -148,6 +148,55 @@ class ExpenseListOut(BaseModel):
 
 
 # --------------------------------------------------------------------------
+# Imports
+# --------------------------------------------------------------------------
+class ImportRowOut(BaseModel):
+    id: str
+    description: Optional[str] = None
+    merchant: Optional[str] = None
+    amount_inr: Optional[float] = None
+    spent_at: Optional[date] = None
+    predicted_category: Optional[Category] = None
+    predicted_confidence: Optional[float] = None
+    is_duplicate: bool
+    duplicate_of: Optional[str] = None
+    selected_for_commit: bool
+    committed_expense_id: Optional[str] = None
+
+
+class ImportBatchOut(BaseModel):
+    id: str
+    source: Literal["bank_csv", "bank_pdf"]
+    source_label: Optional[str] = None
+    status: Literal["pending", "processing", "parsed", "committed", "failed"]
+    total_rows: int
+    parsed_rows: int
+    duplicate_rows: int
+    committed_rows: int
+    notes: list[str] = Field(default_factory=list)
+    rows: list[ImportRowOut] = Field(default_factory=list)
+    uploaded_at: datetime
+    committed_at: Optional[datetime] = None
+
+
+class ImportConfirmIn(BaseModel):
+    row_ids: Optional[list[str]] = Field(
+        default=None,
+        description="Rows to commit. null → every non-duplicate row.",
+    )
+    include_duplicates: bool = Field(
+        default=False,
+        description="Also commit rows flagged as duplicates (citizen's call).",
+    )
+
+
+class ImportConfirmOut(BaseModel):
+    batch: ImportBatchOut
+    committed: int
+    skipped_duplicates: int
+
+
+# --------------------------------------------------------------------------
 # Receipts
 # --------------------------------------------------------------------------
 ReceiptStatus = Literal["queued", "processing", "review", "confirmed", "rejected"]
