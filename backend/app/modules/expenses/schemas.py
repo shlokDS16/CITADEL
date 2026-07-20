@@ -148,6 +148,64 @@ class ExpenseListOut(BaseModel):
 
 
 # --------------------------------------------------------------------------
+# Receipts
+# --------------------------------------------------------------------------
+ReceiptStatus = Literal["queued", "processing", "review", "confirmed", "rejected"]
+
+
+class ReceiptItemOut(BaseModel):
+    name: str
+    qty: int
+    unit_price_inr: Optional[float] = None
+    line_total_inr: Optional[float] = None
+
+
+class ReceiptOut(BaseModel):
+    id: str
+    status: ReceiptStatus
+    merchant: Optional[str] = None
+    items: list[ReceiptItemOut] = Field(default_factory=list)
+    subtotal_inr: Optional[float] = None
+    tax_inr: Optional[float] = None
+    total_inr: Optional[float] = None
+    purchase_date: Optional[date] = None
+    predicted_category: Optional[Category] = None
+    confidence: Optional[float] = None
+    ocr_confidence: Optional[float] = Field(
+        default=None, description="How well the OCR engine read the image, 0..1."
+    )
+    ocr_engine: Optional[str] = None
+    image_url: Optional[str] = Field(default=None, description="Pre-signed, 5 min TTL.")
+    expense_id: Optional[str] = None
+    created_at: datetime
+    confirmed_at: Optional[datetime] = None
+
+
+class ReceiptEditIn(BaseModel):
+    """Manual correction of OCR fields before confirming."""
+    merchant: Optional[str] = Field(default=None, max_length=128)
+    total_inr: Optional[float] = Field(default=None, gt=0)
+    tax_inr: Optional[float] = Field(default=None, ge=0)
+    purchase_date: Optional[date] = None
+    category: Optional[str] = None
+
+
+class ReceiptConfirmIn(BaseModel):
+    tax_deductible: bool = False
+    tax_section: Optional[TaxSection] = None
+
+
+class ReceiptConfirmOut(BaseModel):
+    receipt: ReceiptOut
+    expense: ExpenseOut
+
+
+class ReceiptListOut(BaseModel):
+    data: list[ReceiptOut]
+    meta: ExpenseListMeta
+
+
+# --------------------------------------------------------------------------
 # Budgets
 # --------------------------------------------------------------------------
 BudgetPeriod = Literal["monthly", "weekly", "yearly"]

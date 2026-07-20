@@ -212,6 +212,104 @@ def expenses_between(
 
 
 # --------------------------------------------------------------------------
+# Receipts
+# --------------------------------------------------------------------------
+def insert_receipt(row: dict[str, Any]) -> dict[str, Any]:
+    sb = _sb()
+    if sb is None:
+        raise RuntimeError("Supabase unavailable — cannot record receipt")
+    res = sb.table("receipts").insert(row).execute()
+    data = res.data or []
+    if not data:
+        raise RuntimeError("receipt insert returned no row")
+    return data[0]
+
+
+def insert_receipt_items(receipt_id: str, items: list[dict[str, Any]]) -> None:
+    if not items:
+        return
+    sb = _sb()
+    if sb is None:
+        return
+    try:
+        sb.table("receipt_items").insert(
+            [{**i, "receipt_id": receipt_id} for i in items]
+        ).execute()
+    except Exception as e:  # noqa: BLE001
+        log.warning("receipt_items insert failed: %s", e)
+
+
+def get_receipt(citizen_id: str, receipt_id: str) -> Optional[dict[str, Any]]:
+    sb = _sb()
+    if sb is None:
+        return None
+    try:
+        rows = (
+            sb.table("receipts").select("*")
+            .eq("id", receipt_id).eq("citizen_id", citizen_id).limit(1).execute()
+        ).data or []
+        return rows[0] if rows else None
+    except Exception as e:  # noqa: BLE001
+        log.debug("get_receipt failed: %s", e)
+        return None
+
+
+def get_receipt_items(receipt_id: str) -> list[dict[str, Any]]:
+    sb = _sb()
+    if sb is None:
+        return []
+    try:
+        return (
+            sb.table("receipt_items").select("*")
+            .eq("receipt_id", receipt_id).execute()
+        ).data or []
+    except Exception as e:  # noqa: BLE001
+        log.debug("get_receipt_items failed: %s", e)
+        return []
+
+
+def update_receipt(citizen_id: str, receipt_id: str, patch: dict[str, Any]) -> Optional[dict[str, Any]]:
+    sb = _sb()
+    if sb is None:
+        raise RuntimeError("Supabase unavailable — cannot update receipt")
+    res = (
+        sb.table("receipts").update(patch)
+        .eq("id", receipt_id).eq("citizen_id", citizen_id).execute()
+    )
+    data = res.data or []
+    return data[0] if data else None
+
+
+def list_receipts(
+    citizen_id: str,
+    category: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    sb = _sb()
+    if sb is None:
+        return [], 0
+    try:
+        q = (
+            sb.table("receipts").select("*", count="exact")
+            .eq("citizen_id", citizen_id)
+        )
+        if category:
+            q = q.eq("predicted_category", category)
+        if status:
+            q = q.eq("status", status)
+        res = (
+            q.order("created_at", desc=True)
+            .range(offset, offset + limit - 1).execute()
+        )
+        return (res.data or []), (res.count or 0)
+    except Exception as e:  # noqa: BLE001
+        log.debug("list_receipts failed: %s", e)
+        return [], 0
+
+
+# --------------------------------------------------------------------------
 # Budgets
 # --------------------------------------------------------------------------
 def list_budgets(citizen_id: str) -> list[dict[str, Any]]:

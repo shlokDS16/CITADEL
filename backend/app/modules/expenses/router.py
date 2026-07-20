@@ -16,7 +16,7 @@ from datetime import date
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile
 from starlette.concurrency import run_in_threadpool
 
 from app.shared.ratelimit import rate_limit
@@ -160,6 +160,167 @@ async def dashboard_recent(
 async def dashboard_anomalies(citizen: str = Depends(_citizen)) -> list[schemas.ExpenseOut]:
     rows = await run_in_threadpool(service.dashboard_anomalies, citizen)
     return [schemas.ExpenseOut(**r) for r in rows]
+
+
+# ---- receipts ----
+_RECEIPT_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
+
+
+def _max_body(content_length: Optional[str] = Header(default=None)) -> None:
+    if content_length is None:
+        return
+    try:
+        n = int(content_length)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid Content-Length")
+    from app.config import settings
+
+    if n > settings.max_upload_bytes:
+        raise HTTPException(status_code=413, detail="upload exceeds size limit")
+
+
+@router.post(
+    "/v1/expenses/receipts/upload",
+    response_model=schemas.ReceiptOut,
+    status_code=201,
+    tags=[_TAG],
+    summary="Scan a receipt — OCR + field extraction + category, lands in review",
+    dependencies=[Depends(rate_limit("expenses:ocr", 10, 60)), Depends(_max_body)],
+)
+async def upload_receipt(
+    file: UploadFile = File(...),
+    citizen: str = Depends(_citizen),
+) -> schemas.ReceiptOut:
+    from app.config import settings
+    from app.shared.filetype import assert_upload_kind
+    from app.modules.expenses import receipts as rc
+
+    name = file.filename or "receipt.jpg"
+    ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
+    if ext not in _RECEIPT_EXTS:
+        raise HTTPException(
+            status_code=415,
+            detail=f"extension {ext or '(none)'} not allowed; expected {', '.join(sorted(_RECEIPT_EXTS))}",
+        )
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="empty file")
+    if len(content) > settings.max_upload_bytes:
+        raise HTTPException(status_code=413, detail="upload exceeds size limit")
+    assert_upload_kind(name, content, {"image"})   # content sniff → 415 on spoof
+
+    ok, note = await run_in_threadpool(rc.ensure_bucket)
+    if not ok:
+        raise HTTPException(status_code=503, detail=note or "receipt storage unavailable")
+    try:
+        row = await run_in_threadpool(
+            service.upload_receipt, citizen, content, name,
+            ext, file.content_type or "image/jpeg",
+        )
+        return schemas.ReceiptOut(**row)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        log.exception("receipt upload failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/v1/expenses/receipts",
+    response_model=schemas.ReceiptListOut,
+    tags=[_TAG],
+    dependencies=[_RL_STD],
+    summary="List receipts — filter ?cat=&status=",
+)
+async def list_receipts(
+    cat: Optional[str] = Query(default=None),
+    status: Optional[str] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    citizen: str = Depends(_citizen),
+) -> schemas.ReceiptListOut:
+    result = await run_in_threadpool(
+        service.list_receipts, citizen, cat, status, limit, offset
+    )
+    return schemas.ReceiptListOut(**result)
+
+
+@router.get(
+    "/v1/expenses/receipts/{receipt_id}",
+    response_model=schemas.ReceiptOut,
+    tags=[_TAG],
+    dependencies=[_RL_STD],
+    summary="Receipt detail with extracted fields + signed image URL",
+)
+async def get_receipt(receipt_id: str, citizen: str = Depends(_citizen)) -> schemas.ReceiptOut:
+    row = await run_in_threadpool(service.get_receipt, citizen, receipt_id)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"receipt {receipt_id} not found")
+    return schemas.ReceiptOut(**row)
+
+
+@router.post(
+    "/v1/expenses/receipts/{receipt_id}/edit",
+    response_model=schemas.ReceiptOut,
+    tags=[_TAG],
+    dependencies=[_RL_STD],
+    summary="Correct OCR fields before confirming",
+)
+async def edit_receipt(
+    receipt_id: str, payload: schemas.ReceiptEditIn, citizen: str = Depends(_citizen),
+) -> schemas.ReceiptOut:
+    try:
+        return schemas.ReceiptOut(
+            **await run_in_threadpool(service.edit_receipt, citizen, receipt_id, payload)
+        )
+    except LookupError as le:
+        raise HTTPException(status_code=404, detail=str(le))
+    except ValueError as ve:
+        raise HTTPException(status_code=409 if "confirmed" in str(ve) else 400, detail=str(ve))
+
+
+@router.post(
+    "/v1/expenses/receipts/{receipt_id}/confirm",
+    response_model=schemas.ReceiptConfirmOut,
+    tags=[_TAG],
+    dependencies=[_RL_STD],
+    summary="Confirm extraction — creates the linked, anomaly-scored expense",
+)
+async def confirm_receipt(
+    receipt_id: str,
+    payload: schemas.ReceiptConfirmIn,
+    citizen: str = Depends(_citizen),
+) -> schemas.ReceiptConfirmOut:
+    try:
+        result = await run_in_threadpool(
+            service.confirm_receipt, citizen, receipt_id, payload
+        )
+        return schemas.ReceiptConfirmOut(
+            receipt=schemas.ReceiptOut(**result["receipt"]),
+            expense=schemas.ExpenseOut(**result["expense"]),
+        )
+    except LookupError as le:
+        raise HTTPException(status_code=404, detail=str(le))
+    except ValueError as ve:
+        raise HTTPException(status_code=409, detail=str(ve))
+    except Exception as e:  # noqa: BLE001
+        log.exception("confirm receipt failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/v1/expenses/receipts/{receipt_id}/image",
+    tags=[_TAG],
+    dependencies=[_RL_STD],
+    summary="Pre-signed receipt image URL (5 min TTL)",
+)
+async def receipt_image(receipt_id: str, citizen: str = Depends(_citizen)) -> dict[str, object]:
+    url = await run_in_threadpool(service.receipt_image_url, citizen, receipt_id)
+    if not url:
+        raise HTTPException(status_code=404, detail="receipt not found")
+    from app.modules.expenses import receipts as rc
+
+    return {"download_url": url, "expires_in": rc.SIGNED_URL_TTL_SECONDS}
 
 
 # ---- budgets ----

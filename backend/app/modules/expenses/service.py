@@ -302,6 +302,206 @@ def dashboard_anomalies(citizen_id: str, limit: int = 20) -> list[dict[str, Any]
 
 
 # --------------------------------------------------------------------------
+# Receipts
+# --------------------------------------------------------------------------
+def _inr_opt(paise: Any) -> Optional[float]:
+    return _inr(paise) if paise is not None else None
+
+
+def shape_receipt(
+    row: dict[str, Any],
+    items: Optional[list[dict[str, Any]]] = None,
+    sign: bool = False,
+) -> dict[str, Any]:
+    from app.modules.expenses import receipts as rc
+
+    return {
+        "id": str(row.get("id")),
+        "status": row.get("status") or "review",
+        "merchant": row.get("merchant"),
+        "items": [
+            {
+                "name": i.get("name") or "",
+                "qty": int(i.get("qty") or 1),
+                "unit_price_inr": _inr_opt(i.get("unit_price_paise")),
+                "line_total_inr": _inr_opt(i.get("line_total_paise")),
+            }
+            for i in (items or [])
+        ],
+        "subtotal_inr": _inr_opt(row.get("subtotal_paise")),
+        "tax_inr": _inr_opt(row.get("tax_paise")),
+        "total_inr": _inr_opt(row.get("total_paise")),
+        "purchase_date": row.get("purchase_date"),
+        "predicted_category": row.get("predicted_category"),
+        "confidence": row.get("confidence"),
+        "ocr_confidence": (row.get("_ocr_confidence")),
+        "ocr_engine": row.get("ocr_engine"),
+        "image_url": rc.signed_url(row.get("storage_path") or "") if sign else None,
+        "expense_id": str(row["expense_id"]) if row.get("expense_id") else None,
+        "created_at": row.get("created_at"),
+        "confirmed_at": row.get("confirmed_at"),
+    }
+
+
+def upload_receipt(
+    citizen_id: str, content: bytes, filename: str, ext: str, content_type: str,
+) -> dict[str, Any]:
+    """OCR + parse + classify inline (2-5s typical on OCR.Space), store the
+    image in the private bucket, land the receipt in 'review'. Storage
+    first, row second, object removed if the row fails — no orphans."""
+    from app.modules.expenses import receipts as rc
+
+    raw_text, ocr_conf, engine = rc.run_ocr(content, filename)
+    fields = rc.parse_fields(raw_text)
+
+    cls = None
+    if fields["merchant"] or raw_text:
+        cls = categorize.categorize(
+            description=(fields["merchant"] or raw_text[:120]),
+            merchant=fields["merchant"],
+        )
+
+    path = rc.upload(citizen_id, content, ext, content_type)
+    try:
+        row = repo.insert_receipt({
+            "citizen_id": citizen_id,
+            "storage_path": path,
+            "original_filename": filename[:255],
+            "status": "review",
+            "merchant": fields["merchant"],
+            "subtotal_paise": fields["subtotal_paise"],
+            "tax_paise": fields["tax_paise"],
+            "total_paise": fields["total_paise"],
+            "purchase_date": fields["purchase_date"].isoformat() if fields["purchase_date"] else None,
+            "predicted_category": cls["category"] if cls else None,
+            "confidence": cls["confidence"] if cls else None,
+            "ocr_raw_text": raw_text[:20000] or None,
+            "ocr_engine": engine,
+        })
+    except Exception:
+        rc.remove(path)
+        raise
+    repo.insert_receipt_items(str(row["id"]), fields["items"])
+    shaped = shape_receipt(
+        {**row, "_ocr_confidence": ocr_conf},
+        items=fields["items"], sign=True,
+    )
+    return shaped
+
+
+def get_receipt(citizen_id: str, receipt_id: str, sign: bool = True) -> Optional[dict[str, Any]]:
+    row = repo.get_receipt(citizen_id, receipt_id)
+    if not row:
+        return None
+    return shape_receipt(row, items=repo.get_receipt_items(receipt_id), sign=sign)
+
+
+def list_receipts(
+    citizen_id: str,
+    category: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    cat = schemas.normalize_expense_category(category) if category else None
+    rows, total = repo.list_receipts(citizen_id, category=cat, status=status,
+                                     limit=limit, offset=offset)
+    return {
+        "data": [shape_receipt(r) for r in rows],   # list view: no signing
+        "meta": {"total": total, "limit": limit, "offset": offset},
+    }
+
+
+def edit_receipt(citizen_id: str, receipt_id: str, payload: schemas.ReceiptEditIn) -> dict[str, Any]:
+    row = repo.get_receipt(citizen_id, receipt_id)
+    if not row:
+        raise LookupError(f"receipt {receipt_id} not found")
+    if row.get("status") == "confirmed":
+        raise ValueError("receipt already confirmed — edit the linked expense instead")
+
+    patch: dict[str, Any] = {}
+    if payload.merchant is not None:
+        patch["merchant"] = _strip_html(payload.merchant)[:128] or None
+    if payload.total_inr is not None:
+        patch["total_paise"] = _paise(payload.total_inr)
+    if payload.tax_inr is not None:
+        patch["tax_paise"] = _paise(payload.tax_inr)
+    if payload.purchase_date is not None:
+        patch["purchase_date"] = payload.purchase_date.isoformat()
+    if payload.category is not None:
+        cat = schemas.normalize_expense_category(payload.category)
+        if cat is None:
+            raise ValueError(f"unknown category {payload.category!r}")
+        patch["predicted_category"] = cat
+        patch["confidence"] = 1.0
+    if not patch:
+        raise ValueError("nothing to update")
+    updated = repo.update_receipt(citizen_id, receipt_id, patch)
+    return shape_receipt(updated or {**row, **patch},
+                         items=repo.get_receipt_items(receipt_id), sign=True)
+
+
+def confirm_receipt(
+    citizen_id: str, receipt_id: str, payload: schemas.ReceiptConfirmIn,
+) -> dict[str, Any]:
+    """Turn a reviewed receipt into a real, anomaly-scored expense."""
+    row = repo.get_receipt(citizen_id, receipt_id)
+    if not row:
+        raise LookupError(f"receipt {receipt_id} not found")
+    if row.get("status") == "confirmed":
+        raise ValueError("receipt already confirmed")
+    total = row.get("total_paise")
+    if not total or int(total) <= 0:
+        raise ValueError("receipt has no total — edit it before confirming")
+
+    merchant = row.get("merchant")
+    category = row.get("predicted_category") or "Other"
+    spent = row.get("purchase_date") or date.today().isoformat()
+
+    history = repo.category_history_paise(citizen_id, category)
+    overall = (
+        repo.all_history_paise(citizen_id)
+        if len(history) < anomaly.MIN_SAMPLES_STAT else None
+    )
+    is_anom, reason = anomaly.score(int(total), category, history, overall)
+
+    expense_row = repo.insert_expense({
+        "citizen_id": citizen_id,
+        "description": (merchant or "Receipt")[:255],
+        "merchant": merchant,
+        "amount_paise": int(total),
+        "category": category,
+        "category_was_auto": bool(row.get("confidence") != 1.0),
+        "category_confidence": row.get("confidence"),
+        "spent_at": str(spent)[:10],
+        "tax_deductible": bool(payload.tax_deductible),
+        "tax_section": payload.tax_section,
+        "is_anomaly": is_anom,
+        "anomaly_reason": reason,
+        "source": "receipt_ocr",
+        "receipt_id": str(row["id"]),
+    })
+    updated = repo.update_receipt(citizen_id, receipt_id, {
+        "status": "confirmed",
+        "expense_id": str(expense_row["id"]),
+        "confirmed_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return {
+        "receipt": shape_receipt(updated or row, items=repo.get_receipt_items(receipt_id)),
+        "expense": shape_expense(expense_row),
+    }
+
+
+def receipt_image_url(citizen_id: str, receipt_id: str) -> Optional[str]:
+    from app.modules.expenses import receipts as rc
+
+    row = repo.get_receipt(citizen_id, receipt_id)
+    if not row:
+        return None
+    return rc.signed_url(row.get("storage_path") or "")
+
+
+# --------------------------------------------------------------------------
 # Budgets
 # --------------------------------------------------------------------------
 def _period_bounds(period: str, today: Optional[date] = None) -> tuple[date, date, str]:
