@@ -197,6 +197,29 @@ async def community(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get(
+    "/v1/tickets/map/nearby",
+    response_model=schemas.MapNearbyOut,
+    tags=[_TAG],
+    summary="Located tickets within a radius, with H3 cluster summary",
+    dependencies=[_RL_STD],
+)
+async def map_nearby(
+    lat: float = Query(..., ge=-90, le=90),
+    lng: float = Query(..., ge=-180, le=180),
+    radius_km: float = Query(default=5.0, gt=0, le=50),
+    include_resolved: bool = Query(default=False),
+) -> schemas.MapNearbyOut:
+    try:
+        result = await run_in_threadpool(
+            service.map_nearby, lat, lng, radius_km, include_resolved
+        )
+        return schemas.MapNearbyOut(**result)
+    except Exception as e:  # noqa: BLE001
+        log.exception("map_nearby failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 def _require_citizen(x_user_id: Optional[str]) -> str:
     """Upvotes and comments are per-citizen, so they need an identity.
 

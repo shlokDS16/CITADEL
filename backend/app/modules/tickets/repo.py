@@ -303,6 +303,80 @@ def community_tickets(
         return [], 0
 
 
+def tickets_in_bbox(
+    min_lat: float,
+    max_lat: float,
+    min_lng: float,
+    max_lng: float,
+    include_resolved: bool = False,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    """Located tickets inside a lat/lng box.
+
+    This is the PostGIS-free prefilter — ix_tickets_geo_latlng covers it —
+    and the caller trims to a true radius with haversine.
+    """
+    sb = _sb()
+    if sb is None:
+        return []
+    try:
+        q = (
+            sb.table("tickets")
+            .select(
+                "id, subject, category, priority, status, department, upvotes, "
+                "location_label, geo_lat, geo_lng, geo_h3, created_at"
+            )
+            .not_.is_("geo_lat", "null")
+            .gte("geo_lat", min_lat).lte("geo_lat", max_lat)
+            .gte("geo_lng", min_lng).lte("geo_lng", max_lng)
+        )
+        if not include_resolved:
+            q = q.not_.in_("status", ["resolved", "closed"])
+        return q.limit(limit).execute().data or []
+    except Exception as e:  # noqa: BLE001
+        log.debug("tickets_in_bbox failed: %s", e)
+        return []
+
+
+def backfill_geo_h3(resolution: int, limit: int = 1000) -> int:
+    """Populate geo_h3 for located tickets that lack it.
+
+    Needed because tickets created before h3 was a dependency stored
+    coordinates but no cell. Returns the number updated.
+    """
+    sb = _sb()
+    if sb is None:
+        return 0
+    from app.modules.tickets import geo
+
+    if not geo.h3_available():
+        return 0
+    try:
+        rows = (
+            sb.table("tickets")
+            .select("id, geo_lat, geo_lng")
+            .not_.is_("geo_lat", "null")
+            .is_("geo_h3", "null")
+            .limit(limit)
+            .execute()
+        ).data or []
+    except Exception as e:  # noqa: BLE001
+        log.debug("backfill query failed: %s", e)
+        return 0
+
+    n = 0
+    for r in rows:
+        cell = geo.cell_for(float(r["geo_lat"]), float(r["geo_lng"]), resolution)
+        if not cell:
+            continue
+        try:
+            sb.table("tickets").update({"geo_h3": cell}).eq("id", r["id"]).execute()
+            n += 1
+        except Exception as e:  # noqa: BLE001
+            log.debug("backfill update failed for %s: %s", r.get("id"), e)
+    return n
+
+
 def comment_counts(ticket_ids: list[str]) -> dict[str, int]:
     """Comment count per ticket, in one round trip."""
     sb = _sb()

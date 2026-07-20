@@ -330,6 +330,46 @@ class CommentOut(BaseModel):
     age: str
 
 
+class MapPinOut(BaseModel):
+    id: str
+    title: str
+    lat: float
+    lng: float
+    distance_km: float
+    category: Category
+    display_category: str
+    severity: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+    status: TicketStatus
+    upvotes: int
+    response_count: int
+    age: str
+    location_label: Optional[str] = None
+
+
+class MapClusterOut(BaseModel):
+    cell: Optional[str] = Field(default=None, description="H3 cell id; null if h3 unavailable.")
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    count: int
+    max_severity: Priority
+    ticket_ids: list[str]
+
+
+class MapCenter(BaseModel):
+    lat: float
+    lng: float
+
+
+class MapNearbyOut(BaseModel):
+    center: MapCenter
+    radius_km: float
+    count: int
+    pins: list[MapPinOut]
+    clusters: list[MapClusterOut]
+    h3_resolution: int
+    h3_available: bool
+
+
 class TicketCreateOut(BaseModel):
     ticket: TicketOut
     preview: TicketPreviewOut = Field(

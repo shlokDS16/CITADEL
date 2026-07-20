@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from app import __version__
-from app.modules.tickets import pipeline, repo, schemas, storage
+from app.modules.tickets import geo, pipeline, repo, schemas, storage
 
 log = logging.getLogger("citadel.tickets.service")
 
@@ -245,6 +245,11 @@ def create_ticket(
         "is_anonymous": bool(payload.is_anonymous),
         "geo_lat": payload.geo_lat,
         "geo_lng": payload.geo_lng,
+        "geo_h3": (
+            geo.cell_for(payload.geo_lat, payload.geo_lng)
+            if payload.geo_lat is not None and payload.geo_lng is not None
+            else None
+        ),
         "location_label": payload.location_label,
         "sentiment": result["sentiment"],
         "sla_due_at": result["predicted_sla_due_at"].isoformat(),
@@ -483,17 +488,7 @@ def _trending_score(row: dict[str, Any], comments: int) -> float:
     return engagement / (1.0 + age_h / 48.0)
 
 
-def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
-    """Great-circle distance. Used instead of PostGIS ST_Distance, which
-    this project cannot use — see migration 20260720000005."""
-    import math
-
-    r = 6371.0
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dp = math.radians(lat2 - lat1)
-    dl = math.radians(lng2 - lng1)
-    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
-    return 2 * r * math.asin(math.sqrt(a))
+_haversine_km = geo.haversine_km
 
 
 def community(
@@ -647,6 +642,65 @@ def _shape_comment(row: dict[str, Any]) -> dict[str, Any]:
 
 def list_comments(ticket_id: str) -> list[dict[str, Any]]:
     return [_shape_comment(r) for r in repo.list_comments(ticket_id)]
+
+
+# --------------------------------------------------------------------------
+# Map
+# --------------------------------------------------------------------------
+def map_nearby(
+    lat: float,
+    lng: float,
+    radius_km: float = 5.0,
+    include_resolved: bool = False,
+) -> dict[str, Any]:
+    """Located tickets within a true radius + H3 cluster summary.
+
+    Bounding box narrows in SQL, haversine trims exactly, H3 groups for
+    the map layer. See geo.py for why this is not ST_DWithin.
+    """
+    min_lat, max_lat, min_lng, max_lng = geo.bounding_box(lat, lng, radius_km)
+    candidates = repo.tickets_in_bbox(
+        min_lat, max_lat, min_lng, max_lng, include_resolved=include_resolved
+    )
+
+    within: list[dict[str, Any]] = []
+    for r in candidates:
+        d = geo.haversine_km(lat, lng, float(r["geo_lat"]), float(r["geo_lng"]))
+        if d <= radius_km:
+            within.append({**r, "_distance_km": round(d, 2)})
+    within.sort(key=lambda r: r["_distance_km"])
+
+    counts = repo.comment_counts([r["id"] for r in within])
+    pins = []
+    for r in within:
+        cat = r.get("category") or "Other"
+        pri = r.get("priority") or "NORMAL"
+        pins.append({
+            "id": r["id"],
+            "title": r.get("subject") or "",
+            "lat": r["geo_lat"],
+            "lng": r["geo_lng"],
+            "distance_km": r["_distance_km"],
+            "category": cat,
+            "display_category": schemas.DISPLAY_CATEGORY.get(cat, cat),
+            "severity": _SEVERITY_OF_PRIORITY.get(pri, "MEDIUM"),
+            "status": r.get("status") or "open",
+            "upvotes": int(r.get("upvotes") or 0),
+            "response_count": counts.get(r["id"], 0),
+            "age": _age(r.get("created_at")),
+            "location_label": r.get("location_label"),
+        })
+
+    resolution = geo.resolution_for_radius(radius_km)
+    return {
+        "center": {"lat": lat, "lng": lng},
+        "radius_km": radius_km,
+        "count": len(pins),
+        "pins": pins,
+        "clusters": geo.cluster(within, resolution),
+        "h3_resolution": resolution,
+        "h3_available": geo.h3_available(),
+    }
 
 
 # --------------------------------------------------------------------------

@@ -78,3 +78,6 @@ tldextract>=5.3              # registrable-domain parsing (source credibility)
 readability-lxml>=0.8        # clean article text extraction for URL mode
 vaderSentiment>=3.3          # lexicon sentiment (spec-06 §262, no model)
 sentencepiece>=0.2           # DeBERTa-v3 NLI tokenizer (claim verification)
+
+# ---- tickets (Citizen M3) ----
+h3>=4.0                      # hex clustering for map view (no PostGIS on this project)
