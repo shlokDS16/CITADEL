@@ -8321,6 +8321,28 @@ const TicketMap = () => {
    CITIZEN MODULE 4 — EXPENSE CATEGORIZER
    Tabs: Add · Dashboard · Budget · Receipts · Reports
    ====================================================================== */
+/* ---- Expense Categorizer: live API plumbing --------------------------- */
+const EX_BASE = '/api/v1/expenses';
+// Same persisted browser identity the tickets module mints — one citizen
+// uuid across citizen modules until Phase 3 JWT.
+const exUid = tkUid;
+const exApi = (path, opts = {}) =>
+  apiFetch(`${EX_BASE}${path}`, { ...opts, headers: { 'x-user-id': exUid, 'x-user-role': 'citizen', ...(opts.headers || {}) } });
+
+const EX_CATEGORIES = ['Food & Dining', 'Groceries', 'Transport', 'Utilities', 'Healthcare', 'Shopping', 'Education', 'Entertainment', 'Housing', 'Insurance', 'Other'];
+const EX_CAT_ICON = {
+  'Food & Dining': '🍕', 'Groceries': '🛒', 'Transport': '🚗', 'Utilities': '💡',
+  'Healthcare': '💊', 'Shopping': '🛍', 'Education': '📚', 'Entertainment': '🎬',
+  'Housing': '🏠', 'Insurance': '🛡', 'Other': '📦',
+};
+const EX_CAT_COLOR = {
+  'Food & Dining': 'var(--gold)', 'Groceries': '#7cb518', 'Transport': 'var(--cyan)',
+  'Utilities': 'var(--green)', 'Healthcare': '#d946ef', 'Shopping': 'var(--red)',
+  'Education': '#6366f1', 'Entertainment': '#f97316', 'Housing': '#8b5cf6',
+  'Insurance': '#0ea5e9', 'Other': '#888',
+};
+const exInr = (v) => '₹' + Number(v || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+
 const ExpenseCategorizer = ({ onBack }) => {
   const [tab, setTab] = React.useState('dashboard');
   const tabs = [
@@ -8355,26 +8377,90 @@ const ExpenseAdd = () => {
   const [cat, setCat] = React.useState('Auto-detect');
   const [merchant, setMerchant] = React.useState('');
   const [aiCat, setAiCat] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+  const [lastOcr, setLastOcr] = React.useState(null);      // last scanned receipt
+  const [ocrBusy, setOcrBusy] = React.useState(false);
+  const [importBatch, setImportBatch] = React.useState(null);
+  const [importBusy, setImportBusy] = React.useState(false);
   const [toast, toastHost] = useToast();
+  const receiptRef = React.useRef();
+  const stmtRef = React.useRef();
 
-  const predict = (txt) => {
-    if (!txt) return null;
-    const t = txt.toLowerCase();
-    if (t.includes('uber') || t.includes('taxi') || t.includes('petrol') || t.includes('metro')) return { cat: 'Transport', conf: 94 };
-    if (t.includes('swiggy') || t.includes('restaurant') || t.includes('food') || t.includes('zomato')) return { cat: 'Food & Dining', conf: 96 };
-    if (t.includes('electricity') || t.includes('water') || t.includes('bill') || t.includes('gas')) return { cat: 'Utilities', conf: 92 };
-    if (t.includes('amazon') || t.includes('flipkart') || t.includes('shopping')) return { cat: 'Shopping', conf: 88 };
-    if (t.includes('doctor') || t.includes('medicine') || t.includes('pharmacy') || t.includes('hospital')) return { cat: 'Healthcare', conf: 91 };
-    return { cat: 'Other', conf: 62 };
-  };
+  // Live prediction on typing pause. The backend answers from its local
+  // layers only (lexicon/cache/model — never the LLM on partial text),
+  // so this is free to call per pause.
   React.useEffect(() => {
-    setAiCat(predict(desc));
-  }, [desc]);
+    if (!desc && !merchant) { setAiCat(null); return; }
+    const t = setTimeout(() => {
+      exApi('/categorize', { json: { description: desc, merchant: merchant || null } })
+        .then(setAiCat).catch(() => {});
+    }, 500);
+    return () => clearTimeout(t);
+  }, [desc, merchant]);
 
   const add = () => {
     if (!desc || !amt) { toast('Please fill description and amount', 'warn'); return; }
-    toast(`Expense added: ₹${amt} — ${aiCat?.cat || cat}`, 'success');
-    setDesc(''); setAmt(''); setMerchant(''); setAiCat(null);
+    setBusy(true);
+    exApi('', { json: {
+      description: desc, merchant: merchant || null, amount_inr: Number(amt),
+      category: cat === 'Auto-detect' ? null : cat,
+    } })
+      .then(r => {
+        const e = r.expense;
+        toast(`Added ₹${amt} — ${e.category} [${r.classification.source}]` +
+          (e.is_anomaly ? ` · ⚠ ${e.anomaly_reason}` : ''), e.is_anomaly ? 'warn' : 'success');
+        setDesc(''); setAmt(''); setMerchant(''); setCat('Auto-detect'); setAiCat(null);
+      })
+      .catch(e => toast(`Add failed: ${e.message || e}`, 'error'))
+      .finally(() => setBusy(false));
+  };
+
+  const scanReceipt = (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    setOcrBusy(true);
+    const form = new FormData(); form.append('file', f);
+    exApi('/receipts/upload', { form })
+      .then(r => { setLastOcr(r); toast(`Receipt scanned — review & confirm`, 'success'); })
+      .catch(err => toast(`Scan failed: ${err.message || err}`, 'error'))
+      .finally(() => setOcrBusy(false));
+  };
+
+  const confirmReceipt = () => {
+    if (!lastOcr) return;
+    exApi(`/receipts/${lastOcr.id}/confirm`, { json: {} })
+      .then(r => {
+        toast(`${r.expense.description}: ₹${r.expense.amount_inr.toLocaleString()} added as ${r.expense.category}`, 'success');
+        setLastOcr({ ...lastOcr, status: 'confirmed', expense_id: r.expense.id });
+      })
+      .catch(err => toast(`${err.message || err}`, 'warn'));
+  };
+
+  const importStatement = (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    setImportBusy(true);
+    const form = new FormData(); form.append('file', f);
+    const path = f.name.toLowerCase().endsWith('.pdf') ? '/imports/pdf' : '/imports/csv';
+    exApi(path, { form })
+      .then(b => {
+        setImportBatch(b);
+        toast(`${b.parsed_rows} transactions parsed · ${b.duplicate_rows} duplicate(s) flagged`, 'success');
+      })
+      .catch(err => toast(`Import failed: ${err.message || err}`, 'error'))
+      .finally(() => setImportBusy(false));
+  };
+
+  const commitImport = () => {
+    if (!importBatch) return;
+    exApi(`/imports/${importBatch.id}/confirm`, { json: {} })
+      .then(r => {
+        toast(`${r.committed} expense(s) imported · ${r.skipped_duplicates} duplicate(s) skipped`, 'success');
+        setImportBatch(r.batch);
+      })
+      .catch(err => toast(`${err.message || err}`, 'warn'));
   };
 
   return (
@@ -8395,63 +8481,102 @@ const ExpenseAdd = () => {
               <div style={{ flex: 1 }}>
                 <label className="field-label mt-14">CATEGORY</label>
                 <select className="brutal-select" value={cat} onChange={e => setCat(e.target.value)}>
-                  {['Auto-detect', 'Food & Dining', 'Transport', 'Utilities', 'Healthcare', 'Shopping', 'Education', 'Entertainment', 'Housing', 'Insurance', 'Other'].map(c => <option key={c}>{c}</option>)}
+                  {['Auto-detect', ...EX_CATEGORIES].map(c => <option key={c}>{c}</option>)}
                 </select>
               </div>
             </div>
             {aiCat && (
               <div className="ai-predict">
                 <span>⚡ AI predicts:</span>
-                <Badge variant="gold">{aiCat.cat}</Badge>
-                <span className="small-meta">{aiCat.conf}% confidence</span>
+                <Badge variant="gold">{aiCat.category}</Badge>
+                <span className="small-meta">
+                  {Math.round(aiCat.confidence * 100)}% · {aiCat.source}
+                  {aiCat.needs_review ? ' · will flag for review' : ''}
+                </span>
               </div>
             )}
-            <button className="btn-brutal action-btn gold mt-20" onClick={add}>＋ ADD EXPENSE</button>
+            <button className="btn-brutal action-btn gold mt-20" disabled={busy} onClick={add}>
+              {busy ? 'ADDING…' : '＋ ADD EXPENSE'}
+            </button>
           </div>
         </div>
         <div className="col-panel">
           <div className="panel-header" style={{ background: 'var(--cyan)' }}>SCAN RECEIPT</div>
           <div className="panel-body">
-            <div className="file-drop" style={{ background: '#fafaf8' }}>
+            <input type="file" ref={receiptRef} accept="image/jpeg,image/png,image/webp,image/heic" style={{ display: 'none' }} onChange={scanReceipt} />
+            <div className="file-drop" style={{ background: '#fafaf8', cursor: 'pointer' }} onClick={() => !ocrBusy && receiptRef.current.click()}>
               <span className="file-icon">📷</span>
-              Drop receipt image or click to scan
+              {ocrBusy ? 'Scanning… (OCR in progress)' : 'Drop receipt image or click to scan'}
             </div>
-            <div className="small-meta" style={{ marginTop: 8 }}>Supports JPG, PNG, HEIC. OCR extracts merchant, items, amount, tax, and date.</div>
-            <div className="ocr-preview mt-14">
-              <div className="ocr-preview-title">LAST OCR</div>
-              <div className="ocr-preview-body">
-                <div className="ocr-row"><span>Merchant:</span><strong>Croma Electronics</strong></div>
-                <div className="ocr-row"><span>Items:</span><strong>2</strong></div>
-                <div className="ocr-row"><span>Subtotal:</span><strong>₹4,200</strong></div>
-                <div className="ocr-row"><span>Tax (GST):</span><strong>₹756</strong></div>
-                <div className="ocr-row"><span>Total:</span><strong>₹4,956</strong></div>
-                <div className="ocr-row"><span>Category:</span><Badge variant="gold">Shopping</Badge></div>
+            <div className="small-meta" style={{ marginTop: 8 }}>JPG, PNG, WEBP, HEIC. OCR extracts merchant, amount, tax, and date.</div>
+            {lastOcr && (
+              <div className="ocr-preview mt-14">
+                <div className="ocr-preview-title">LAST OCR · {(lastOcr.ocr_engine || '').toUpperCase()}</div>
+                <div className="ocr-preview-body">
+                  <div className="ocr-row"><span>Merchant:</span><strong>{lastOcr.merchant || '—'}</strong></div>
+                  <div className="ocr-row"><span>Items:</span><strong>{lastOcr.items.length || '—'}</strong></div>
+                  <div className="ocr-row"><span>Subtotal:</span><strong>{lastOcr.subtotal_inr != null ? exInr(lastOcr.subtotal_inr) : '—'}</strong></div>
+                  <div className="ocr-row"><span>Tax (GST):</span><strong>{lastOcr.tax_inr != null ? exInr(lastOcr.tax_inr) : '—'}</strong></div>
+                  <div className="ocr-row"><span>Total:</span><strong>{lastOcr.total_inr != null ? exInr(lastOcr.total_inr) : '—'}</strong></div>
+                  <div className="ocr-row"><span>Category:</span>{lastOcr.predicted_category ? <Badge variant="gold">{lastOcr.predicted_category}</Badge> : <span>—</span>}</div>
+                  {lastOcr.status !== 'confirmed' ? (
+                    <button className="btn-brutal action-btn cyan mt-14" style={{ fontSize: 11 }}
+                      disabled={!lastOcr.total_inr} onClick={confirmReceipt}
+                      title={!lastOcr.total_inr ? 'No total detected — rescan or add manually' : ''}>
+                      ✓ CONFIRM → ADD EXPENSE
+                    </button>
+                  ) : (
+                    <div className="small-meta mt-14">✓ Confirmed — expense created.</div>
+                  )}
+                </div>
               </div>
-            </div>
+            )}
           </div>
         </div>
         <div className="col-panel">
           <div className="panel-header" style={{ background: 'var(--red)', color: '#fff' }}>IMPORT SOURCES</div>
           <div className="panel-body">
-            <button className="attach-btn" style={{ width: '100%', padding: '20px', justifyContent: 'flex-start', gap: 12, flexDirection: 'row' }}>
+            <input type="file" ref={stmtRef} accept=".csv,.pdf" style={{ display: 'none' }} onChange={importStatement} />
+            <button className="attach-btn" style={{ width: '100%', padding: '20px', justifyContent: 'flex-start', gap: 12, flexDirection: 'row' }}
+              disabled={importBusy} onClick={() => stmtRef.current.click()}>
               <span style={{ fontSize: 28 }}>🏦</span>
               <div style={{ textAlign: 'left' }}>
-                <div style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 14 }}>Bank Statement</div>
-                <div className="small-meta">Upload PDF/CSV · auto-parse</div>
+                <div style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 14 }}>{importBusy ? 'Parsing…' : 'Bank Statement'}</div>
+                <div className="small-meta">Upload CSV / text-PDF · auto-parse + duplicate check</div>
               </div>
             </button>
-            <button className="attach-btn mt-14" style={{ width: '100%', padding: '20px', justifyContent: 'flex-start', gap: 12, flexDirection: 'row' }}>
+            {importBatch && (
+              <div className="ocr-preview mt-14">
+                <div className="ocr-preview-title">IMPORT · {importBatch.source_label}</div>
+                <div className="ocr-preview-body">
+                  <div className="ocr-row"><span>Parsed:</span><strong>{importBatch.parsed_rows} rows</strong></div>
+                  <div className="ocr-row"><span>Duplicates:</span><strong>{importBatch.duplicate_rows}</strong></div>
+                  <div className="ocr-row"><span>Committed:</span><strong>{importBatch.committed_rows}</strong></div>
+                  {(importBatch.notes || []).map((n, i) => <div key={i} className="small-meta">{n}</div>)}
+                  {importBatch.status !== 'committed' ? (
+                    <button className="btn-brutal action-btn gold mt-14" style={{ fontSize: 11 }} onClick={commitImport}>
+                      ⬇ COMMIT {importBatch.parsed_rows - importBatch.duplicate_rows} NON-DUPLICATE ROWS
+                    </button>
+                  ) : (
+                    <div className="small-meta mt-14">✓ Committed to expenses.</div>
+                  )}
+                </div>
+              </div>
+            )}
+            <button className="attach-btn mt-14" style={{ width: '100%', padding: '20px', justifyContent: 'flex-start', gap: 12, flexDirection: 'row', opacity: 0.55 }}
+              onClick={() => toast('UPI linking needs the RBI Account Aggregator framework — planned, not yet wired', 'warn')}>
               <span style={{ fontSize: 28 }}>📱</span>
               <div style={{ textAlign: 'left' }}>
                 <div style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 14 }}>UPI Linked</div>
-                <div className="small-meta">GPay · PhonePe · Paytm</div>
+                <div className="small-meta">GPay · PhonePe · Paytm — v2</div>
               </div>
             </button>
-            <button className="attach-btn mt-14" style={{ width: '100%', padding: '20px', justifyContent: 'flex-start', gap: 12, flexDirection: 'row' }}>
+            <button className="attach-btn mt-14" style={{ width: '100%', padding: '20px', justifyContent: 'flex-start', gap: 12, flexDirection: 'row', opacity: 0.55 }}
+              onClick={() => toast('Card linking needs issuer APIs — planned, not yet wired', 'warn')}>
               <span style={{ fontSize: 28 }}>💳</span>
               <div style={{ textAlign: 'left' }}>
                 <div style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 14 }}>Credit Cards</div>
-                <div className="small-meta">HDFC · ICICI · Axis</div>
+                <div className="small-meta">HDFC · ICICI · Axis — v2</div>
               </div>
             </button>
           </div>
@@ -8463,53 +8588,78 @@ const ExpenseAdd = () => {
 };
 
 const ExpenseDashboard = () => {
-  const spendByCat = [
-    { label: 'Food & Dining', value: 8400,  color: 'var(--gold)' },
-    { label: 'Transport',     value: 4200,  color: 'var(--cyan)' },
-    { label: 'Utilities',     value: 3200,  color: 'var(--green)' },
-    { label: 'Shopping',      value: 6800,  color: 'var(--red)' },
-    { label: 'Healthcare',    value: 1500,  color: '#d946ef' },
-    { label: 'Other',         value: 2300,  color: '#888' },
-  ];
-  const expenses = [
-    { desc: 'Swiggy — Pizza',   cat: 'Food & Dining', amt: 450,  when: 'Today',     anomaly: false, tax: false },
-    { desc: 'Uber — Office',    cat: 'Transport',    amt: 180,  when: 'Today',     anomaly: false, tax: false },
-    { desc: 'Electricity Bill', cat: 'Utilities',    amt: 2100, when: 'Yesterday', anomaly: false, tax: true  },
-    { desc: 'Amazon Order',     cat: 'Shopping',     amt: 4956, when: 'Yesterday', anomaly: true,  tax: false },
-    { desc: 'Pharmacy',         cat: 'Healthcare',   amt: 680,  when: '2 days',    anomaly: false, tax: true  },
-    { desc: 'Zomato Dinner',    cat: 'Food & Dining', amt: 1250, when: '3 days',    anomaly: false, tax: false },
-    { desc: 'Croma — TV',       cat: 'Shopping',     amt: 45000, when: '5 days',   anomaly: true,  tax: false },
-  ];
+  const [kpis, setKpis] = React.useState(null);
+  const [byCat, setByCat] = React.useState(null);
+  const [trend, setTrend] = React.useState(null);
+  const [recent, setRecent] = React.useState(null);
+
+  React.useEffect(() => {
+    exApi('/dashboard/kpis').then(setKpis).catch(() => setKpis(false));
+    exApi('/dashboard/by-category').then(setByCat).catch(() => setByCat([]));
+    exApi('/dashboard/daily-trend').then(setTrend).catch(() => {});
+    exApi('/dashboard/recent', { params: { limit: 10 } }).then(setRecent).catch(() => setRecent([]));
+  }, []);
+
+  const donutSegments = (byCat || []).map(s => ({
+    label: s.label, value: s.value_inr, color: EX_CAT_COLOR[s.label] || '#888',
+  }));
+  const totalLabel = kpis ? exInr(kpis.total_month_inr) : '…';
+
   return (
     <div className="tab-pane">
       <div className="kpi-grid-4">
-        <KPICard label="TOTAL THIS MONTH" value="₹26.4k" color="var(--gold)" data={[18, 20, 22, 23, 24, 25, 26]} delta="+8%" deltaDir="up" />
-        <KPICard label="AVG DAILY"         value="₹880"   color="var(--cyan)" data={[920, 890, 870, 880, 900, 880, 880]} />
-        <KPICard label="TRANSACTIONS"      value="47"     color="var(--green)" data={[32, 36, 40, 42, 45, 46, 47]} />
-        <KPICard label="ANOMALIES"         value="2"      color="var(--red)" delta="NEW" />
+        <KPICard label="TOTAL THIS MONTH" value={kpis ? exInr(kpis.total_month_inr) : '…'} color="var(--gold)" data={kpis ? kpis.spark_daily : undefined} />
+        <KPICard label="AVG DAILY"        value={kpis ? exInr(kpis.avg_daily_inr) : '…'}  color="var(--cyan)" />
+        <KPICard label="TRANSACTIONS"     value={kpis ? String(kpis.txn_count) : '…'}     color="var(--green)" />
+        <KPICard label="ANOMALIES"        value={kpis ? String(kpis.anomaly_count) : '…'} color="var(--red)" delta={kpis && kpis.anomaly_count > 0 ? 'REVIEW' : undefined} />
       </div>
       <div className="widgets-grid mt-20">
         <div className="widget-card">
-          <div className="widget-title">BY CATEGORY · APRIL</div>
-          <Donut segments={spendByCat} centerValue="₹26.4k" centerLabel="MONTHLY TOTAL" />
+          <div className="widget-title">BY CATEGORY · {kpis ? kpis.month_label : ''}</div>
+          {donutSegments.length > 0
+            ? <Donut segments={donutSegments} centerValue={totalLabel} centerLabel="MONTHLY TOTAL" />
+            : <div style={{ padding: 30, textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 11, opacity: 0.5 }}>
+                {byCat === null ? 'Loading…' : 'No expenses this month yet.'}
+              </div>}
         </div>
         <div className="widget-card">
           <div className="widget-title">DAILY TREND (30D)</div>
-          <MiniChart title="" data={[420, 680, 550, 890, 1200, 780, 950, 620, 1100, 540, 780, 920, 1400, 680, 890]} color="var(--gold)" />
-          <div className="small-meta mt-14">Highest spend: ₹4,956 on Apr 22 (Amazon)</div>
+          {trend && <MiniChart title="" data={trend.points.map(p => p.total_inr)} color="var(--gold)" />}
+          {trend && trend.highest_expense && (
+            <div className="small-meta mt-14">
+              Highest spend: {exInr(trend.highest_expense.amount_inr)} on {trend.highest_expense.spent_at} ({trend.highest_expense.description.slice(0, 30)})
+            </div>
+          )}
+          {!trend && <div style={{ padding: 30, fontFamily: 'var(--font-mono)', fontSize: 11, opacity: 0.5 }}>Loading…</div>}
         </div>
       </div>
       <div className="widget-card mt-20">
         <div className="widget-title">RECENT TRANSACTIONS</div>
         <div className="expense-list">
-          {expenses.map((e, i) => (
-            <div key={i} className={`expense-row-lg ${e.anomaly ? 'anomaly' : ''}`}>
-              <span style={{ fontSize: 18, width: 28 }}>{e.cat === 'Food & Dining' ? '🍕' : e.cat === 'Transport' ? '🚗' : e.cat === 'Utilities' ? '💡' : e.cat === 'Shopping' ? '🛍' : e.cat === 'Healthcare' ? '💊' : '📦'}</span>
+          {recent === null && <div style={{ padding: 24, fontFamily: 'var(--font-mono)', fontSize: 11, opacity: 0.5 }}>Loading…</div>}
+          {recent && recent.length === 0 && (
+            <div style={{ padding: 24, textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 11, opacity: 0.5 }}>
+              No transactions yet — add one from the ADD EXPENSE tab.
+            </div>
+          )}
+          {(recent || []).map(e => (
+            <div key={e.id} className={`expense-row-lg ${e.is_anomaly ? 'anomaly' : ''}`}>
+              <span style={{ fontSize: 18, width: 28 }}>{EX_CAT_ICON[e.category] || '📦'}</span>
               <div style={{ flex: 1 }}>
-                <div className="expense-desc-lg">{e.desc}</div>
-                <div className="expense-meta"><Badge variant="default">{e.cat}</Badge>{e.tax && <Badge variant="green">TAX ✓</Badge>}{e.anomaly && <Badge variant="red">⚠ ANOMALY</Badge>}<span className="small-meta">{e.when}</span></div>
+                <div className="expense-desc-lg">{e.description}</div>
+                <div className="expense-meta">
+                  <Badge variant="default">{e.category}</Badge>
+                  {e.tax_deductible && <Badge variant="green">TAX ✓</Badge>}
+                  {e.is_anomaly && <Badge variant="red" title={e.anomaly_reason}>⚠ ANOMALY</Badge>}
+                  {e.needs_review && <Badge variant="gold">REVIEW</Badge>}
+                  <span className="small-meta">{e.when}</span>
+                  {e.source !== 'manual' && <span className="small-meta">via {e.source.replace(/_/g, ' ')}</span>}
+                </div>
+                {e.is_anomaly && e.anomaly_reason && (
+                  <div className="small-meta" style={{ color: 'var(--red)', marginTop: 2 }}>{e.anomaly_reason}</div>
+                )}
               </div>
-              <div className="expense-amt-lg">₹{e.amt.toLocaleString()}</div>
+              <div className="expense-amt-lg">{exInr(e.amount_inr)}</div>
             </div>
           ))}
         </div>
@@ -8519,124 +8669,216 @@ const ExpenseDashboard = () => {
 };
 
 const ExpenseBudget = () => {
-  const budgets = [
-    { cat: 'Food & Dining', budget: 10000, spent: 8400, icon: '🍕' },
-    { cat: 'Transport',     budget: 5000,  spent: 4200, icon: '🚗' },
-    { cat: 'Utilities',     budget: 4000,  spent: 3200, icon: '💡' },
-    { cat: 'Shopping',      budget: 5000,  spent: 6800, icon: '🛍' },
-    { cat: 'Healthcare',    budget: 2000,  spent: 1500, icon: '💊' },
-    { cat: 'Entertainment', budget: 3000,  spent: 1100, icon: '🎬' },
-  ];
+  const [budgets, setBudgets] = React.useState(null);
+  const [showForm, setShowForm] = React.useState(false);
+  const [formCat, setFormCat] = React.useState(EX_CATEGORIES[0]);
+  const [formAmt, setFormAmt] = React.useState('');
+  const [toast, toastHost] = useToast();
+
+  const refresh = React.useCallback(() => {
+    exApi('/budgets').then(setBudgets).catch(() => setBudgets([]));
+  }, []);
+  React.useEffect(() => { refresh(); }, [refresh]);
+
+  const create = () => {
+    if (!formAmt || Number(formAmt) <= 0) { toast('Enter a budget amount', 'warn'); return; }
+    exApi('/budgets', { json: { category: formCat, amount_inr: Number(formAmt) } })
+      .then(() => { toast(`Budget set: ${formCat} ${exInr(formAmt)}/month`, 'success'); setShowForm(false); setFormAmt(''); refresh(); })
+      .catch(e => toast(`${e.message || e}`, 'warn'));
+  };
+
+  const remove = (b) => {
+    exApi(`/budgets/${b.id}`, { method: 'DELETE' })
+      .then(() => { toast(`${b.category} budget removed`, 'success'); refresh(); })
+      .catch(e => toast(`${e.message || e}`, 'warn'));
+  };
+
+  const monthLabel = budgets && budgets[0] ? budgets[0].period_label : '';
+
   return (
     <div className="tab-pane">
       <div className="toolbar">
-        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, opacity: 0.7 }}>Monthly budgets · April 2026 · alerts when 80% used</div>
-        <button className="btn-brutal action-btn gold" style={{ width: 'auto', fontSize: 11, padding: '8px 16px' }}>＋ NEW BUDGET</button>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, opacity: 0.7 }}>
+          Monthly budgets{monthLabel ? ` · ${monthLabel}` : ''} · alerts at the 80% threshold
+        </div>
+        <button className="btn-brutal action-btn gold" style={{ width: 'auto', fontSize: 11, padding: '8px 16px' }}
+          onClick={() => setShowForm(s => !s)}>
+          {showForm ? '✕ CANCEL' : '＋ NEW BUDGET'}
+        </button>
       </div>
+      {showForm && (
+        <div className="toolbar" style={{ gap: 10 }}>
+          <select className="brutal-select" style={{ width: 200 }} value={formCat} onChange={e => setFormCat(e.target.value)}>
+            {EX_CATEGORIES.map(c => <option key={c}>{c}</option>)}
+          </select>
+          <input className="brutal-input" style={{ width: 160 }} type="number" placeholder="Amount ₹/month"
+            value={formAmt} onChange={e => setFormAmt(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') create(); }} />
+          <button className="btn-brutal" style={{ fontSize: 11, padding: '8px 16px' }} onClick={create}>SET BUDGET</button>
+        </div>
+      )}
       <div className="budget-grid">
-        {budgets.map((b, i) => {
-          const pct = (b.spent / b.budget) * 100;
-          const over = pct > 100;
-          const near = pct > 80 && pct <= 100;
+        {budgets === null && <div style={{ padding: 30, fontFamily: 'var(--font-mono)', opacity: 0.5 }}>Loading budgets…</div>}
+        {budgets && budgets.length === 0 && (
+          <div style={{ padding: 30, fontFamily: 'var(--font-mono)', fontSize: 12, opacity: 0.5 }}>
+            No budgets yet — set one per category and spending tracks against it live.
+          </div>
+        )}
+        {(budgets || []).map((b, i) => {
+          const pct = b.pct_used;
+          const over = b.status === 'over';
+          const near = b.status === 'near';
           return (
-            <div key={b.cat} className={`budget-card ${over ? 'over' : near ? 'near' : ''}`} style={{ animationDelay: `${i * 0.06}s` }}>
+            <div key={b.id} className={`budget-card ${over ? 'over' : near ? 'near' : ''}`} style={{ animationDelay: `${i * 0.06}s` }}>
               <div className="budget-card-top">
-                <span style={{ fontSize: 26 }}>{b.icon}</span>
+                <span style={{ fontSize: 26 }}>{EX_CAT_ICON[b.category] || '📦'}</span>
                 <div style={{ flex: 1 }}>
-                  <div className="budget-cat">{b.cat}</div>
-                  <div className="budget-amt">₹{b.spent.toLocaleString()} of ₹{b.budget.toLocaleString()}</div>
+                  <div className="budget-cat">{b.category}</div>
+                  <div className="budget-amt">{exInr(b.spent_inr)} of {exInr(b.amount_inr)}</div>
                 </div>
                 {over && <Badge variant="red">⚠ OVER</Badge>}
                 {near && <Badge variant="gold">⚠ NEAR</Badge>}
+                <button className="icon-btn" title="Remove budget" onClick={() => remove(b)}>✕</button>
               </div>
               <div className="progress-bar-lg">
                 <div className="progress-fill-lg" style={{ width: `${Math.min(100, pct)}%`, background: over ? 'var(--red)' : near ? 'var(--gold)' : 'var(--green)' }}></div>
               </div>
               <div className="budget-footer">
                 <span>{Math.round(pct)}% used</span>
-                <span>{over ? `₹${(b.spent - b.budget).toLocaleString()} over` : `₹${(b.budget - b.spent).toLocaleString()} left`}</span>
+                <span>{over ? `${exInr(-b.remaining_inr)} over` : `${exInr(b.remaining_inr)} left`}</span>
               </div>
             </div>
           );
         })}
       </div>
+      {toastHost}
     </div>
   );
 };
 
 const ExpenseReceipts = () => {
-  const receipts = [
-    { id: 1, merchant: 'Croma Electronics', amt: 4956, date: '2026-04-22', tags: ['shopping', 'gst'] },
-    { id: 2, merchant: 'Swiggy',            amt: 450,  date: '2026-04-24', tags: ['food'] },
-    { id: 3, merchant: 'Apollo Pharmacy',    amt: 680,  date: '2026-04-22', tags: ['healthcare', 'tax'] },
-    { id: 4, merchant: 'BESCOM',             amt: 2100, date: '2026-04-21', tags: ['utilities', 'tax'] },
-    { id: 5, merchant: 'Uber',               amt: 180,  date: '2026-04-24', tags: ['transport'] },
-    { id: 6, merchant: 'Zomato',             amt: 1250, date: '2026-04-21', tags: ['food'] },
-  ];
+  const [receipts, setReceipts] = React.useState(null);
+  const [query, setQuery] = React.useState('');
+  const [catFilter, setCatFilter] = React.useState('');
+  const [toast, toastHost] = useToast();
+
+  React.useEffect(() => {
+    const params = { limit: 60 };
+    if (catFilter) params.cat = catFilter;
+    exApi('/receipts', { params }).then(r => setReceipts(r.data)).catch(() => setReceipts([]));
+  }, [catFilter]);
+
+  const visible = (receipts || []).filter(r =>
+    !query || (r.merchant || '').toLowerCase().includes(query.toLowerCase()));
+
+  const openImage = (r) => {
+    exApi(`/receipts/${r.id}/image`)
+      .then(d => window.open(d.download_url, '_blank', 'noopener'))
+      .catch(e => toast(`${e.message || e}`, 'warn'));
+  };
+
   return (
     <div className="tab-pane">
       <div className="toolbar">
-        <SearchBar value="" onChange={() => {}} placeholder="Search receipts..." />
-        <FilterBar
-          filters={[
-            { key: 'cat', label: 'Category', options: ['Food', 'Transport', 'Shopping', 'Utilities'] },
-            { key: 'tax', label: 'Tax Deductible', options: ['Yes', 'No'] },
-          ]}
-          values={{}}
-          onChange={() => {}}
-        />
+        <SearchBar value={query} onChange={setQuery} placeholder="Search receipts by merchant..." />
+        <select className="brutal-select" style={{ width: 190 }} value={catFilter} onChange={e => setCatFilter(e.target.value)}>
+          <option value="">All categories</option>
+          {EX_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
       </div>
       <div className="receipt-grid">
-        {receipts.map((r, i) => (
-          <div key={r.id} className="receipt-card" style={{ animationDelay: `${i * 0.05}s` }}>
+        {receipts === null && <div style={{ padding: 30, fontFamily: 'var(--font-mono)', opacity: 0.5 }}>Loading receipts…</div>}
+        {receipts && visible.length === 0 && (
+          <div style={{ padding: 30, fontFamily: 'var(--font-mono)', fontSize: 12, opacity: 0.5 }}>
+            {receipts.length === 0 ? 'No receipts yet — scan one from the ADD EXPENSE tab.' : 'No receipts match.'}
+          </div>
+        )}
+        {visible.map((r, i) => (
+          <div key={r.id} className="receipt-card" style={{ animationDelay: `${i * 0.05}s`, cursor: 'pointer' }}
+            title="Open receipt image (5-min signed link)" onClick={() => openImage(r)}>
             <div className="receipt-thumb">🧾</div>
             <div className="receipt-info">
-              <div className="receipt-merchant">{r.merchant}</div>
-              <div className="receipt-amt">₹{r.amt.toLocaleString()}</div>
-              <div className="receipt-date">{r.date}</div>
+              <div className="receipt-merchant">{r.merchant || 'Unknown merchant'}</div>
+              <div className="receipt-amt">{r.total_inr != null ? exInr(r.total_inr) : '—'}</div>
+              <div className="receipt-date">{r.purchase_date || String(r.created_at).slice(0, 10)}</div>
               <div className="receipt-tags">
-                {r.tags.map(t => <Chip key={t} label={t} />)}
+                {r.predicted_category && <Chip label={r.predicted_category.toLowerCase()} />}
+                {r.tax_inr != null && r.tax_inr > 0 && <Chip label="gst" />}
+                <Chip label={r.status} />
               </div>
             </div>
           </div>
         ))}
       </div>
+      {toastHost}
     </div>
   );
 };
 
-const ExpenseReports = () => (
-  <div className="tab-pane">
-    <div className="kpi-grid-4">
-      <KPICard label="FY26 SPEND"      value="₹2.84L" color="var(--gold)" />
-      <KPICard label="TAX DEDUCTIBLE"  value="₹42k"  color="var(--green)" />
-      <KPICard label="AVG SAVINGS"     value="22%"   color="var(--cyan)" />
-      <KPICard label="NET WORTH Δ"     value="+₹18k" color="var(--red)" />
-    </div>
-    <div className="widgets-grid mt-20">
-      <div className="widget-card">
-        <div className="widget-title">MONTHLY TREND (FY26)</div>
-        <MiniChart title="" data={[22, 24, 18, 26, 22, 28, 30, 24, 26, 32, 28, 26]} color="var(--gold)" labels={['APR', 'MAR']} />
+const ExpenseReports = () => {
+  const [fy, setFy] = React.useState(null);
+  const [trend, setTrend] = React.useState(null);
+  const [tax, setTax] = React.useState(null);
+  const [toast, toastHost] = useToast();
+
+  React.useEffect(() => {
+    exApi('/reports/fy-summary').then(setFy).catch(() => {});
+    exApi('/reports/monthly-trend').then(setTrend).catch(() => {});
+    exApi('/reports/tax-summary').then(setTax).catch(() => {});
+  }, []);
+
+  // Browser downloads can't send the identity header — the endpoint
+  // accepts ?uid= for exactly this (same pattern as fake-news reports).
+  const download = (format) =>
+    window.open(`${API_BASE}${EX_BASE}/reports/export?format=${format}&uid=${exUid}`, '_blank', 'noopener');
+
+  const fyLabel = fy ? fy.fy : 'FY';
+  return (
+    <div className="tab-pane">
+      <div className="kpi-grid-4">
+        <KPICard label={`${fyLabel} SPEND`} value={fy ? exInr(fy.total_spend_inr) : '…'} color="var(--gold)" />
+        <KPICard label="TAX DEDUCTIBLE" value={fy ? exInr(fy.tax_deductible_inr) : '…'} color="var(--green)" />
+        <KPICard label="AVG SAVINGS" value="—" color="var(--cyan)" />
+        <KPICard label="NET WORTH Δ" value="—" color="var(--red)" />
       </div>
-      <div className="widget-card">
-        <div className="widget-title">TAX SUMMARY FY26</div>
-        <div className="tax-rows">
-          <div className="tax-row"><span>Section 80C Investments</span><strong>₹1,20,000</strong></div>
-          <div className="tax-row"><span>Section 80D Health Insurance</span><strong>₹18,000</strong></div>
-          <div className="tax-row"><span>Business Expenses</span><strong>₹24,000</strong></div>
-          <div className="tax-row"><span>HRA Claims</span><strong>₹60,000</strong></div>
-          <div className="tax-row total"><span>TOTAL DEDUCTIBLE</span><strong>₹2,22,000</strong></div>
+      <div className="small-meta" style={{ marginTop: 6 }}>
+        Savings % and net-worth Δ need income data the platform doesn't hold — shown as — rather than invented.
+      </div>
+      <div className="widgets-grid mt-20">
+        <div className="widget-card">
+          <div className="widget-title">MONTHLY TREND ({fyLabel})</div>
+          {trend
+            ? <MiniChart title="" data={trend.map(p => p.total_inr)} color="var(--gold)" labels={[trend[0] && trend[0].label, trend[trend.length - 1] && trend[trend.length - 1].label]} />
+            : <div style={{ padding: 24, fontFamily: 'var(--font-mono)', fontSize: 11, opacity: 0.5 }}>Loading…</div>}
+        </div>
+        <div className="widget-card">
+          <div className="widget-title">TAX SUMMARY {fyLabel}</div>
+          {tax ? (
+            <div className="tax-rows">
+              <div className="tax-row"><span>Section 80C Investments</span><strong>{exInr(tax.section_80c_inr)}</strong></div>
+              <div className="tax-row"><span>Section 80D Health Insurance</span><strong>{exInr(tax.section_80d_inr)}</strong></div>
+              <div className="tax-row"><span>Business Expenses</span><strong>{exInr(tax.business_inr)}</strong></div>
+              <div className="tax-row"><span>HRA Claims</span><strong>{exInr(tax.hra_inr)}</strong></div>
+              {tax.other_deductible_inr > 0 && (
+                <div className="tax-row"><span>Other deductible (untagged)</span><strong>{exInr(tax.other_deductible_inr)}</strong></div>
+              )}
+              <div className="tax-row total"><span>TOTAL DEDUCTIBLE</span><strong>{exInr(tax.total_deductible_inr)}</strong></div>
+              <div className="small-meta" style={{ marginTop: 8 }}>{tax.note}</div>
+            </div>
+          ) : <div style={{ padding: 24, fontFamily: 'var(--font-mono)', fontSize: 11, opacity: 0.5 }}>Loading…</div>}
         </div>
       </div>
+      <div className="action-row mt-20">
+        <button className="btn-brutal" style={{ fontSize: 12, padding: '10px 16px' }} onClick={() => download('csv')}>⬇ EXPORT CSV</button>
+        <button className="btn-brutal" style={{ fontSize: 12, padding: '10px 16px' }} onClick={() => download('xlsx')}>📊 EXPORT TO EXCEL</button>
+        <button className="btn-brutal" style={{ fontSize: 12, padding: '10px 16px' }}
+          onClick={() => toast('Email delivery needs an outbound mail service — planned, not yet wired', 'warn')}>📧 EMAIL REPORT</button>
+        <button className="btn-brutal action-btn gold" style={{ fontSize: 12, padding: '10px 16px', width: 'auto' }} onClick={() => download('tax_package')}>🗂 TAX PACKAGE</button>
+      </div>
+      {toastHost}
     </div>
-    <div className="action-row mt-20">
-      <button className="btn-brutal" style={{ fontSize: 12, padding: '10px 16px' }}>⬇ EXPORT CSV</button>
-      <button className="btn-brutal" style={{ fontSize: 12, padding: '10px 16px' }}>📊 EXPORT TO EXCEL</button>
-      <button className="btn-brutal" style={{ fontSize: 12, padding: '10px 16px' }}>📧 EMAIL REPORT</button>
-      <button className="btn-brutal action-btn gold" style={{ fontSize: 12, padding: '10px 16px', width: 'auto' }}>🗂 TAX PACKAGE</button>
-    </div>
-  </div>
-);
+  );
+};
 
 // Export all modules
 Object.assign(window, {

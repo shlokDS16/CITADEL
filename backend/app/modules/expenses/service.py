@@ -75,9 +75,14 @@ def shape_expense(row: dict[str, Any]) -> dict[str, Any]:
 # Categorize (preview, no save)
 # --------------------------------------------------------------------------
 def preview_category(payload: schemas.CategorizeIn) -> dict[str, Any]:
+    # allow_llm=False: the Add form calls this on every typing pause, and
+    # half-typed text ("Uber ri") must never reach Groq or pollute the
+    # merchant cache with garbage keys. Local layers answer instantly;
+    # the actual submit (create_expense) classifies with the LLM allowed.
     return categorize.categorize(
         description=_strip_html(payload.description),
         merchant=_strip_html(payload.merchant) or None,
+        allow_llm=False,
     )
 
 

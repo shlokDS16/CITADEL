@@ -539,9 +539,16 @@ async def tax_summary(citizen: str = Depends(_citizen)) -> schemas.TaxSummaryOut
 )
 async def export_report(
     format: str = Query(default="csv", pattern="^(csv|xlsx|tax_package)$"),
-    citizen: str = Depends(_citizen),
+    uid: Optional[str] = Query(
+        default=None,
+        description="Identity fallback for browser navigations (<a download>) "
+        "which cannot send X-User-Id — same pattern as fake-news report.html.",
+    ),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
 ):
     from fastapi.responses import Response
+
+    citizen = _citizen(x_user_id or uid)
 
     builders = {
         "csv": (service.export_csv, "text/csv; charset=utf-8"),
