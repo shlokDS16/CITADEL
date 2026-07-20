@@ -18,11 +18,21 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    UploadFile,
+)
 from starlette.concurrency import run_in_threadpool
 
+from app.config import settings
+from app.shared.filetype import assert_upload_kind
 from app.shared.ratelimit import rate_limit
-from app.modules.tickets import schemas, service
+from app.modules.tickets import schemas, service, storage
 
 log = logging.getLogger("citadel.tickets.router")
 router = APIRouter()
@@ -133,3 +143,93 @@ async def get_ticket(ticket_id: str) -> schemas.TicketOut:
     if not row:
         raise HTTPException(status_code=404, detail=f"ticket {ticket_id} not found")
     return schemas.TicketOut(**row)
+
+
+# --------------------------------------------------------------------------
+# Attachments
+# --------------------------------------------------------------------------
+def _max_body(content_length: Optional[str] = Header(default=None)) -> None:
+    """Reject an oversized upload from Content-Length *before* Starlette
+    spools the multipart body to a temp file. Route dependencies resolve
+    before the File() param, so this runs pre-buffer."""
+    if content_length is None:
+        return
+    try:
+        n = int(content_length)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid Content-Length")
+    if n > settings.max_upload_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"upload exceeds {settings.max_upload_bytes // (1024 * 1024)}MB limit",
+        )
+
+
+@router.post(
+    "/v1/tickets/{ticket_id}/attachments",
+    response_model=schemas.AttachmentOut,
+    status_code=201,
+    tags=[_TAG],
+    summary="Attach a photo / video / voice note / file to a ticket",
+    dependencies=[_RL_STD, Depends(_max_body)],
+)
+async def add_attachment(
+    ticket_id: str,
+    kind: str = Form(default="file", description="photo | video | voice | file"),
+    file: UploadFile = File(...),
+) -> schemas.AttachmentOut:
+    kind = (kind or "file").strip().lower()
+    if kind not in storage.EXT_ALLOWLIST:
+        raise HTTPException(
+            status_code=400,
+            detail=f"kind must be one of: {', '.join(sorted(storage.EXT_ALLOWLIST))}",
+        )
+
+    ext = storage.extension_of(file.filename)
+    if ext not in storage.EXT_ALLOWLIST[kind]:
+        raise HTTPException(
+            status_code=415,
+            detail=(
+                f"extension {ext or '(none)'} not allowed for {kind}; "
+                f"expected one of {', '.join(sorted(storage.EXT_ALLOWLIST[kind]))}"
+            ),
+        )
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="empty file")
+    if len(content) > settings.max_upload_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"upload exceeds {settings.max_upload_bytes // (1024 * 1024)}MB limit",
+        )
+
+    # Content sniff behind the extension gate — defeats a renamed payload
+    # (e.g. an .exe uploaded as evidence.jpg). Raises 415 on mismatch.
+    detected = assert_upload_kind(file.filename, content, storage.KIND_ALLOWLIST[kind])
+
+    try:
+        att = await run_in_threadpool(
+            service.attach_file, ticket_id, kind, content, file.filename, detected
+        )
+        return schemas.AttachmentOut(**att)
+    except LookupError as le:
+        raise HTTPException(status_code=404, detail=str(le))
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        log.exception("attachment upload failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/v1/tickets/{ticket_id}/attachments/{att_id}",
+    tags=[_TAG],
+    summary="Pre-signed attachment download URL (5 min TTL)",
+    dependencies=[_RL_STD],
+)
+async def attachment_url(ticket_id: str, att_id: str) -> dict[str, object]:
+    url = await run_in_threadpool(service.attachment_download_url, ticket_id, att_id)
+    if not url:
+        raise HTTPException(status_code=404, detail="attachment not found")
+    return {"download_url": url, "expires_in": storage.SIGNED_URL_TTL_SECONDS}

@@ -85,12 +85,21 @@ class ClassifierStatus(BaseModel):
     vader_available: bool
 
 
+class StorageStatus(BaseModel):
+    bucket: str
+    ready: bool
+    private: bool = Field(
+        ..., description="Attachments are citizen PII — a public bucket is a failure."
+    )
+
+
 class HealthResponse(BaseModel):
     status: Literal["ok", "degraded"]
     module: Literal["tickets"]
     version: str
     tables: list[TableStatus]
     classifier: ClassifierStatus
+    storage: StorageStatus
     queue_depth: dict[str, int] = Field(
         default_factory=dict,
         description="Unresolved ticket count per department.",

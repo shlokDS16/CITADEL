@@ -215,6 +215,34 @@ def list_updates(ticket_id: str, include_internal: bool = False) -> list[dict[st
         return []
 
 
+def insert_attachment(row: dict[str, Any]) -> dict[str, Any]:
+    """Record an uploaded attachment. Raises — the caller removes the
+    orphaned storage object if this fails."""
+    sb = _sb()
+    if sb is None:
+        raise RuntimeError("Supabase unavailable — cannot record attachment")
+    res = sb.table("ticket_attachments").insert(row).execute()
+    data = res.data or []
+    if not data:
+        raise RuntimeError("attachment insert returned no row")
+    return data[0]
+
+
+def get_attachment(att_id: str, ticket_id: Optional[str] = None) -> Optional[dict[str, Any]]:
+    sb = _sb()
+    if sb is None:
+        return None
+    try:
+        q = sb.table("ticket_attachments").select("*").eq("id", att_id)
+        if ticket_id:
+            q = q.eq("ticket_id", ticket_id)
+        rows = (q.limit(1).execute()).data or []
+        return rows[0] if rows else None
+    except Exception as e:  # noqa: BLE001
+        log.debug("get_attachment failed: %s", e)
+        return None
+
+
 def list_attachments(ticket_id: str) -> list[dict[str, Any]]:
     sb = _sb()
     if sb is None:

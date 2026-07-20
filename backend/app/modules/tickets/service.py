@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from app import __version__
-from app.modules.tickets import pipeline, repo, schemas
+from app.modules.tickets import pipeline, repo, schemas, storage
 
 log = logging.getLogger("citadel.tickets.service")
 
@@ -105,8 +105,13 @@ def shape_ticket(
     row: dict[str, Any],
     attachments: Optional[list[dict[str, Any]]] = None,
     updates: Optional[list[dict[str, Any]]] = None,
+    sign_urls: bool = False,
 ) -> dict[str, Any]:
-    """DB row → the shape TicketOut / the frontend expects."""
+    """DB row → the shape TicketOut / the frontend expects.
+
+    `sign_urls` is off by default: each signed URL is a storage API round
+    trip, so list endpoints skip them and only the detail view pays.
+    """
     cat = row.get("category") or "Other"
     status = row.get("status") or "open"
     return {
@@ -142,7 +147,9 @@ def shape_ticket(
                 "name": a.get("name"),
                 "size_bytes": int(a.get("size_bytes") or 0),
                 "mime_type": a.get("mime_type"),
-                "download_url": None,  # pre-signed URLs land in Phase 1.3
+                "download_url": (
+                    storage.signed_url(a.get("storage_path") or "") if sign_urls else None
+                ),
                 "transcript": a.get("transcript"),
             }
             for a in (attachments or [])
@@ -295,7 +302,67 @@ def get_ticket(ticket_id: str) -> Optional[dict[str, Any]]:
         row,
         attachments=repo.list_attachments(ticket_id),
         updates=repo.list_updates(ticket_id),
+        sign_urls=True,
     )
+
+
+# --------------------------------------------------------------------------
+# Attachments
+# --------------------------------------------------------------------------
+def attach_file(
+    ticket_id: str,
+    kind: str,
+    content: bytes,
+    filename: Optional[str],
+    detected_kind: str,
+) -> dict[str, Any]:
+    """Upload one attachment and record it.
+
+    Storage first, then the DB row. If the row fails the object is removed,
+    so we never leave an orphan the periodic scan would have to quarantine.
+    """
+    if not repo.get_ticket(ticket_id):
+        raise LookupError(f"ticket {ticket_id} not found")
+
+    display_name = storage.sanitize_filename(filename, fallback=f"{kind}{storage.extension_of(filename)}")
+    mime = storage.guess_mime(filename, detected_kind)
+    path = storage.upload(ticket_id, content, filename, mime)
+
+    try:
+        row = repo.insert_attachment({
+            "ticket_id": ticket_id,
+            "type": kind,
+            "name": display_name,
+            "storage_path": path,
+            "mime_type": mime,
+            "size_bytes": len(content),
+        })
+    except Exception:
+        storage.remove(path)
+        raise
+
+    repo.add_update(
+        ticket_id,
+        text=f"Attachment added: {display_name}",
+        actor_label="You",
+        actor_role="citizen",
+    )
+    return {
+        "id": str(row.get("id")),
+        "type": row.get("type"),
+        "name": row.get("name"),
+        "size_bytes": int(row.get("size_bytes") or 0),
+        "mime_type": row.get("mime_type"),
+        "download_url": storage.signed_url(path),
+        "transcript": row.get("transcript"),
+    }
+
+
+def attachment_download_url(ticket_id: str, att_id: str) -> Optional[str]:
+    row = repo.get_attachment(att_id, ticket_id=ticket_id)
+    if not row:
+        return None
+    return storage.signed_url(row.get("storage_path") or "")
 
 
 # --------------------------------------------------------------------------
@@ -305,8 +372,11 @@ def health() -> dict[str, Any]:
     tables = repo.probe_tables()
     classifier = pipeline.classifier_status()
     missing = [t["name"] for t in tables if not t["present"]]
+    bucket_ok, bucket_note = storage.bucket_ready()
 
     notes: list[str] = []
+    if bucket_note:
+        notes.append(bucket_note)
     if missing:
         notes.append(
             f"{len(missing)} table(s) missing: {', '.join(missing)} — apply "
@@ -322,13 +392,14 @@ def health() -> dict[str, Any]:
         "No PostGIS on this project: geo is geo_lat/geo_lng + app-side H3, not GEOGRAPHY."
     )
 
-    degraded = bool(missing) or classifier["mode"] == "unavailable"
+    degraded = bool(missing) or classifier["mode"] == "unavailable" or not bucket_ok
     return {
         "status": "degraded" if degraded else "ok",
         "module": "tickets",
         "version": __version__,
         "tables": tables,
         "classifier": classifier,
+        "storage": {"bucket": storage.BUCKET, "ready": bucket_ok, "private": bucket_ok},
         "queue_depth": repo.queue_depth(),
         "notes": notes,
     }
