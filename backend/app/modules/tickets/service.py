@@ -307,6 +307,149 @@ def get_ticket(ticket_id: str) -> Optional[dict[str, Any]]:
 
 
 # --------------------------------------------------------------------------
+# My Tickets — list, KPIs, citizen actions
+# --------------------------------------------------------------------------
+#: Citizen may reopen a resolved ticket within this window (spec-07).
+REOPEN_WINDOW_DAYS = 14
+
+
+def list_tickets(
+    submitted_by: Optional[str] = None,
+    status: Optional[str] = None,
+    category: Optional[str] = None,
+    limit: int = 25,
+    offset: int = 0,
+) -> dict[str, Any]:
+    rows, total = repo.list_tickets(
+        submitted_by=submitted_by, status=status, category=category,
+        limit=limit, offset=offset,
+    )
+    return {
+        "data": [shape_ticket(r) for r in rows],
+        "meta": {"total": total, "limit": limit, "offset": offset},
+    }
+
+
+def _avg_resolution_label(samples: list[tuple[str, str]]) -> str:
+    """Mean resolution time over real resolved tickets. '—' when there are
+    none — an invented number here would be a lie on a gov dashboard."""
+    deltas: list[float] = []
+    for created, resolved in samples:
+        c, r = _parse_dt(created), _parse_dt(resolved)
+        if c and r and r >= c:
+            deltas.append((r - c).total_seconds())
+    if not deltas:
+        return "—"
+    mean = sum(deltas) / len(deltas)
+    if mean < 3600:
+        return f"{int(mean // 60)}m"
+    if mean < 86400:
+        return f"{int(mean // 3600)}h"
+    return f"{mean / 86400:.1f}d"
+
+
+def ticket_stats(submitted_by: Optional[str] = None) -> dict[str, Any]:
+    """KPI strip for the My-Tickets tab. Every number is computed from the
+    DB — the frontend mock's hardcoded 1/2/8/36h is replaced, not mirrored."""
+    counts = repo.status_counts(submitted_by)
+    in_progress = sum(
+        counts.get(s, 0) for s in ("assigned", "in_progress", "verification")
+    )
+    return {
+        "open": counts.get("open", 0) + counts.get("reopened", 0),
+        "in_progress": in_progress,
+        "resolved": counts.get("resolved", 0) + counts.get("closed", 0),
+        "avg_resolution": _avg_resolution_label(repo.resolution_samples(submitted_by)),
+        "by_status": counts,
+    }
+
+
+def add_citizen_update(
+    ticket_id: str,
+    text: str,
+    actor_id: Optional[str] = None,
+    actor_label: str = "You",
+) -> dict[str, Any]:
+    body = _strip_html(text)
+    if not body:
+        raise ValueError("text is required")
+    if not repo.get_ticket(ticket_id):
+        raise LookupError(f"ticket {ticket_id} not found")
+    row = repo.add_update(
+        ticket_id, text=body, actor_label=actor_label,
+        actor_role="citizen", actor_id=actor_id, visibility="public",
+    )
+    if row is None:
+        raise RuntimeError("could not record update")
+    return {
+        "id": str(row.get("id")),
+        "ticket_id": row.get("ticket_id"),
+        "actor_id": row.get("actor_id"),
+        "actor_label": row.get("actor_label"),
+        "actor_role": row.get("actor_role"),
+        "text": row.get("text"),
+        "visibility": row.get("visibility"),
+        "created_at": row.get("created_at"),
+    }
+
+
+def rate_ticket(ticket_id: str, rating: int, comment: Optional[str] = None) -> dict[str, Any]:
+    """Citizen rates the resolution 1-5. Only meaningful once resolved."""
+    if rating < 1 or rating > 5:
+        raise ValueError("rating must be between 1 and 5")
+    row = repo.get_ticket(ticket_id)
+    if not row:
+        raise LookupError(f"ticket {ticket_id} not found")
+    if row.get("status") not in ("resolved", "closed"):
+        raise ValueError(
+            f"ticket is {row.get('status')} — only a resolved ticket can be rated"
+        )
+    patch: dict[str, Any] = {"rating": rating}
+    if comment:
+        patch["rating_comment"] = _strip_html(comment)[:2000]
+    updated = repo.update_ticket(ticket_id, patch)
+    repo.add_update(
+        ticket_id, text=f"Citizen rated the resolution {rating}/5.",
+        actor_label="You", actor_role="citizen",
+    )
+    return shape_ticket(updated or {**row, **patch})
+
+
+def reopen_ticket(ticket_id: str, reason: str) -> dict[str, Any]:
+    """Reopen a resolved ticket within REOPEN_WINDOW_DAYS of resolution."""
+    body = _strip_html(reason)
+    if not body:
+        raise ValueError("a reason is required to reopen")
+    row = repo.get_ticket(ticket_id)
+    if not row:
+        raise LookupError(f"ticket {ticket_id} not found")
+    if row.get("status") not in ("resolved", "closed"):
+        raise ValueError(f"ticket is {row.get('status')} — only a resolved ticket can be reopened")
+
+    resolved = _parse_dt(row.get("resolved_at"))
+    if resolved:
+        age_days = (datetime.now(timezone.utc) - resolved).total_seconds() / 86400
+        if age_days > REOPEN_WINDOW_DAYS:
+            raise ValueError(
+                f"reopen window is {REOPEN_WINDOW_DAYS} days; this ticket was "
+                f"resolved {int(age_days)} days ago"
+            )
+
+    now = datetime.now(timezone.utc)
+    updated = repo.update_ticket(ticket_id, {
+        "status": "reopened",
+        "reopened_at": now.isoformat(),
+        "resolved_at": None,
+        "closed_at": None,
+    })
+    repo.add_update(
+        ticket_id, text=f"Ticket reopened by citizen: {body}",
+        actor_label="You", actor_role="citizen",
+    )
+    return shape_ticket(updated or row)
+
+
+# --------------------------------------------------------------------------
 # Attachments
 # --------------------------------------------------------------------------
 def attach_file(

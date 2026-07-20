@@ -173,6 +173,95 @@ def get_ticket(ticket_id: str) -> Optional[dict[str, Any]]:
         return None
 
 
+def list_tickets(
+    submitted_by: Optional[str] = None,
+    status: Optional[str] = None,
+    category: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    """Filtered ticket list + unfiltered-by-paging total.
+
+    `submitted_by=None` means "no identity" — until Phase 3 auth exists we
+    cannot scope to a real citizen, so the caller decides whether that
+    means everything (demo) or nothing.
+    """
+    sb = _sb()
+    if sb is None:
+        return [], 0
+    try:
+        q = sb.table("tickets").select("*", count="exact")
+        if submitted_by:
+            q = q.eq("submitted_by", submitted_by)
+        if status:
+            q = q.in_("status", [s.strip() for s in status.split(",") if s.strip()])
+        if category:
+            q = q.in_("category", [c.strip() for c in category.split(",") if c.strip()])
+        res = (
+            q.order("created_at", desc=True)
+            .range(offset, offset + limit - 1)
+            .execute()
+        )
+        return (res.data or []), (res.count or 0)
+    except Exception as e:  # noqa: BLE001
+        log.debug("list_tickets failed: %s", e)
+        return [], 0
+
+
+def update_ticket(ticket_id: str, patch: dict[str, Any]) -> Optional[dict[str, Any]]:
+    sb = _sb()
+    if sb is None:
+        raise RuntimeError("Supabase unavailable — cannot update ticket")
+    res = sb.table("tickets").update(patch).eq("id", ticket_id).execute()
+    data = res.data or []
+    return data[0] if data else None
+
+
+def status_counts(submitted_by: Optional[str] = None) -> dict[str, int]:
+    """Counts per status, for the My-Tickets KPI strip."""
+    sb = _sb()
+    if sb is None:
+        return {}
+    try:
+        q = sb.table("tickets").select("status")
+        if submitted_by:
+            q = q.eq("submitted_by", submitted_by)
+        rows = q.execute().data or []
+    except Exception as e:  # noqa: BLE001
+        log.debug("status_counts failed: %s", e)
+        return {}
+    out: dict[str, int] = {}
+    for r in rows:
+        s = r.get("status") or "open"
+        out[s] = out.get(s, 0) + 1
+    return out
+
+
+def resolution_samples(submitted_by: Optional[str] = None, limit: int = 200) -> list[tuple[str, str]]:
+    """(created_at, resolved_at) pairs for resolved tickets — feeds the
+    average-resolution KPI. Computed from real timestamps, never guessed."""
+    sb = _sb()
+    if sb is None:
+        return []
+    try:
+        q = (
+            sb.table("tickets")
+            .select("created_at, resolved_at")
+            .not_.is_("resolved_at", "null")
+        )
+        if submitted_by:
+            q = q.eq("submitted_by", submitted_by)
+        rows = q.limit(limit).execute().data or []
+    except Exception as e:  # noqa: BLE001
+        log.debug("resolution_samples failed: %s", e)
+        return []
+    return [
+        (r["created_at"], r["resolved_at"])
+        for r in rows
+        if r.get("created_at") and r.get("resolved_at")
+    ]
+
+
 def add_update(
     ticket_id: str,
     text: str,

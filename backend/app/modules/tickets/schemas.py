@@ -240,6 +240,40 @@ class TicketOut(BaseModel):
     updates: list[TicketUpdateOut] = Field(default_factory=list)
 
 
+class TicketListMeta(BaseModel):
+    total: int
+    limit: int
+    offset: int
+
+
+class TicketListOut(BaseModel):
+    data: list[TicketOut]
+    meta: TicketListMeta
+
+
+class TicketStatsOut(BaseModel):
+    open: int
+    in_progress: int
+    resolved: int
+    avg_resolution: str = Field(
+        ..., description="Mean over resolved tickets, or '—' when there are none."
+    )
+    by_status: dict[str, int] = Field(default_factory=dict)
+
+
+class TicketUpdateIn(BaseModel):
+    text: str = Field(..., min_length=1, max_length=2000)
+
+
+class TicketRateIn(BaseModel):
+    rating: int = Field(..., ge=1, le=5)
+    comment: Optional[str] = Field(default=None, max_length=2000)
+
+
+class TicketReopenIn(BaseModel):
+    reason: str = Field(..., min_length=1, max_length=2000)
+
+
 class TicketCreateOut(BaseModel):
     ticket: TicketOut
     preview: TicketPreviewOut = Field(

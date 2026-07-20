@@ -25,6 +25,7 @@ from fastapi import (
     Form,
     Header,
     HTTPException,
+    Query,
     UploadFile,
 )
 from starlette.concurrency import run_in_threadpool
@@ -131,6 +132,43 @@ async def create_ticket(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# NOTE: /mine and /stats MUST stay above /{ticket_id} — FastAPI matches in
+# declaration order, so a path param declared first would swallow them.
+@router.get(
+    "/v1/tickets/mine",
+    response_model=schemas.TicketListOut,
+    tags=[_TAG],
+    summary="Citizen's own tickets",
+    dependencies=[_RL_STD],
+)
+async def my_tickets(
+    status: Optional[str] = Query(default=None, description="Comma-separated status filter"),
+    category: Optional[str] = Query(default=None, description="Comma-separated category filter"),
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+) -> schemas.TicketListOut:
+    result = await run_in_threadpool(
+        service.list_tickets, _actor(x_user_id), status, category, limit, offset
+    )
+    return schemas.TicketListOut(**result)
+
+
+@router.get(
+    "/v1/tickets/stats",
+    response_model=schemas.TicketStatsOut,
+    tags=[_TAG],
+    summary="My-Tickets KPI strip — counts and mean resolution time",
+    dependencies=[_RL_STD],
+)
+async def ticket_stats(
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+) -> schemas.TicketStatsOut:
+    return schemas.TicketStatsOut(
+        **await run_in_threadpool(service.ticket_stats, _actor(x_user_id))
+    )
+
+
 @router.get(
     "/v1/tickets/{ticket_id}",
     response_model=schemas.TicketOut,
@@ -143,6 +181,76 @@ async def get_ticket(ticket_id: str) -> schemas.TicketOut:
     if not row:
         raise HTTPException(status_code=404, detail=f"ticket {ticket_id} not found")
     return schemas.TicketOut(**row)
+
+
+@router.post(
+    "/v1/tickets/{ticket_id}/updates",
+    response_model=schemas.TicketUpdateOut,
+    status_code=201,
+    tags=[_TAG],
+    summary="Add a citizen comment to a ticket's timeline",
+    dependencies=[_RL_STD],
+)
+async def add_update(
+    ticket_id: str,
+    payload: schemas.TicketUpdateIn,
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+) -> schemas.TicketUpdateOut:
+    try:
+        row = await run_in_threadpool(
+            service.add_citizen_update, ticket_id, payload.text, _actor(x_user_id)
+        )
+        return schemas.TicketUpdateOut(**row)
+    except LookupError as le:
+        raise HTTPException(status_code=404, detail=str(le))
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:  # noqa: BLE001
+        log.exception("add_update failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/v1/tickets/{ticket_id}/rate",
+    response_model=schemas.TicketOut,
+    tags=[_TAG],
+    summary="Rate a resolved ticket 1-5",
+    dependencies=[_RL_STD],
+)
+async def rate_ticket(ticket_id: str, payload: schemas.TicketRateIn) -> schemas.TicketOut:
+    try:
+        row = await run_in_threadpool(
+            service.rate_ticket, ticket_id, payload.rating, payload.comment
+        )
+        return schemas.TicketOut(**row)
+    except LookupError as le:
+        raise HTTPException(status_code=404, detail=str(le))
+    except ValueError as ve:
+        # Rating an unresolved ticket is a valid request in the wrong state.
+        raise HTTPException(status_code=409, detail=str(ve))
+    except Exception as e:  # noqa: BLE001
+        log.exception("rate_ticket failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/v1/tickets/{ticket_id}/reopen",
+    response_model=schemas.TicketOut,
+    tags=[_TAG],
+    summary=f"Reopen a resolved ticket within {service.REOPEN_WINDOW_DAYS} days",
+    dependencies=[_RL_STD],
+)
+async def reopen_ticket(ticket_id: str, payload: schemas.TicketReopenIn) -> schemas.TicketOut:
+    try:
+        row = await run_in_threadpool(service.reopen_ticket, ticket_id, payload.reason)
+        return schemas.TicketOut(**row)
+    except LookupError as le:
+        raise HTTPException(status_code=404, detail=str(le))
+    except ValueError as ve:
+        raise HTTPException(status_code=409, detail=str(ve))
+    except Exception as e:  # noqa: BLE001
+        log.exception("reopen_ticket failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # --------------------------------------------------------------------------
