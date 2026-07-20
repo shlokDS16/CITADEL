@@ -262,6 +262,172 @@ def resolution_samples(submitted_by: Optional[str] = None, limit: int = 200) -> 
     ]
 
 
+def community_tickets(
+    sort: str = "trending",
+    q: Optional[str] = None,
+    limit: int = 25,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    """Public (non-anonymous-safe) community feed.
+
+    Anonymous tickets ARE included — whistleblower mode hides the
+    submitter, not the issue — but no submitter field is ever projected.
+    """
+    sb = _sb()
+    if sb is None:
+        return [], 0
+    try:
+        sel = (
+            "id, subject, category, priority, status, department, upvotes, "
+            "location_label, geo_lat, geo_lng, created_at, sla_due_at"
+        )
+        query = sb.table("tickets").select(sel, count="exact")
+        if q:
+            # PostgREST or-filter; ilike is safe here (parameterized by the client)
+            esc = q.replace("%", "").replace(",", " ")
+            query = query.or_(f"subject.ilike.%{esc}%,location_label.ilike.%{esc}%")
+        if sort == "unresolved":
+            query = query.not_.in_("status", ["resolved", "closed"])
+
+        if sort == "new":
+            query = query.order("created_at", desc=True)
+        elif sort == "unresolved":
+            query = query.order("created_at", desc=True)
+        else:  # trending / nearby -> ranked after fetch
+            query = query.order("upvotes", desc=True).order("created_at", desc=True)
+
+        res = query.range(offset, offset + limit - 1).execute()
+        return (res.data or []), (res.count or 0)
+    except Exception as e:  # noqa: BLE001
+        log.debug("community_tickets failed: %s", e)
+        return [], 0
+
+
+def comment_counts(ticket_ids: list[str]) -> dict[str, int]:
+    """Comment count per ticket, in one round trip."""
+    sb = _sb()
+    if sb is None or not ticket_ids:
+        return {}
+    try:
+        rows = (
+            sb.table("ticket_comments")
+            .select("ticket_id")
+            .in_("ticket_id", ticket_ids)
+            .is_("deleted_at", "null")
+            .execute()
+        ).data or []
+    except Exception as e:  # noqa: BLE001
+        log.debug("comment_counts failed: %s", e)
+        return {}
+    out: dict[str, int] = {}
+    for r in rows:
+        tid = r.get("ticket_id")
+        if tid:
+            out[tid] = out.get(tid, 0) + 1
+    return out
+
+
+def add_upvote(ticket_id: str, citizen_id: str) -> bool:
+    """Idempotent per (ticket, citizen) via the composite PK.
+
+    Returns True if this was a new upvote, False if already present.
+    """
+    sb = _sb()
+    if sb is None:
+        raise RuntimeError("Supabase unavailable — cannot upvote")
+    try:
+        sb.table("ticket_upvotes").insert(
+            {"ticket_id": ticket_id, "citizen_id": citizen_id}
+        ).execute()
+        return True
+    except Exception as e:  # noqa: BLE001
+        # 23505 unique_violation = already upvoted; that is success, not error
+        if "23505" in str(e) or "duplicate key" in str(e).lower():
+            return False
+        raise
+
+
+def remove_upvote(ticket_id: str, citizen_id: str) -> bool:
+    sb = _sb()
+    if sb is None:
+        raise RuntimeError("Supabase unavailable — cannot remove upvote")
+    res = (
+        sb.table("ticket_upvotes")
+        .delete()
+        .eq("ticket_id", ticket_id)
+        .eq("citizen_id", citizen_id)
+        .execute()
+    )
+    return bool(res.data)
+
+
+def count_upvotes(ticket_id: str) -> int:
+    """Authoritative count from the join table — the tickets.upvotes column
+    is a denormalized cache and must be reconciled against this."""
+    sb = _sb()
+    if sb is None:
+        return 0
+    try:
+        res = (
+            sb.table("ticket_upvotes")
+            .select("citizen_id", count="exact")
+            .eq("ticket_id", ticket_id)
+            .execute()
+        )
+        return res.count or 0
+    except Exception as e:  # noqa: BLE001
+        log.debug("count_upvotes failed: %s", e)
+        return 0
+
+
+def has_upvoted(ticket_id: str, citizen_id: str) -> bool:
+    sb = _sb()
+    if sb is None or not citizen_id:
+        return False
+    try:
+        rows = (
+            sb.table("ticket_upvotes")
+            .select("citizen_id")
+            .eq("ticket_id", ticket_id)
+            .eq("citizen_id", citizen_id)
+            .limit(1)
+            .execute()
+        ).data or []
+        return bool(rows)
+    except Exception as e:  # noqa: BLE001
+        log.debug("has_upvoted failed: %s", e)
+        return False
+
+
+def add_comment(ticket_id: str, citizen_id: str, text: str) -> Optional[dict[str, Any]]:
+    sb = _sb()
+    if sb is None:
+        raise RuntimeError("Supabase unavailable — cannot comment")
+    res = sb.table("ticket_comments").insert(
+        {"ticket_id": ticket_id, "citizen_id": citizen_id, "text": text}
+    ).execute()
+    return (res.data or [None])[0]
+
+
+def list_comments(ticket_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    sb = _sb()
+    if sb is None:
+        return []
+    try:
+        return (
+            sb.table("ticket_comments")
+            .select("*")
+            .eq("ticket_id", ticket_id)
+            .is_("deleted_at", "null")
+            .order("created_at")
+            .limit(limit)
+            .execute()
+        ).data or []
+    except Exception as e:  # noqa: BLE001
+        log.debug("list_comments failed: %s", e)
+        return []
+
+
 def add_update(
     ticket_id: str,
     text: str,

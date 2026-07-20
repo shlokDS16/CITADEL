@@ -450,6 +450,206 @@ def reopen_ticket(ticket_id: str, reason: str) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
+# Community
+# --------------------------------------------------------------------------
+#: Upvotes needed to escalate a ticket's priority one step. spec-07 left
+#: the exact number open; 25 is the starting value and lives here as a
+#: single named constant so it is trivial to retune once there is real
+#: usage data. Escalation only ever raises priority, never lowers it.
+UPVOTE_ESCALATION_THRESHOLD = 25
+
+#: tickets.priority -> the severity vocabulary the community UI renders.
+_SEVERITY_OF_PRIORITY = {
+    "LOW": "LOW",
+    "NORMAL": "MEDIUM",
+    "HIGH": "HIGH",
+    "CRITICAL": "CRITICAL",
+}
+
+
+def _trending_score(row: dict[str, Any], comments: int) -> float:
+    """Upvotes + discussion, decayed by age.
+
+    A 3-day-old issue with 40 supports should outrank a 2-hour-old one
+    with 3. Half-life of 48h keeps the feed moving without letting a fresh
+    post with no support jump the queue.
+    """
+    upvotes = int(row.get("upvotes") or 0)
+    created = _parse_dt(row.get("created_at"))
+    age_h = (
+        (datetime.now(timezone.utc) - created).total_seconds() / 3600 if created else 0.0
+    )
+    engagement = upvotes + 2.0 * comments
+    return engagement / (1.0 + age_h / 48.0)
+
+
+def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """Great-circle distance. Used instead of PostGIS ST_Distance, which
+    this project cannot use — see migration 20260720000005."""
+    import math
+
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lng2 - lng1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+def community(
+    sort: str = "trending",
+    q: Optional[str] = None,
+    limit: int = 25,
+    offset: int = 0,
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+    citizen_id: Optional[str] = None,
+) -> dict[str, Any]:
+    sort = (sort or "trending").lower()
+    # 'nearby' needs a wider candidate set than the page, since distance is
+    # computed in Python rather than in the query.
+    fetch_limit = 200 if sort in ("trending", "nearby") else limit
+    rows, total = repo.community_tickets(
+        sort=sort, q=q, limit=fetch_limit, offset=0 if sort in ("trending", "nearby") else offset
+    )
+    counts = repo.comment_counts([r["id"] for r in rows if r.get("id")])
+
+    if sort == "nearby":
+        if lat is None or lng is None:
+            raise ValueError("sort=nearby requires lat and lng")
+        located = []
+        for r in rows:
+            if r.get("geo_lat") is None or r.get("geo_lng") is None:
+                continue
+            r = {**r, "_distance_km": round(
+                _haversine_km(lat, lng, float(r["geo_lat"]), float(r["geo_lng"])), 2
+            )}
+            located.append(r)
+        located.sort(key=lambda r: r["_distance_km"])
+        rows, total = located, len(located)
+        rows = rows[offset:offset + limit]
+    elif sort == "trending":
+        rows.sort(key=lambda r: _trending_score(r, counts.get(r.get("id"), 0)), reverse=True)
+        rows = rows[offset:offset + limit]
+
+    data = []
+    for r in rows:
+        tid = r.get("id")
+        priority = r.get("priority") or "NORMAL"
+        cat = r.get("category") or "Other"
+        data.append({
+            "id": tid,
+            "title": r.get("subject") or "",
+            "location_label": r.get("location_label"),
+            "category": cat,
+            "display_category": schemas.DISPLAY_CATEGORY.get(cat, cat),
+            "upvotes": int(r.get("upvotes") or 0),
+            "response_count": counts.get(tid, 0),
+            "age": _age(r.get("created_at")),
+            "severity": _SEVERITY_OF_PRIORITY.get(priority, "MEDIUM"),
+            "status": r.get("status") or "open",
+            "distance_km": r.get("_distance_km"),
+            "has_upvoted": repo.has_upvoted(tid, citizen_id) if citizen_id else False,
+        })
+    return {"data": data, "meta": {"total": total, "limit": limit, "offset": offset, "sort": sort}}
+
+
+def _reconcile_upvotes(ticket_id: str) -> tuple[int, Optional[str]]:
+    """Recount from the join table, write the cache, and escalate priority
+    if the ticket crossed the support threshold.
+
+    Returns (count, new_priority | None). The count is always the authoritative
+    join-table value, never an increment of a possibly-stale cache.
+    """
+    count = repo.count_upvotes(ticket_id)
+    patch: dict[str, Any] = {"upvotes": count}
+    escalated: Optional[str] = None
+
+    row = repo.get_ticket(ticket_id) or {}
+    current = row.get("priority") or "NORMAL"
+    if (
+        count >= UPVOTE_ESCALATION_THRESHOLD
+        and current in ("LOW", "NORMAL")
+        and row.get("status") not in ("resolved", "closed")
+    ):
+        escalated = "HIGH"
+        patch["priority"] = escalated
+        patch["priority_was_auto"] = True
+
+    repo.update_ticket(ticket_id, patch)
+    if escalated:
+        repo.add_update(
+            ticket_id,
+            text=(
+                f"Priority raised to {escalated} — {count} residents have supported "
+                f"this issue (threshold {UPVOTE_ESCALATION_THRESHOLD})."
+            ),
+            actor_label="CITADEL AI",
+            actor_role="system",
+        )
+    return count, escalated
+
+
+def upvote(ticket_id: str, citizen_id: str) -> dict[str, Any]:
+    if not repo.get_ticket(ticket_id):
+        raise LookupError(f"ticket {ticket_id} not found")
+    created = repo.add_upvote(ticket_id, citizen_id)
+    count, escalated = _reconcile_upvotes(ticket_id)
+    return {
+        "ticket_id": ticket_id,
+        "upvotes": count,
+        "has_upvoted": True,
+        "created": created,
+        "priority_escalated_to": escalated,
+    }
+
+
+def remove_upvote(ticket_id: str, citizen_id: str) -> dict[str, Any]:
+    if not repo.get_ticket(ticket_id):
+        raise LookupError(f"ticket {ticket_id} not found")
+    removed = repo.remove_upvote(ticket_id, citizen_id)
+    count, _ = _reconcile_upvotes(ticket_id)
+    return {
+        "ticket_id": ticket_id,
+        "upvotes": count,
+        "has_upvoted": False,
+        "created": False,
+        "removed": removed,
+    }
+
+
+def add_comment(ticket_id: str, citizen_id: str, text: str) -> dict[str, Any]:
+    body = _strip_html(text)
+    if not body:
+        raise ValueError("text is required")
+    if not repo.get_ticket(ticket_id):
+        raise LookupError(f"ticket {ticket_id} not found")
+    row = repo.add_comment(ticket_id, citizen_id, body[:2000])
+    if row is None:
+        raise RuntimeError("could not record comment")
+    return _shape_comment(row)
+
+
+def _shape_comment(row: dict[str, Any]) -> dict[str, Any]:
+    """Comments are public. The citizen uuid is deliberately NOT exposed —
+    only a short stable pseudonym, so a public feed cannot be used to
+    correlate a person across the tickets they commented on."""
+    cid = str(row.get("citizen_id") or "")
+    return {
+        "id": str(row.get("id")),
+        "ticket_id": row.get("ticket_id"),
+        "author_label": f"Citizen {cid[:4].upper()}" if cid else "Citizen",
+        "text": row.get("text") or "",
+        "created_at": row.get("created_at"),
+        "age": _age(row.get("created_at")),
+    }
+
+
+def list_comments(ticket_id: str) -> list[dict[str, Any]]:
+    return [_shape_comment(r) for r in repo.list_comments(ticket_id)]
+
+
+# --------------------------------------------------------------------------
 # Attachments
 # --------------------------------------------------------------------------
 def attach_file(

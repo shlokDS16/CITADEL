@@ -274,6 +274,62 @@ class TicketReopenIn(BaseModel):
     reason: str = Field(..., min_length=1, max_length=2000)
 
 
+class CommunityTicketOut(BaseModel):
+    id: str
+    title: str
+    location_label: Optional[str] = None
+    category: Category
+    display_category: str
+    upvotes: int
+    response_count: int
+    age: str
+    severity: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+    status: TicketStatus
+    distance_km: Optional[float] = Field(
+        default=None, description="Only present when sort=nearby."
+    )
+    has_upvoted: bool = False
+
+
+class CommunityMeta(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    sort: str
+
+
+class CommunityListOut(BaseModel):
+    data: list[CommunityTicketOut]
+    meta: CommunityMeta
+
+
+class UpvoteOut(BaseModel):
+    ticket_id: str
+    upvotes: int = Field(..., description="Authoritative count from the join table.")
+    has_upvoted: bool
+    created: bool = Field(..., description="False when the upvote already existed.")
+    removed: Optional[bool] = None
+    priority_escalated_to: Optional[Priority] = Field(
+        default=None,
+        description="Set when community support crossed the escalation threshold.",
+    )
+
+
+class CommentIn(BaseModel):
+    text: str = Field(..., min_length=1, max_length=2000)
+
+
+class CommentOut(BaseModel):
+    id: str
+    ticket_id: str
+    author_label: str = Field(
+        ..., description="Pseudonymous. The citizen uuid is never exposed publicly."
+    )
+    text: str
+    created_at: datetime
+    age: str
+
+
 class TicketCreateOut(BaseModel):
     ticket: TicketOut
     preview: TicketPreviewOut = Field(

@@ -170,6 +170,133 @@ async def ticket_stats(
 
 
 @router.get(
+    "/v1/tickets/community",
+    response_model=schemas.CommunityListOut,
+    tags=[_TAG],
+    summary="Community feed — trending / new / nearby / unresolved",
+    dependencies=[_RL_STD],
+)
+async def community(
+    sort: str = Query(default="trending", pattern="^(trending|new|nearby|unresolved)$"),
+    q: Optional[str] = Query(default=None, max_length=120),
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    lat: Optional[float] = Query(default=None, ge=-90, le=90),
+    lng: Optional[float] = Query(default=None, ge=-180, le=180),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+) -> schemas.CommunityListOut:
+    try:
+        result = await run_in_threadpool(
+            service.community, sort, q, limit, offset, lat, lng, _actor(x_user_id)
+        )
+        return schemas.CommunityListOut(**result)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:  # noqa: BLE001
+        log.exception("community feed failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _require_citizen(x_user_id: Optional[str]) -> str:
+    """Upvotes and comments are per-citizen, so they need an identity.
+
+    Until Phase 3 this is an unverified header — but a *missing* one is
+    still a 400, because without it the idempotency key (ticket, citizen)
+    is meaningless and one caller could upvote unboundedly.
+    """
+    actor = _actor(x_user_id)
+    if not actor:
+        raise HTTPException(
+            status_code=400,
+            detail="X-User-Id header with a uuid is required for this action",
+        )
+    return actor
+
+
+@router.post(
+    "/v1/tickets/{ticket_id}/upvote",
+    response_model=schemas.UpvoteOut,
+    tags=[_TAG],
+    summary="Support a community ticket (idempotent per citizen)",
+    dependencies=[_RL_STD],
+)
+async def upvote(
+    ticket_id: str,
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+) -> schemas.UpvoteOut:
+    citizen = _require_citizen(x_user_id)
+    try:
+        return schemas.UpvoteOut(**await run_in_threadpool(service.upvote, ticket_id, citizen))
+    except LookupError as le:
+        raise HTTPException(status_code=404, detail=str(le))
+    except Exception as e:  # noqa: BLE001
+        log.exception("upvote failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/v1/tickets/{ticket_id}/upvote",
+    response_model=schemas.UpvoteOut,
+    tags=[_TAG],
+    summary="Withdraw support",
+    dependencies=[_RL_STD],
+)
+async def remove_upvote(
+    ticket_id: str,
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+) -> schemas.UpvoteOut:
+    citizen = _require_citizen(x_user_id)
+    try:
+        return schemas.UpvoteOut(
+            **await run_in_threadpool(service.remove_upvote, ticket_id, citizen)
+        )
+    except LookupError as le:
+        raise HTTPException(status_code=404, detail=str(le))
+    except Exception as e:  # noqa: BLE001
+        log.exception("remove upvote failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/v1/tickets/{ticket_id}/comments",
+    response_model=list[schemas.CommentOut],
+    tags=[_TAG],
+    summary="Public comment thread",
+    dependencies=[_RL_STD],
+)
+async def list_comments(ticket_id: str) -> list[schemas.CommentOut]:
+    rows = await run_in_threadpool(service.list_comments, ticket_id)
+    return [schemas.CommentOut(**r) for r in rows]
+
+
+@router.post(
+    "/v1/tickets/{ticket_id}/comments",
+    response_model=schemas.CommentOut,
+    status_code=201,
+    tags=[_TAG],
+    summary="Comment on a community ticket",
+    dependencies=[_RL_STD],
+)
+async def add_comment(
+    ticket_id: str,
+    payload: schemas.CommentIn,
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+) -> schemas.CommentOut:
+    citizen = _require_citizen(x_user_id)
+    try:
+        return schemas.CommentOut(
+            **await run_in_threadpool(service.add_comment, ticket_id, citizen, payload.text)
+        )
+    except LookupError as le:
+        raise HTTPException(status_code=404, detail=str(le))
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:  # noqa: BLE001
+        log.exception("add_comment failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
     "/v1/tickets/{ticket_id}",
     response_model=schemas.TicketOut,
     tags=[_TAG],
