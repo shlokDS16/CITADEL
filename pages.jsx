@@ -7649,11 +7649,44 @@ const FakeNewsLearn = () => {
    CITIZEN MODULE 3 — SUPPORT TICKETS
    Tabs: Submit · My Tickets · Community · Map
    ====================================================================== */
+/* ---- Support Tickets: live API plumbing ------------------------------- */
+const TK_BASE = '/api/v1/tickets';
+
+// The tickets backend keys upvotes/comments on a *uuid* X-User-Id (the
+// fake-news 'cz-xxxxxxxx' format is rejected by its _actor() parser), so
+// tickets get their own persisted browser identity. Replaced by the real
+// JWT subject in Phase 3.
+const tkUid = (() => {
+  try {
+    let u = localStorage.getItem('citadel_tk_uid');
+    if (!u) {
+      u = (crypto.randomUUID && crypto.randomUUID()) ||
+        'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+          const r = Math.random() * 16 | 0;
+          return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+        });
+      localStorage.setItem('citadel_tk_uid', u);
+    }
+    return u;
+  } catch (e) { return null; }
+})();
+
+const TK_HDR = tkUid ? { 'x-user-id': tkUid, 'x-user-role': 'citizen' } : { 'x-user-role': 'citizen' };
+const tkApi = (path, opts = {}) =>
+  apiFetch(`${TK_BASE}${path}`, { ...opts, headers: { ...TK_HDR, ...(opts.headers || {}) } });
+
+const TK_SEV_COLOR = { CRITICAL: 'var(--red)', HIGH: 'var(--red)', MEDIUM: 'var(--gold)', LOW: 'var(--cyan)' };
+
 const SupportTickets = ({ onBack }) => {
   const [tab, setTab] = React.useState('submit');
+  const [stats, setStats] = React.useState(null);
+  React.useEffect(() => {
+    tkApi('/stats').then(setStats).catch(() => {});
+  }, [tab]);
+  const activeCount = stats ? (stats.open + stats.in_progress) : null;
   const tabs = [
     { key: 'submit',    label: 'SUBMIT NEW' },
-    { key: 'mine',      label: 'MY TICKETS', badge: 4 },
+    { key: 'mine',      label: 'MY TICKETS', badge: activeCount || undefined },
     { key: 'community', label: 'COMMUNITY' },
     { key: 'map',       label: 'MAP VIEW' },
   ];
@@ -7681,33 +7714,88 @@ const TicketSubmit = () => {
   const [category, setCategory] = React.useState('Auto-detect');
   const [priority, setPriority] = React.useState('AUTO');
   const [anonymous, setAnonymous] = React.useState(false);
-  const [attachments, setAttachments] = React.useState([]);
+  const [attachments, setAttachments] = React.useState([]);   // { kind, file?, name, geo? }
   const [aiPreview, setAiPreview] = React.useState(null);
+  const [previewBusy, setPreviewBusy] = React.useState(false);
+  const [submitBusy, setSubmitBusy] = React.useState(false);
+  const [templates, setTemplates] = React.useState([]);
   const [toast, toastHost] = useToast();
+  const fileRefs = { photo: React.useRef(), video: React.useRef(), voice: React.useRef(), file: React.useRef() };
 
-  const templates = [
-    { title: 'Road Pothole',          desc: 'There is a dangerous pothole on [Street Name] near [Landmark]. It has been there for [duration] and has caused damage to vehicles.',       cat: 'Roads' },
-    { title: 'Water Supply Issue',    desc: 'We have had no water supply in [Area/Zone] since [Date/Time]. This is affecting [N] households.',                                       cat: 'Water' },
-    { title: 'Streetlight Out',       desc: 'The streetlight at [Location] has been out for [duration]. This creates a safety risk at night.',                                        cat: 'Electric' },
-    { title: 'Garbage Pile',          desc: 'Uncollected garbage at [Location] since [Date]. Creating health hazard and bad smell in the area.',                                     cat: 'Sanitation' },
-    { title: 'Stray Animals',         desc: 'Aggressive stray dogs in [Area] have been attacking residents. Request immediate intervention.',                                        cat: 'Public Safety' },
-    { title: 'Public Park Maintenance', desc: 'The public park at [Location] needs [specific maintenance]. Benches broken / playground unsafe / etc.',                               cat: 'Parks' },
-  ];
+  React.useEffect(() => {
+    tkApi('/templates').then(setTemplates).catch(() => setTemplates([]));
+  }, []);
 
-  const useTemplate = (t) => {
-    setSubject(t.title); setDesc(t.desc); setCategory(t.cat);
-    setAiPreview({
-      category: t.cat,
-      priority: t.cat === 'Public Safety' ? 'HIGH' : t.cat === 'Water' ? 'HIGH' : 'NORMAL',
-      dept: t.cat === 'Roads' ? 'PWD' : t.cat === 'Water' ? 'Water Board' : t.cat === 'Electric' ? 'Electricity Board' : t.cat === 'Sanitation' ? 'Sanitation Dept.' : t.cat === 'Public Safety' ? 'Police' : 'Parks Dept.',
-      sla: t.cat === 'Public Safety' ? '4 hours' : t.cat === 'Water' ? '8 hours' : '48 hours',
-    });
+  // One deliberate call per action (template pick / button) — never per
+  // keystroke, so previews don't drain the Groq daily budget.
+  const runPreview = (subj, body, cat, pri) => {
+    if (!(subj || body)) { toast('Enter a subject or description first', 'warn'); return; }
+    setPreviewBusy(true);
+    tkApi('/preview', { json: { subject: subj, description: body, category: cat === 'Auto-detect' ? null : cat, priority: pri } })
+      .then(p => { setAiPreview(p); if (p.quota_exhausted) toast('LLM quota drained — keyword routing used', 'warn'); })
+      .catch(e => toast(`Preview failed: ${e.message || e}`, 'error'))
+      .finally(() => setPreviewBusy(false));
   };
 
-  const submit = () => {
-    if (!subject) { toast('Please enter a subject', 'warn'); return; }
-    toast(`Ticket TKT-${1024 + Math.floor(Math.random() * 99)} submitted. SLA: ${aiPreview?.sla || '48h'}`, 'success');
-    setSubject(''); setDesc(''); setAttachments([]); setAiPreview(null);
+  const useTemplate = (t) => {
+    setSubject(t.title); setDesc(t.body); setCategory(t.display_category);
+    runPreview(t.title, t.body, t.display_category, priority);
+  };
+
+  const stageFile = (kind) => (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (f) setAttachments(a => [...a, { kind, file: f, name: f.name }]);
+    e.target.value = '';
+  };
+
+  const stageGps = () => {
+    if (!navigator.geolocation) { toast('Geolocation not available in this browser', 'warn'); return; }
+    navigator.geolocation.getCurrentPosition(
+      pos => {
+        const { latitude, longitude } = pos.coords;
+        setAttachments(a => [...a.filter(x => x.kind !== 'location'),
+          { kind: 'location', name: `${latitude.toFixed(4)}°, ${longitude.toFixed(4)}°`, geo: { lat: latitude, lng: longitude } }]);
+      },
+      () => toast('Location permission denied', 'warn'),
+      { timeout: 8000 },
+    );
+  };
+
+  const submit = async () => {
+    if (!subject || subject.trim().length < 3) { toast('Please enter a subject (min 3 chars)', 'warn'); return; }
+    setSubmitBusy(true);
+    try {
+      const gps = attachments.find(a => a.kind === 'location');
+      const res = await tkApi('', { json: {
+        subject, description: desc,
+        category: category === 'Auto-detect' ? null : category,
+        priority, is_anonymous: anonymous,
+        geo_lat: gps ? gps.geo.lat : null, geo_lng: gps ? gps.geo.lng : null,
+        location_label: gps ? gps.name : null,
+      } });
+      const t = res.ticket;
+      const files = attachments.filter(a => a.file);
+      let uploaded = 0;
+      for (const a of files) {
+        try {
+          const form = new FormData();
+          form.append('kind', a.kind);
+          form.append('file', a.file);
+          await tkApi(`/${t.id}/attachments`, { form });
+          uploaded += 1;
+        } catch (e) {
+          toast(`Attachment "${a.name}" rejected: ${e.message || e}`, 'warn');
+        }
+      }
+      toast(`${t.id} submitted → ${t.department} · ${t.priority} · SLA ${res.preview.predicted_sla_label}` +
+        (files.length ? ` · ${uploaded}/${files.length} files attached` : ''), 'success');
+      setSubject(''); setDesc(''); setCategory('Auto-detect'); setPriority('AUTO');
+      setAnonymous(false); setAttachments([]); setAiPreview(null);
+    } catch (e) {
+      toast(`Submit failed: ${e.message || e}`, 'error');
+    } finally {
+      setSubmitBusy(false);
+    }
   };
 
   return (
@@ -7735,19 +7823,23 @@ const TicketSubmit = () => {
               </div>
             </div>
             <label className="field-label mt-14">ATTACHMENTS</label>
+            <input type="file" ref={fileRefs.photo} accept="image/jpeg,image/png,image/webp,image/heic" style={{ display: 'none' }} onChange={stageFile('photo')} />
+            <input type="file" ref={fileRefs.video} accept="video/mp4,video/quicktime,video/webm" style={{ display: 'none' }} onChange={stageFile('video')} />
+            <input type="file" ref={fileRefs.voice} accept="audio/*" style={{ display: 'none' }} onChange={stageFile('voice')} />
+            <input type="file" ref={fileRefs.file}  accept=".pdf,.txt,.jpg,.jpeg,.png" style={{ display: 'none' }} onChange={stageFile('file')} />
             <div className="attach-grid">
-              <button className="attach-btn" onClick={() => setAttachments(a => [...a, { type: 'photo', name: 'photo.jpg' }])}>📷<span>Photo</span></button>
-              <button className="attach-btn" onClick={() => setAttachments(a => [...a, { type: 'video', name: 'video.mp4' }])}>🎬<span>Video</span></button>
-              <button className="attach-btn" onClick={() => setAttachments(a => [...a, { type: 'voice', name: 'voice.ogg' }])}>🎙<span>Voice</span></button>
-              <button className="attach-btn" onClick={() => setAttachments(a => [...a, { type: 'location', name: '12.97°N, 77.59°E' }])}>📍<span>GPS</span></button>
-              <button className="attach-btn" onClick={() => setAttachments(a => [...a, { type: 'file', name: 'doc.pdf' }])}>📎<span>File</span></button>
+              <button className="attach-btn" onClick={() => fileRefs.photo.current.click()}>📷<span>Photo</span></button>
+              <button className="attach-btn" onClick={() => fileRefs.video.current.click()}>🎬<span>Video</span></button>
+              <button className="attach-btn" onClick={() => fileRefs.voice.current.click()}>🎙<span>Voice</span></button>
+              <button className="attach-btn" onClick={stageGps}>📍<span>GPS</span></button>
+              <button className="attach-btn" onClick={() => fileRefs.file.current.click()}>📎<span>File</span></button>
             </div>
             {attachments.length > 0 && (
               <div className="file-list mt-14">
                 {attachments.map((a, i) => (
                   <div key={i} className="file-item">
-                    <span>{a.type === 'photo' ? '📷' : a.type === 'video' ? '🎬' : a.type === 'voice' ? '🎙' : a.type === 'location' ? '📍' : '📎'}</span>
-                    <span style={{ flex: 1 }}>{a.name}</span>
+                    <span>{a.kind === 'photo' ? '📷' : a.kind === 'video' ? '🎬' : a.kind === 'voice' ? '🎙' : a.kind === 'location' ? '📍' : '📎'}</span>
+                    <span style={{ flex: 1 }}>{a.name}{a.file ? ` (${(a.file.size / 1024).toFixed(0)} KB)` : ''}</span>
                     <button className="icon-btn" onClick={() => setAttachments(attachments.filter((_, x) => x !== i))}>✕</button>
                   </div>
                 ))}
@@ -7756,7 +7848,15 @@ const TicketSubmit = () => {
             <div style={{ marginTop: 14, padding: '10px 0', borderTop: '1px solid #eee' }}>
               <Toggle checked={anonymous} onChange={setAnonymous} label="Submit anonymously (whistleblower mode)" />
             </div>
-            <button className="btn-brutal action-btn cyan mt-20" onClick={submit}>SUBMIT TICKET</button>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button className="btn-brutal action-btn mt-20" disabled={previewBusy}
+                onClick={() => runPreview(subject, desc, category, priority)}>
+                {previewBusy ? 'ANALYZING…' : '⚡ AI PRE-ANALYSIS'}
+              </button>
+              <button className="btn-brutal action-btn cyan mt-20" disabled={submitBusy} onClick={submit}>
+                {submitBusy ? 'SUBMITTING…' : 'SUBMIT TICKET'}
+              </button>
+            </div>
           </div>
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -7764,20 +7864,34 @@ const TicketSubmit = () => {
             <div className="widget-card ai-preview">
               <div className="widget-title">⚡ AI PRE-ANALYSIS</div>
               <div className="ai-preview-body">
-                <div className="ai-row"><span>Category:</span><Badge variant="gold">{aiPreview.category}</Badge></div>
-                <div className="ai-row"><span>Priority:</span><Badge variant={aiPreview.priority === 'HIGH' ? 'red' : 'default'}>{aiPreview.priority}</Badge></div>
-                <div className="ai-row"><span>Route to:</span><span style={{ fontFamily: 'var(--font-display)', fontWeight: 700 }}>{aiPreview.dept}</span></div>
-                <div className="ai-row"><span>Expected SLA:</span><strong>{aiPreview.sla}</strong></div>
+                <div className="ai-row"><span>Category:</span><Badge variant="gold">{aiPreview.display_category}</Badge></div>
+                <div className="ai-row"><span>Priority:</span><Badge variant={aiPreview.predicted_priority === 'HIGH' || aiPreview.predicted_priority === 'CRITICAL' ? 'red' : 'default'}>{aiPreview.predicted_priority}</Badge></div>
+                <div className="ai-row"><span>Route to:</span><span style={{ fontFamily: 'var(--font-display)', fontWeight: 700 }}>{aiPreview.predicted_department.replace(/_/g, ' ')}</span></div>
+                <div className="ai-row"><span>Expected SLA:</span><strong>{aiPreview.predicted_sla_label}</strong></div>
+                <div className="ai-row"><span>Sentiment:</span><span>{aiPreview.sentiment}</span></div>
+                <div className="ai-row"><span>Confidence:</span><strong>{Math.round(aiPreview.confidence * 100)}%</strong></div>
+                <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, opacity: 0.65, marginTop: 6 }}>
+                  {aiPreview.reasoning_summary}
+                </div>
+                <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, marginTop: 4 }}>
+                  engine: <strong>{aiPreview.source === 'groq' ? 'LLM (Groq)' : 'keyword rules'}</strong>
+                  {aiPreview.quota_exhausted ? ' · ⏳ LLM quota drained' : ''}
+                </div>
               </div>
             </div>
           )}
           <div className="widget-card">
             <div className="widget-title">QUICK TEMPLATES</div>
             <div className="template-list-lg">
+              {templates.length === 0 && (
+                <div style={{ padding: 16, fontFamily: 'var(--font-mono)', fontSize: 11, opacity: 0.5 }}>
+                  Templates unavailable — backend offline?
+                </div>
+              )}
               {templates.map(t => (
-                <button key={t.title} className="template-btn-lg" onClick={() => useTemplate(t)}>
+                <button key={t.id} className="template-btn-lg" onClick={() => useTemplate(t)}>
                   <div style={{ fontWeight: 700, fontFamily: 'var(--font-display)' }}>{t.title}</div>
-                  <div className="template-cat-lg">{t.cat}</div>
+                  <div className="template-cat-lg">{t.display_category}</div>
                 </button>
               ))}
             </div>
@@ -7790,161 +7904,415 @@ const TicketSubmit = () => {
 };
 
 const TicketMine = () => {
-  const tickets = [
-    { id: 'TKT-1024', subject: 'Pothole on Sector 12 Main Road', cat: 'Roads',    priority: 'HIGH',   status: 'in_progress', age: '2d', dept: 'PWD', step: 2 },
-    { id: 'TKT-1019', subject: 'Streetlight out near Park Lane',  cat: 'Electric', priority: 'NORMAL', status: 'resolved',    age: '5d', dept: 'EB',  step: 4 },
-    { id: 'TKT-1014', subject: 'Water supply outage since 6am',   cat: 'Water',    priority: 'HIGH',   status: 'assigned',    age: '1d', dept: 'WB',  step: 1 },
-    { id: 'TKT-1008', subject: 'Garbage pile near school',         cat: 'Sanitation', priority: 'NORMAL', status: 'open',      age: '3h', dept: 'SD',  step: 0 },
-  ];
+  const [tickets, setTickets] = React.useState(null);
+  const [stats, setStats] = React.useState(null);
   const [expanded, setExpanded] = React.useState(null);
+  const [detail, setDetail] = React.useState(null);         // full ticket for the expanded card
+  const [composer, setComposer] = React.useState('');       // ADD UPDATE text
+  const [busy, setBusy] = React.useState(false);
+  const [toast, toastHost] = useToast();
+
+  const refresh = React.useCallback(() => {
+    tkApi('/mine', { params: { limit: 50 } }).then(r => setTickets(r.data)).catch(() => setTickets([]));
+    tkApi('/stats').then(setStats).catch(() => {});
+  }, []);
+  React.useEffect(() => { refresh(); }, [refresh]);
+
+  const openDetail = (id) => {
+    if (expanded === id) { setExpanded(null); setDetail(null); return; }
+    setExpanded(id); setDetail(null); setComposer('');
+    tkApi(`/${id}`).then(setDetail).catch(e => toast(`Load failed: ${e.message || e}`, 'error'));
+  };
+
+  const act = (fn, okMsg) => {
+    setBusy(true);
+    fn()
+      .then(() => { toast(okMsg, 'success'); refresh(); if (expanded) tkApi(`/${expanded}`).then(setDetail).catch(() => {}); })
+      .catch(e => toast(`${e.message || e}`, 'warn'))
+      .finally(() => setBusy(false));
+  };
+
+  const addUpdate = () => {
+    const text = composer.trim();
+    if (!text) { toast('Write the update first', 'warn'); return; }
+    act(() => tkApi(`/${expanded}/updates`, { json: { text } }).then(() => setComposer('')), 'Update posted');
+  };
+  const rate = (n) => act(() => tkApi(`/${expanded}/rate`, { json: { rating: n } }), `Rated ${n}/5`);
+  const reopen = () => {
+    const reason = window.prompt('Why are you reopening this ticket?');
+    if (!reason) return;
+    act(() => tkApi(`/${expanded}/reopen`, { json: { reason } }), 'Ticket reopened');
+  };
+
+  const fmtTime = (iso) => iso ? iso.replace('T', ' ').slice(5, 16) : '';
+
   return (
     <div className="tab-pane">
       <div className="kpi-grid-4">
-        <KPICard label="OPEN"        value="1" color="var(--cyan)" />
-        <KPICard label="IN PROGRESS" value="2" color="var(--gold)" />
-        <KPICard label="RESOLVED"    value="8" color="var(--green)" />
-        <KPICard label="AVG RESOLUTION" value="36h" color="var(--red)" />
+        <KPICard label="OPEN"           value={stats ? String(stats.open) : '…'}          color="var(--cyan)" />
+        <KPICard label="IN PROGRESS"    value={stats ? String(stats.in_progress) : '…'}   color="var(--gold)" />
+        <KPICard label="RESOLVED"       value={stats ? String(stats.resolved) : '…'}      color="var(--green)" />
+        <KPICard label="AVG RESOLUTION" value={stats ? stats.avg_resolution : '…'}        color="var(--red)" />
       </div>
       <div className="widgets-grid mt-20" style={{ gridTemplateColumns: '1fr' }}>
-        {tickets.map((t, i) => (
+        {tickets === null && <div style={{ padding: 30, fontFamily: 'var(--font-mono)', opacity: 0.5 }}>Loading tickets…</div>}
+        {tickets && tickets.length === 0 && (
+          <div style={{ padding: 30, textAlign: 'center', fontFamily: 'var(--font-mono)', opacity: 0.5 }}>
+            No tickets yet — submit your first civic issue from the SUBMIT NEW tab.
+          </div>
+        )}
+        {(tickets || []).map((t, i) => (
           <div key={t.id} className="ticket-card-lg" style={{ animationDelay: `${i * 0.06}s` }}>
             <div className="ticket-top-row">
               <div style={{ flex: 1 }}>
                 <div className="ticket-id-lg">{t.id}</div>
                 <div className="ticket-subject-lg">{t.subject}</div>
                 <div className="ticket-meta-row">
-                  <Badge variant="default">{t.cat}</Badge>
-                  <Badge variant={t.priority === 'HIGH' ? 'red' : 'default'}>{t.priority}</Badge>
-                  <span className="small-meta">Dept: {t.dept}</span>
+                  <Badge variant="default">{t.display_category}</Badge>
+                  <Badge variant={t.priority === 'HIGH' || t.priority === 'CRITICAL' ? 'red' : 'default'}>{t.priority}</Badge>
+                  <span className="small-meta">Dept: {t.department.replace(/_/g, ' ')}</span>
                   <span className="small-meta">Age: {t.age}</span>
+                  {t.sla_status !== 'on_track' && (
+                    <Badge variant={t.sla_status === 'breached' ? 'red' : 'gold'}>SLA {t.sla_status.replace('_', ' ').toUpperCase()}</Badge>
+                  )}
+                  {t.rating && <span className="small-meta">⭐ {t.rating}/5</span>}
                 </div>
               </div>
-              <StatusPill status={t.status === 'open' ? 'pending' : t.status === 'in_progress' ? 'busy' : t.status === 'resolved' ? 'online' : 'pending'} label={t.status.replace('_', ' ').toUpperCase()} />
-              <button className="btn-brutal" style={{ fontSize: 11, padding: '6px 12px' }} onClick={() => setExpanded(expanded === t.id ? null : t.id)}>{expanded === t.id ? 'COLLAPSE' : 'DETAILS'}</button>
+              <StatusPill
+                status={['open', 'reopened'].includes(t.status) ? 'pending' : ['assigned', 'in_progress', 'verification'].includes(t.status) ? 'busy' : 'online'}
+                label={t.status.replace(/_/g, ' ').toUpperCase()}
+              />
+              <button className="btn-brutal" style={{ fontSize: 11, padding: '6px 12px' }} onClick={() => openDetail(t.id)}>
+                {expanded === t.id ? 'COLLAPSE' : 'DETAILS'}
+              </button>
             </div>
             {expanded === t.id && (
               <div className="ticket-expanded">
-                <StatusTimeline
-                  current={t.step}
-                  steps={[
-                    { label: 'Submitted', time: 'Apr 22, 10:14' },
-                    { label: 'Assigned',  time: 'Apr 22, 10:28' },
-                    { label: 'In Progress', time: 'Apr 23, 09:00' },
-                    { label: 'Verification' },
-                    { label: 'Resolved' },
-                  ]}
-                />
-                <div className="ticket-updates">
-                  <div className="update-item">
-                    <Avatar name="PWD Team" color="var(--cyan)" size={28} />
-                    <div style={{ flex: 1 }}>
-                      <div className="update-text">Work order issued. Team will reach site by tomorrow morning.</div>
-                      <div className="update-time">PWD Officer · 8 hours ago</div>
+                {!detail && <div style={{ padding: 16, fontFamily: 'var(--font-mono)', opacity: 0.5 }}>Loading detail…</div>}
+                {detail && (
+                  <React.Fragment>
+                    <StatusTimeline
+                      current={detail.step}
+                      steps={[
+                        { label: 'Submitted',    time: fmtTime(detail.created_at) },
+                        { label: 'Assigned',     time: fmtTime(detail.assigned_at) },
+                        { label: 'In Progress' },
+                        { label: 'Verification' },
+                        { label: 'Resolved',     time: fmtTime(detail.resolved_at) },
+                      ]}
+                    />
+                    <div className="ticket-updates">
+                      {detail.updates.length === 0 && (
+                        <div style={{ padding: 10, fontFamily: 'var(--font-mono)', fontSize: 11, opacity: 0.5 }}>No updates yet.</div>
+                      )}
+                      {detail.updates.map(u => (
+                        <div key={u.id} className="update-item">
+                          <Avatar name={u.actor_label} color={u.actor_role === 'citizen' ? 'var(--gold)' : u.actor_role === 'system' ? 'var(--cyan)' : 'var(--green)'} size={28} />
+                          <div style={{ flex: 1 }}>
+                            <div className="update-text">{u.text}</div>
+                            <div className="update-time">{u.actor_label} · {fmtTime(u.created_at)}</div>
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                  </div>
-                  <div className="update-item">
-                    <Avatar name="You" color="var(--gold)" size={28} />
-                    <div style={{ flex: 1 }}>
-                      <div className="update-text">Issue reported with photos.</div>
-                      <div className="update-time">You · 2 days ago</div>
+                    {detail.attachments.length > 0 && (
+                      <div className="file-list mt-14">
+                        {detail.attachments.map(a => (
+                          <div key={a.id} className="file-item">
+                            <span>{a.type === 'photo' ? '📷' : a.type === 'video' ? '🎬' : a.type === 'voice' ? '🎙' : '📎'}</span>
+                            <span style={{ flex: 1 }}>{a.name} ({(a.size_bytes / 1024).toFixed(0)} KB)</span>
+                            {a.download_url && (
+                              <a className="btn-brutal" style={{ fontSize: 10, padding: '4px 10px', textDecoration: 'none' }}
+                                href={a.download_url} target="_blank" rel="noopener noreferrer">VIEW ↗</a>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                      <input className="brutal-input" style={{ flex: 1 }} placeholder="Write an update or question for the department…"
+                        value={composer} onChange={e => setComposer(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter') addUpdate(); }} />
+                      <button className="btn-brutal" style={{ fontSize: 11, padding: '6px 12px' }} disabled={busy} onClick={addUpdate}>➕ POST</button>
                     </div>
-                  </div>
-                </div>
-                <div className="action-row">
-                  <button className="btn-brutal" style={{ fontSize: 11, padding: '6px 12px' }}>➕ ADD UPDATE</button>
-                  <button className="btn-brutal" style={{ fontSize: 11, padding: '6px 12px' }}>✉ CONTACT DEPT</button>
-                  <button className="btn-brutal" style={{ fontSize: 11, padding: '6px 12px' }}>⭐ RATE</button>
-                  <button className="btn-brutal" style={{ fontSize: 11, padding: '6px 12px' }}>🔄 REOPEN</button>
-                </div>
+                    <div className="action-row">
+                      {['resolved', 'closed'].includes(detail.status) && !detail.rating && (
+                        <span style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
+                          <span className="small-meta">RATE:</span>
+                          {[1, 2, 3, 4, 5].map(n => (
+                            <button key={n} className="btn-brutal" style={{ fontSize: 11, padding: '4px 8px' }} disabled={busy} onClick={() => rate(n)}>{n}★</button>
+                          ))}
+                        </span>
+                      )}
+                      {['resolved', 'closed'].includes(detail.status) && (
+                        <button className="btn-brutal" style={{ fontSize: 11, padding: '6px 12px' }} disabled={busy} onClick={reopen}>🔄 REOPEN</button>
+                      )}
+                    </div>
+                  </React.Fragment>
+                )}
               </div>
             )}
           </div>
         ))}
       </div>
+      {toastHost}
     </div>
   );
 };
 
 const TicketCommunity = () => {
-  const community = [
-    { id: 'TKT-1198', title: 'Water logging during heavy rain',          loc: 'Sector 14', cat: 'Drainage',   upvotes: 47, responses: 3, age: '4h' },
-    { id: 'TKT-1189', title: 'Traffic signal failure at Main Crossing',  loc: 'Sector 12', cat: 'Traffic',    upvotes: 34, responses: 5, age: '6h' },
-    { id: 'TKT-1174', title: 'Illegal construction near park',            loc: 'Sector 8',  cat: 'Planning',   upvotes: 28, responses: 2, age: '1d' },
-    { id: 'TKT-1156', title: 'Stray dog menace in residential area',     loc: 'Sector 21', cat: 'Public Safety', upvotes: 22, responses: 7, age: '2d' },
-    { id: 'TKT-1142', title: 'School zone missing speed signage',         loc: 'Sector 9',  cat: 'Roads',      upvotes: 18, responses: 1, age: '3d' },
-  ];
+  const [rows, setRows] = React.useState(null);
+  const [sort, setSort] = React.useState('TRENDING');
+  const [query, setQuery] = React.useState('');
+  const [commentsFor, setCommentsFor] = React.useState(null);   // ticket id with open thread
+  const [thread, setThread] = React.useState([]);
+  const [commentText, setCommentText] = React.useState('');
+  const [toast, toastHost] = useToast();
+  const geoRef = React.useRef(null);                            // cached coords for NEARBY
+
+  const load = React.useCallback((s, q) => {
+    const params = { sort: s.toLowerCase(), limit: 25 };
+    if (q) params.q = q;
+    const run = (p) => tkApi('/community', { params: p })
+      .then(r => setRows(r.data))
+      .catch(e => { setRows([]); toast(`Feed failed: ${e.message || e}`, 'error'); });
+    if (s === 'NEARBY') {
+      if (geoRef.current) {
+        run({ ...params, lat: geoRef.current.lat, lng: geoRef.current.lng });
+      } else if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          pos => {
+            geoRef.current = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+            run({ ...params, lat: geoRef.current.lat, lng: geoRef.current.lng });
+          },
+          () => { toast('Location denied — showing TRENDING instead', 'warn'); setSort('TRENDING'); run({ ...params, sort: 'trending' }); },
+          { timeout: 8000 },
+        );
+      } else {
+        toast('Geolocation unavailable — showing TRENDING', 'warn'); setSort('TRENDING'); run({ ...params, sort: 'trending' });
+      }
+    } else {
+      run(params);
+    }
+  }, [toast]);
+
+  React.useEffect(() => { load(sort, query); }, [sort]);        // search triggers via its own debounce
+  React.useEffect(() => {
+    const t = setTimeout(() => load(sort, query), 400);
+    return () => clearTimeout(t);
+  }, [query]);
+
+  const toggleSupport = (t) => {
+    const method = t.has_upvoted ? 'DELETE' : 'POST';
+    tkApi(`/${t.id}/upvote`, { method })
+      .then(r => {
+        setRows(rs => rs.map(x => x.id === t.id ? { ...x, upvotes: r.upvotes, has_upvoted: r.has_upvoted } : x));
+        if (r.priority_escalated_to) toast(`${t.id} escalated to ${r.priority_escalated_to} by community support`, 'success');
+      })
+      .catch(e => toast(`${e.message || e}`, 'warn'));
+  };
+
+  const openThread = (id) => {
+    if (commentsFor === id) { setCommentsFor(null); return; }
+    setCommentsFor(id); setThread([]); setCommentText('');
+    tkApi(`/${id}/comments`).then(setThread).catch(() => {});
+  };
+
+  const postComment = () => {
+    const text = commentText.trim();
+    if (!text) return;
+    tkApi(`/${commentsFor}/comments`, { json: { text } })
+      .then(c => {
+        setThread(th => [...th, c]);
+        setCommentText('');
+        setRows(rs => rs.map(x => x.id === commentsFor ? { ...x, response_count: x.response_count + 1 } : x));
+      })
+      .catch(e => toast(`${e.message || e}`, 'warn'));
+  };
+
   return (
     <div className="tab-pane">
       <div className="toolbar">
-        <SearchBar value="" onChange={() => {}} placeholder="Search community tickets..." />
-        <SegmentedControl options={['TRENDING', 'NEW', 'NEARBY', 'UNRESOLVED']} value="TRENDING" onChange={() => {}} accent="var(--cyan)" />
+        <SearchBar value={query} onChange={setQuery} placeholder="Search community tickets..." />
+        <SegmentedControl options={['TRENDING', 'NEW', 'NEARBY', 'UNRESOLVED']} value={sort} onChange={setSort} accent="var(--cyan)" />
       </div>
       <div className="community-list">
-        {community.map((t, i) => (
+        {rows === null && <div style={{ padding: 30, fontFamily: 'var(--font-mono)', opacity: 0.5 }}>Loading community feed…</div>}
+        {rows && rows.length === 0 && (
+          <div style={{ padding: 30, textAlign: 'center', fontFamily: 'var(--font-mono)', opacity: 0.5 }}>No tickets match.</div>
+        )}
+        {(rows || []).map((t, i) => (
           <div key={t.id} className="community-card" style={{ animationDelay: `${i * 0.05}s` }}>
             <div className="upvote-col">
-              <button className="upvote-btn">▲</button>
+              <button className="upvote-btn" style={t.has_upvoted ? { background: 'var(--cyan)' } : undefined}
+                title={t.has_upvoted ? 'Withdraw support' : 'Support this issue'}
+                onClick={() => toggleSupport(t)}>▲</button>
               <span className="upvote-count">{t.upvotes}</span>
-              <span className="upvote-label">SUPPORT</span>
+              <span className="upvote-label">{t.has_upvoted ? 'SUPPORTED' : 'SUPPORT'}</span>
             </div>
             <div style={{ flex: 1 }}>
               <div className="community-title">{t.title}</div>
               <div className="community-meta">
                 <span>{t.id}</span>
-                <span>📍 {t.loc}</span>
-                <Badge variant="default">{t.cat}</Badge>
-                <span className="small-meta">{t.responses} responses</span>
+                {t.location_label && <span>📍 {t.location_label}</span>}
+                {t.distance_km != null && <span className="small-meta">{t.distance_km} km</span>}
+                <Badge variant="default">{t.display_category}</Badge>
+                <SeverityBadge level={t.severity} />
+                <span className="small-meta">{t.response_count} responses</span>
                 <span className="small-meta">{t.age}</span>
               </div>
+              {commentsFor === t.id && (
+                <div style={{ marginTop: 10, borderTop: '2px solid #000', paddingTop: 8 }}>
+                  {thread.map(c => (
+                    <div key={c.id} style={{ display: 'flex', gap: 8, padding: '4px 0', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                      <strong>{c.author_label}</strong>
+                      <span style={{ flex: 1 }}>{c.text}</span>
+                      <span style={{ opacity: 0.5 }}>{c.age}</span>
+                    </div>
+                  ))}
+                  {thread.length === 0 && <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, opacity: 0.5, padding: '4px 0' }}>No comments yet.</div>}
+                  <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                    <input className="brutal-input" style={{ flex: 1, fontSize: 11 }} placeholder="Add a public comment…"
+                      value={commentText} onChange={e => setCommentText(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') postComment(); }} />
+                    <button className="btn-brutal" style={{ fontSize: 11, padding: '6px 12px' }} onClick={postComment}>POST</button>
+                  </div>
+                </div>
+              )}
             </div>
             <div className="community-actions">
-              <button className="btn-brutal" style={{ fontSize: 11, padding: '6px 12px' }}>🙋 SUPPORT</button>
-              <button className="btn-brutal" style={{ fontSize: 11, padding: '6px 12px' }}>💬 COMMENT</button>
+              <button className="btn-brutal" style={{ fontSize: 11, padding: '6px 12px' }} onClick={() => toggleSupport(t)}>
+                {t.has_upvoted ? '✓ SUPPORTED' : '🙋 SUPPORT'}
+              </button>
+              <button className="btn-brutal" style={{ fontSize: 11, padding: '6px 12px' }} onClick={() => openThread(t.id)}>
+                💬 {commentsFor === t.id ? 'HIDE' : 'COMMENT'}
+              </button>
             </div>
           </div>
         ))}
       </div>
+      {toastHost}
     </div>
   );
 };
 
 const TicketMap = () => {
-  const pins = [
-    { x: 120, y: 100, color: 'var(--red)', pulse: true, label: 'TKT-1198' },
-    { x: 220, y: 140, color: 'var(--gold)', label: 'TKT-1189' },
-    { x: 80,  y: 200, color: 'var(--cyan)', label: 'TKT-1174' },
-    { x: 310, y: 170, color: 'var(--red)', label: 'TKT-1156' },
-    { x: 180, y: 220, color: 'var(--gold)', label: 'TKT-1142' },
-  ];
+  // Default center = the demo city (Bengaluru). Geolocation replaces it on
+  // permission, and any pan refetches for the new viewport, so the default
+  // only seeds the very first view.
+  const DEFAULT_CENTER = [12.9716, 77.5946];
+  const [radiusKm, setRadiusKm] = React.useState('5 KM');
+  const [data, setData] = React.useState(null);
+  const [toast, toastHost] = useToast();
+  const mapRef = React.useRef(null);
+  const mapObj = React.useRef(null);
+  const markersRef = React.useRef(null);
+  const debounceRef = React.useRef(null);
+
+  const radius = parseInt(radiusKm, 10);
+
+  const fetchNearby = React.useCallback((lat, lng, r) => {
+    tkApi('/map/nearby', { params: { lat: lat.toFixed(5), lng: lng.toFixed(5), radius_km: r } })
+      .then(setData)
+      .catch(e => toast(`Map data failed: ${e.message || e}`, 'error'));
+  }, [toast]);
+
+  // init Leaflet once
+  React.useEffect(() => {
+    if (!window.L || !mapRef.current || mapObj.current) return;
+    const map = window.L.map(mapRef.current, { zoomControl: true, attributionControl: true })
+      .setView(DEFAULT_CENTER, 14);
+    window.L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19, attribution: '&copy; OpenStreetMap contributors',
+    }).addTo(map);
+    markersRef.current = window.L.layerGroup().addTo(map);
+    mapObj.current = map;
+
+    map.on('moveend', () => {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = setTimeout(() => {
+        const c = map.getCenter();
+        fetchNearby(c.lat, c.lng, parseInt(localStorage.getItem('citadel_tk_radius') || '5', 10));
+      }, 400);
+    });
+
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        pos => map.setView([pos.coords.latitude, pos.coords.longitude], 14),
+        () => {}, { timeout: 6000 },
+      );
+    }
+    fetchNearby(DEFAULT_CENTER[0], DEFAULT_CENTER[1], 5);
+    return () => { map.remove(); mapObj.current = null; };
+  }, []);
+
+  // radius change → persist for the moveend closure + refetch
+  React.useEffect(() => {
+    try { localStorage.setItem('citadel_tk_radius', String(radius)); } catch (e) {}
+    if (mapObj.current) {
+      const c = mapObj.current.getCenter();
+      fetchNearby(c.lat, c.lng, radius);
+    }
+  }, [radiusKm]);
+
+  // redraw markers when data changes
+  React.useEffect(() => {
+    if (!data || !markersRef.current || !window.L) return;
+    const layer = markersRef.current;
+    layer.clearLayers();
+    data.pins.forEach(p => {
+      const color = TK_SEV_COLOR[p.severity] || 'var(--cyan)';
+      window.L.circleMarker([p.lat, p.lng], {
+        radius: 9, color: '#000', weight: 2, fillColor: color, fillOpacity: 0.9,
+      }).bindPopup(
+        `<div style="font-family:monospace;font-size:12px">
+           <strong>${p.id}</strong> · ${p.severity}<br/>${p.title}<br/>
+           ${p.display_category} · ${p.status.replace(/_/g, ' ')} · ▲${p.upvotes} · ${p.distance_km} km
+         </div>`
+      ).addTo(layer);
+    });
+  }, [data]);
+
   return (
     <div className="tab-pane">
+      <div className="toolbar" style={{ marginBottom: 12 }}>
+        <SegmentedControl options={['2 KM', '5 KM', '10 KM', '25 KM']} value={radiusKm} onChange={setRadiusKm} accent="var(--cyan)" />
+        <span className="small-meta" style={{ alignSelf: 'center' }}>
+          {data ? `${data.count} open issues in view · ${data.clusters.length} zones` : 'Loading…'}
+        </span>
+      </div>
       <div className="map-layout">
         <div>
-          <MapMock pins={pins} title="NEIGHBORHOOD TICKETS · 5 KM RADIUS" />
+          <div className="map-mock" style={{ padding: 0 }}>
+            <div className="map-title">NEIGHBORHOOD TICKETS · {radiusKm} RADIUS · LIVE</div>
+            <div ref={mapRef} className="tk-map-canvas" />
+          </div>
         </div>
         <div className="map-sidebar">
           <div className="widget-card">
             <div className="widget-title">NEARBY ISSUES</div>
             <div className="nearby-list">
-              {[
-                { title: 'Water logging', dist: '0.4 km', sev: 'HIGH' },
-                { title: 'Signal failure', dist: '0.8 km', sev: 'HIGH' },
-                { title: 'Construction', dist: '1.2 km', sev: 'MEDIUM' },
-                { title: 'Stray dogs', dist: '2.1 km', sev: 'HIGH' },
-                { title: 'Signage missing', dist: '2.8 km', sev: 'LOW' },
-              ].map(i => (
-                <div key={i.title} className="nearby-row">
+              {!data && <div style={{ padding: 16, fontFamily: 'var(--font-mono)', fontSize: 11, opacity: 0.5 }}>Loading…</div>}
+              {data && data.pins.length === 0 && (
+                <div style={{ padding: 16, fontFamily: 'var(--font-mono)', fontSize: 11, opacity: 0.5 }}>
+                  No located open tickets within {radius} km. Pan the map or submit one with GPS attached.
+                </div>
+              )}
+              {(data ? data.pins.slice(0, 8) : []).map(p => (
+                <div key={p.id} className="nearby-row" style={{ cursor: 'pointer' }}
+                  onClick={() => mapObj.current && mapObj.current.setView([p.lat, p.lng], 16)}>
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontFamily: 'var(--font-display)', fontSize: 13, fontWeight: 600 }}>{i.title}</div>
-                    <div className="small-meta">{i.dist}</div>
+                    <div style={{ fontFamily: 'var(--font-display)', fontSize: 13, fontWeight: 600 }}>{p.title}</div>
+                    <div className="small-meta">{p.id} · {p.distance_km} km · ▲{p.upvotes}</div>
                   </div>
-                  <SeverityBadge level={i.sev} />
+                  <SeverityBadge level={p.severity} />
                 </div>
               ))}
             </div>
           </div>
         </div>
       </div>
+      {toastHost}
     </div>
   );
 };

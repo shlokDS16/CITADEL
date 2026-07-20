@@ -3150,3 +3150,11 @@ body.dark .tv-timeline-row { background: #0f0f0f; }
 /* keep the live FPS / fresh badge clear of the ✕ control */
 .cam-overlay-tr { right: 34px; }
 @media (prefers-reduced-motion: reduce) { .cam-del-btn { transition: none; } }
+
+/* === TICKETS MAP (live Leaflet) === */
+.tk-map-canvas {
+  height: 420px;
+  border-top: 3px solid #000;
+  background: #dcdad4;
+}
+.tk-map-canvas.leaflet-container { font-family: var(--font-mono); }

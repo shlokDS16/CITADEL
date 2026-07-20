@@ -230,6 +230,13 @@ def create_ticket(
     # too (tickets_anonymous_check); mirroring it here keeps the error a
     # clean 4xx instead of a 23514.
     owner = None if payload.is_anonymous else submitted_by
+    # Until Phase 3 auth, X-User-Id is an unverified browser uuid. It only
+    # becomes submitted_by when it names a real users row — otherwise the
+    # FK (tickets_submitted_by_fkey) would reject the insert, and inventing
+    # a users row for an unauthenticated header would be worse.
+    if owner and not repo.user_exists(owner):
+        log.debug("actor %s not in users — storing submitted_by NULL (pre-auth)", owner)
+        owner = None
 
     ticket_id = repo.next_ticket_id()
     row = {
@@ -380,6 +387,10 @@ def add_citizen_update(
         raise ValueError("text is required")
     if not repo.get_ticket(ticket_id):
         raise LookupError(f"ticket {ticket_id} not found")
+    # ticket_updates.actor_id FKs to users — same pre-auth demotion as
+    # tickets.submitted_by (see create_ticket).
+    if actor_id and not repo.user_exists(actor_id):
+        actor_id = None
     row = repo.add_update(
         ticket_id, text=body, actor_label=actor_label,
         actor_role="citizen", actor_id=actor_id, visibility="public",

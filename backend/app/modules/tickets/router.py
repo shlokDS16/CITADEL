@@ -146,10 +146,14 @@ async def my_tickets(
     category: Optional[str] = Query(default=None, description="Comma-separated category filter"),
     limit: int = Query(default=25, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
 ) -> schemas.TicketListOut:
+    # Pre-auth (Phase 3 seam): submitted_by is stored NULL for browser
+    # identities (they aren't users rows — see service.create_ticket), so
+    # scoping by X-User-Id would return nothing. Until a verified JWT
+    # subject exists, "mine" = all tickets, matching how traffic/anomaly
+    # behave for the single hardcoded login.
     result = await run_in_threadpool(
-        service.list_tickets, _actor(x_user_id), status, category, limit, offset
+        service.list_tickets, None, status, category, limit, offset
     )
     return schemas.TicketListOut(**result)
 
@@ -161,11 +165,10 @@ async def my_tickets(
     summary="My-Tickets KPI strip — counts and mean resolution time",
     dependencies=[_RL_STD],
 )
-async def ticket_stats(
-    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
-) -> schemas.TicketStatsOut:
+async def ticket_stats() -> schemas.TicketStatsOut:
+    # Unscoped pre-auth, same reasoning as /mine above.
     return schemas.TicketStatsOut(
-        **await run_in_threadpool(service.ticket_stats, _actor(x_user_id))
+        **await run_in_threadpool(service.ticket_stats, None)
     )
 
 

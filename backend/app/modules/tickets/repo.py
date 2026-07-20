@@ -127,6 +127,29 @@ def templates() -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------
 # Tickets
 # --------------------------------------------------------------------------
+def user_exists(user_id: Optional[str]) -> bool:
+    """Does this uuid exist in public.users?
+
+    tickets.submitted_by / assigned_to_id / ticket_updates.actor_id all FK
+    to users(id). Until Phase 3 auth, X-User-Id is an unverified browser
+    uuid — recording it as a user would either violate the FK or pollute
+    the table, so callers demote unknown ids to None instead.
+    """
+    if not user_id:
+        return False
+    sb = _sb()
+    if sb is None:
+        return False
+    try:
+        rows = (
+            sb.table("users").select("id").eq("id", user_id).limit(1).execute()
+        ).data or []
+        return bool(rows)
+    except Exception as e:  # noqa: BLE001
+        log.debug("user_exists failed: %s", e)
+        return False
+
+
 def next_ticket_id() -> str:
     """Allocate the next TKT-#### id.
 
