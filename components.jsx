@@ -191,10 +191,27 @@ const LiveBadge = () => {
 
 
 // ---- Top Navigation Bar ----
-const NavBar = ({ role, user, onLogout, onDashboard, onOpenCmd, notifCount = 3 }) => {
+const NAV_NOTIFS = {
+  government: [
+    { t: 'Document batch processed', d: '47 files complete', time: '2 min', type: 'success' },
+    { t: 'Anomaly alert: Bridge sensor', d: 'Sector 12 • Confidence 89%', time: '8 min', type: 'alert' },
+    { t: 'Resume screening batch done', d: '12 candidates shortlisted', time: '22 min', type: 'info' },
+    { t: 'Challan issued', d: '₹2,500 • Plate MH-02-CD-5678', time: '1 hr', type: 'info' },
+    { t: 'System backup completed', d: 'All replicas in sync', time: '2 hr', type: 'success' },
+  ],
+  citizen: [
+    { t: 'Ticket TKT-1024 resolved', d: 'Water supply restored', time: '10 min', type: 'success' },
+    { t: 'Expense anomaly flagged', d: '₹8,500 — unusual pattern', time: '1 hr', type: 'alert' },
+    { t: 'KB article updated', d: 'Passport renewal steps', time: '3 hr', type: 'info' },
+  ],
+};
+
+const NavBar = ({ role, user, onLogout, onDashboard, onOpenCmd }) => {
   const isGov = role === 'government';
   const accent = isGov ? 'var(--gold)' : 'var(--red)';
   const [notifOpen, setNotifOpen] = React.useState(false);
+  const [notifs, setNotifs] = React.useState(NAV_NOTIFS[isGov ? 'government' : 'citizen'] || []);
+  const notifCount = notifs.length;
   const now = new Date();
   const [clock, setClock] = React.useState(now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
   React.useEffect(() => {
@@ -227,34 +244,33 @@ const NavBar = ({ role, user, onLogout, onDashboard, onOpenCmd, notifCount = 3 }
         </div>
         <button className="btn-brutal" onClick={onLogout} style={{ background: accent, color: isGov ? '#000' : '#fff', borderColor: '#000', fontSize: 12, padding: '6px 14px' }}>LOGOUT</button>
       </div>
-      {notifOpen && <NotificationDrawer onClose={() => setNotifOpen(false)} role={role} />}
+      {notifOpen && (
+        <NotificationDrawer
+          items={notifs}
+          onClose={() => setNotifOpen(false)}
+          onMarkAllRead={() => setNotifs([])}
+        />
+      )}
     </nav>
   );
 };
 
 // ---- Notification Drawer ----
-const NotificationDrawer = ({ onClose, role }) => {
-  const items = role === 'government' ? [
-    { t: 'Document batch processed', d: '47 files complete', time: '2 min', type: 'success' },
-    { t: 'Anomaly alert: Bridge sensor', d: 'Sector 12 • Confidence 89%', time: '8 min', type: 'alert' },
-    { t: 'Resume screening batch done', d: '12 candidates shortlisted', time: '22 min', type: 'info' },
-    { t: 'Challan issued', d: '₹2,500 • Plate MH-02-CD-5678', time: '1 hr', type: 'info' },
-    { t: 'System backup completed', d: 'All replicas in sync', time: '2 hr', type: 'success' },
-  ] : [
-    { t: 'Ticket TKT-1024 resolved', d: 'Water supply restored', time: '10 min', type: 'success' },
-    { t: 'Expense anomaly flagged', d: '₹8,500 — unusual pattern', time: '1 hr', type: 'alert' },
-    { t: 'KB article updated', d: 'Passport renewal steps', time: '3 hr', type: 'info' },
-  ];
+const NotificationDrawer = ({ items, onClose, onMarkAllRead }) => {
   return (
     <>
       <div className="drawer-scrim" onClick={onClose}></div>
       <div className="notif-drawer slide-in-right">
         <div className="drawer-header">
           <span>NOTIFICATIONS</span>
-          <button className="icon-btn" onClick={onClose}>✕</button>
+          <button className="icon-btn" onClick={onClose} aria-label="Close">✕</button>
         </div>
         <div className="drawer-body">
-          {items.map((n, i) => (
+          {items.length === 0 ? (
+            <div style={{ padding: '40px 20px', textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 12, opacity: 0.5 }}>
+              ✓ All caught up. No new notifications.
+            </div>
+          ) : items.map((n, i) => (
             <div key={i} className={`notif-item notif-${n.type}`}>
               <div className={`notif-dot notif-${n.type}`}></div>
               <div style={{ flex: 1 }}>
@@ -266,7 +282,8 @@ const NotificationDrawer = ({ onClose, role }) => {
           ))}
         </div>
         <div className="drawer-footer">
-          <button className="btn-brutal" style={{ fontSize: 11, padding: '6px 14px' }}>MARK ALL READ</button>
+          <button className="btn-brutal" style={{ fontSize: 11, padding: '6px 14px' }}
+            disabled={items.length === 0} onClick={onMarkAllRead}>MARK ALL READ</button>
         </div>
       </div>
     </>
@@ -301,9 +318,8 @@ const CommandPalette = ({ open, onClose, onJump, role }) => {
   const all = role === 'government' ? gov : cit;
   const filtered = all.filter(c => !q || c.label.toLowerCase().includes(q.toLowerCase()));
   return (
-    <>
-      <div className="cmd-scrim" onClick={onClose}></div>
-      <div className="cmd-palette fade-in">
+    <div className="cmd-scrim" onClick={onClose}>
+      <div className="cmd-palette fade-in" onClick={e => e.stopPropagation()}>
         <div className="cmd-input-wrap">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="square" style={{ opacity: 0.5, flex: 'none' }}>
             <circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" />
@@ -331,7 +347,7 @@ const CommandPalette = ({ open, onClose, onJump, role }) => {
           <span>ESC close</span>
         </div>
       </div>
-    </>
+    </div>
   );
 };
 
