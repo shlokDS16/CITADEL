@@ -285,12 +285,7 @@ const App = () => {
             ))}
           </div>
 
-          <div className="stats-grid">
-            <StatCard value={<AnimNum value={4} />} label="Active Gateways" accentColor="var(--gold)" />
-            <StatCard value={"99.7%"} label="Uptime" accentColor="var(--green)" />
-            <StatCard value={<AnimNum value={847} />} label="Sensors Online" accentColor="var(--cyan)" />
-            <StatCard value={<AnimNum value={12} />} label="Alerts Today" accentColor="var(--red)" />
-          </div>
+          <OverviewStats role="gov" />
 
           <div className="section-divider">
             <span>System Overview</span>
@@ -382,12 +377,7 @@ const App = () => {
             ))}
           </div>
 
-          <div className="stats-grid">
-            <StatCard value={<AnimNum value={4} />} label="Active Services" accentColor="var(--red)" />
-            <StatCard value={<AnimNum value={10} />} label="KB Documents" accentColor="var(--gold)" />
-            <StatCard value={<><AnimNum value={92} />%</>} label="AI Accuracy" accentColor="var(--green)" />
-            <StatCard value="24/7" label="Availability" accentColor="var(--cyan)" />
-          </div>
+          <OverviewStats role="citizen" />
 
           <div className="section-divider">
             <span>System Overview</span>

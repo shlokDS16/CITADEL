@@ -365,6 +365,53 @@ const StatCard = ({ value, label, accentColor, trend, trendDir }) => (
   </div>
 );
 
+// ---- Overview Stats (live landing KPIs, Phase 4) ----
+// Replaces the hardcoded StatCard row with real cross-module counts from
+// GET /api/v1/overview. A null source renders "—" (honest unknown), never
+// an invented number; the fetch is skipped without a session.
+const OverviewStats = ({ role }) => {
+  const [data, setData] = React.useState(null);
+  const [failed, setFailed] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!czAuth.get()) { setFailed(true); return; }
+    apiFetch('/api/v1/overview').then(setData).catch(() => setFailed(true));
+  }, []);
+
+  // loading "…", null source → "—" (honest unknown), else the value.
+  // Rendered directly, not via AnimNum: a count-up animation freezes at 0
+  // when the tab is backgrounded during load (rAF throttling), which would
+  // show a wrong "0" on a governance dashboard.
+  const cell = (v) => {
+    if (failed) return '—';
+    if (data == null) return '…';
+    if (v == null) return '—';
+    return typeof v === 'number' ? v.toLocaleString('en-IN') : v;
+  };
+
+  const cards = role === 'gov'
+    ? [
+        { key: 'active_gateways', label: 'Active Gateways', accent: 'var(--gold)' },
+        { key: 'sensors_online',  label: 'Sensors Online',  accent: 'var(--cyan)' },
+        { key: 'active_alerts',   label: 'Active Alerts',   accent: 'var(--red)' },
+        { key: 'pending_review',  label: 'Pending Review',  accent: 'var(--green)' },
+      ]
+    : [
+        { key: 'active_services',  label: 'Active Services', accent: 'var(--red)' },
+        { key: 'kb_documents',     label: 'KB Corpora',      accent: 'var(--gold)' },
+        { key: 'community_issues', label: 'Community Issues', accent: 'var(--green)' },
+        { key: 'analyses_run',     label: 'Analyses Run',    accent: 'var(--cyan)' },
+      ];
+
+  return (
+    <div className="stats-grid">
+      {cards.map(c => (
+        <StatCard key={c.key} value={cell(data && data[c.key])} label={c.label} accentColor={c.accent} />
+      ))}
+    </div>
+  );
+};
+
 // ---- KPI Card (stat + sparkline) ----
 const KPICard = ({ value, label, data = [], color = 'var(--gold)', delta, deltaDir }) => {
   const max = Math.max(...data, 1);
@@ -1139,7 +1186,7 @@ const AlertTicker = ({ items }) => (
 // Export all to window so pages.jsx can reference them
 Object.assign(window, {
   CitadelBackground, NavBar, NotificationDrawer, CommandPalette,
-  GatewayCard, StatCard, KPICard, CoreDynamics, SessionLog,
+  GatewayCard, StatCard, OverviewStats, KPICard, CoreDynamics, SessionLog,
   ActivityTimeline, NetworkTopology, QuickActions, MiniChart,
   Donut, Heatmap, SubPageHeader, Tabs, SegmentedControl,
   TwoColumnLayout, AnimNum, Badge, StatusPill, SeverityBadge,
