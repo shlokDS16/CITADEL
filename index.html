@@ -277,6 +277,24 @@
 
   /* ---------- reveal defaults (GSAP sets from-state; CSS is the no-JS fallback) ---------- */
   .r { will-change: transform, opacity; }
+  .clip { will-change: clip-path; }
+
+  /* scroll progress: a gold bar that fills as you descend */
+  .scroll-prog { position: fixed; top: 0; left: 0; height: 5px; width: 100%; z-index: 200;
+    background: var(--gold); border-bottom: 2px solid var(--ink);
+    transform: scaleX(0); transform-origin: left; }
+
+  /* color-block band: 4 hard segments, a brutalist divider that breaks the beige */
+  .cblock { display: flex; height: 20px; border-top: var(--bd); border-bottom: var(--bd); overflow: hidden; }
+  .cblock i { flex: 1; display: block; }
+  .cblock i:nth-child(1) { background: var(--gold); }
+  .cblock i:nth-child(2) { background: var(--red); }
+  .cblock i:nth-child(3) { background: var(--cyan); }
+  .cblock i:nth-child(4) { background: var(--green); }
+  .cblock.tall { height: 34px; }
+
+  /* section-tag swatch grows on reveal for a hit of color */
+  .sec-tag .sw { transform-origin: left; }
 
   /* ---------- responsive ---------- */
   @media (max-width: 1020px) {
@@ -317,6 +335,8 @@
 </head>
 <body>
 
+<div class="scroll-prog" id="scrollProg" aria-hidden="true"></div>
+
 <!-- announcement ticker -->
 <div class="ticker" aria-hidden="true">
   <div class="ticker-track" id="tickerTrack">
@@ -350,9 +370,9 @@
       <div class="hero-left">
         <span class="badge r" data-hero><span class="dot" aria-hidden="true"></span>Live pilot · Indian municipalities</span>
         <h1 class="display">
-          <span class="line r" data-hero>The city</span>
-          <span class="line r" data-hero>that <span class="hl hl-gold">thinks</span></span>
-          <span class="line r" data-hero>for <span class="hl hl-red">itself.</span></span>
+          <span class="line clip" data-hero-hl>The city</span>
+          <span class="line clip" data-hero-hl>that <span class="hl hl-gold">thinks</span></span>
+          <span class="line clip" data-hero-hl>for <span class="hl hl-red">itself.</span></span>
         </h1>
         <p class="hero-copy r" data-hero>
           Eight AI modules. Two portals. One civic brain. CITADEL reads documents,
@@ -520,6 +540,8 @@
     </div>
   </section>
 
+  <div class="cblock tall" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+
   <!-- ================= MODULES ================= -->
   <section class="block" id="modules">
     <div class="wrap">
@@ -634,6 +656,8 @@
       </div>
     </div>
   </section>
+
+  <div class="cblock" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
 
   <!-- ================= TESTIMONIALS ================= -->
   <section class="block" id="voices">
@@ -818,73 +842,129 @@
       document.documentElement.classList.add('anim-starved');
       ScrollTrigger.getAll().forEach(function (st) { st.kill(); });
       gsap.killTweensOf('*');
-      gsap.set('.r, [data-hero], [data-hero-stage], [data-hero-float]', {
-        clearProps: 'opacity,visibility,transform'
+      // clear every from-state this page sets, or elements stay hidden/clipped
+      gsap.set('.r, [data-hero], [data-hero-hl], [data-hero-stage], [data-hero-float], .sec-tag .sw, .mod, .portal-row .pill, .step, .step .num, .pillar, .quote, .tier, .faq', {
+        clearProps: 'opacity,visibility,transform,clipPath'
       });
+      gsap.set('#scrollProg', { scaleX: 1 });
       document.querySelectorAll('[data-count]').forEach(function (el) {
         el.textContent = el.getAttribute('data-count');
       });
     }
     setTimeout(function () { if (frames < 10) forceFinalState(); }, 3000);
 
+    // shared counter helper (brutalist: fast, decisive, no long tail)
+    function count(el, vars) {
+      var target = parseInt(el.getAttribute('data-count'), 10);
+      var obj = { v: 0 };
+      gsap.to(obj, Object.assign({
+        v: target, duration: 0.9, ease: 'power4.out',
+        onUpdate: function () { el.textContent = Math.round(obj.v); }
+      }, vars || {}));
+    }
+
     gsap.matchMedia().add('(prefers-reduced-motion: no-preference)', function () {
 
-      // ---- hero entrance: dramatic stagger, total < 600ms of offsets ----
-      gsap.set('[data-hero]', { y: 34, autoAlpha: 0 });
-      gsap.set('[data-hero-stage]', { x: 60, autoAlpha: 0 });
-      gsap.set('[data-hero-float]', { y: 24, autoAlpha: 0 });
+      var SNAP = 'power4.out';        // decisive entrance, zero overshoot
+      var WIPE = 'power2.inOut';
 
-      var tl = gsap.timeline({ defaults: { ease: EASE } });
-      tl.to('[data-hero]', { y: 0, autoAlpha: 1, duration: SLOW, stagger: 0.1 })
-        .to('[data-hero-stage]', { x: 0, autoAlpha: 1, duration: SLOW }, 0.25)
-        .to('[data-hero-float]', { y: 0, autoAlpha: 1, duration: STD, stagger: 0.12 }, 0.7);
-
-      // subtle parallax drift on the mockup while scrolling past the hero
-      gsap.to('[data-hero-stage]', {
-        y: -30, ease: 'none',
-        scrollTrigger: { trigger: '.hero', start: 'top top', end: 'bottom top', scrub: true }
+      // scroll-progress bar (law 5: color is motion)
+      gsap.to('#scrollProg', {
+        scaleX: 1, ease: 'none',
+        scrollTrigger: { trigger: document.body, start: 'top top', end: 'bottom bottom', scrub: 0.3 }
       });
 
-      // ---- scroll reveals: consistent rise-from-below, micro stagger ----
-      gsap.utils.toArray('section, .stats').forEach(function (sec) {
-        var items = sec.querySelectorAll('.r');
-        if (!items.length) return;
-        gsap.set(items, { y: 28, autoAlpha: 0 });
-        ScrollTrigger.batch(items, {
-          start: 'top 88%',
-          once: true,
-          onEnter: function (batch) {
-            gsap.to(batch, { y: 0, autoAlpha: 1, duration: STD, ease: EASE, stagger: 0.07 });
-          }
-        });
+      // ===== HERO: headline CLIP-SLAMS in, supporting bits micro-cascade =====
+      gsap.set('[data-hero-hl]', { clipPath: 'inset(0 100% 0 0)', y: 10 });
+      gsap.set('[data-hero]', { y: 26, autoAlpha: 0 });
+      gsap.set('[data-hero-stage]', { x: 90, autoAlpha: 0 });
+      gsap.set('[data-hero-float]', { scale: 0.7, autoAlpha: 0 });
+
+      gsap.timeline()
+        .to('[data-hero-hl]', { clipPath: 'inset(0 0% 0 0)', y: 0, duration: 0.44, ease: WIPE, stagger: 0.11 })
+        .to('[data-hero]', { y: 0, autoAlpha: 1, duration: 0.34, ease: SNAP, stagger: 0.07 }, 0.2)
+        .to('[data-hero-stage]', { x: 0, autoAlpha: 1, duration: 0.4, ease: SNAP }, 0.15)
+        .to('[data-hero-float]', { scale: 1, autoAlpha: 1, duration: 0.26, ease: SNAP, stagger: 0.1 }, 0.66);
+
+      // mockup parallax drift past the hero
+      gsap.to('[data-hero-stage]', { y: -34, ease: 'none',
+        scrollTrigger: { trigger: '.hero', start: 'top top', end: 'bottom top', scrub: true } });
+
+      // section-tag swatches wipe in wherever they appear
+      gsap.utils.toArray('.sec-tag .sw').forEach(function (sw) {
+        gsap.from(sw, { scaleX: 0, duration: 0.3, ease: SNAP,
+          scrollTrigger: { trigger: sw, start: 'top 90%', once: true } });
       });
 
-      // ---- counters: hero KPIs count immediately, stat strip on scroll ----
-      function count(el, vars) {
-        var target = parseInt(el.getAttribute('data-count'), 10);
-        var obj = { v: 0 };
-        gsap.to(obj, Object.assign({
-          v: target, duration: 1.1, ease: 'power2.out',
-          onUpdate: function () { el.textContent = Math.round(obj.v); }
-        }, vars || {}));
-      }
-      document.querySelectorAll('.cc-kpi [data-count]').forEach(function (el, i) {
-        count(el, { delay: 1.0 + i * 0.1 });
+      // generic .r reveal (headings, sub-copy, misc) - short rise. Excludes
+      // elements that own a section-specific verb below, so nothing double-animates.
+      var SPECIFIC = '.mod, .step, .pillar, .quote, .tier, .faq';
+      gsap.utils.toArray('.r').forEach(function (el) {
+        if (el.matches(SPECIFIC)) return;
+        gsap.from(el, { y: 22, autoAlpha: 0, duration: 0.32, ease: SNAP,
+          scrollTrigger: { trigger: el, start: 'top 88%', once: true } });
       });
+
+      // ===== STATS: black strip, numbers count as each column enters =====
       document.querySelectorAll('.stat [data-count]').forEach(function (el) {
-        ScrollTrigger.create({
-          trigger: el, start: 'top 90%', once: true,
-          onEnter: function () { count(el); }
-        });
+        ScrollTrigger.create({ trigger: el, start: 'top 90%', once: true, onEnter: function () { count(el); } });
       });
+
+      // ===== HERO KPIs: count after the mockup lands =====
+      document.querySelectorAll('.cc-kpi [data-count]').forEach(function (el, i) { count(el, { delay: 0.9 + i * 0.09 }); });
+
+      // ===== MODULES: cards SLAM in from alternating sides (anti-sameness) =====
+      gsap.utils.toArray('.mod').forEach(function (el, i) {
+        gsap.from(el, { x: (i % 2 ? 70 : -70), autoAlpha: 0, duration: 0.34, ease: SNAP,
+          scrollTrigger: { trigger: el, start: 'top 86%', once: true } });
+      });
+      gsap.utils.toArray('.portal-row .pill').forEach(function (el) {
+        gsap.from(el, { scale: 0.6, autoAlpha: 0, duration: 0.26, ease: SNAP,
+          scrollTrigger: { trigger: el, start: 'top 88%', once: true } });
+      });
+
+      // ===== HOW: number badges STAMP in, card body rises =====
+      gsap.utils.toArray('.step').forEach(function (el, i) {
+        var badge = el.querySelector('.num');
+        gsap.from(el, { y: 40, autoAlpha: 0, duration: 0.34, ease: SNAP,
+          scrollTrigger: { trigger: el, start: 'top 86%', once: true } });
+        if (badge) gsap.from(badge, { scale: 1.7, autoAlpha: 0, duration: 0.24, ease: SNAP, delay: 0.12,
+          scrollTrigger: { trigger: el, start: 'top 86%', once: true } });
+      });
+
+      // ===== SECURITY (dark band): pillars CLIP-WIPE from the left =====
+      gsap.utils.toArray('.pillar').forEach(function (el, i) {
+        gsap.set(el, { clipPath: 'inset(0 100% 0 0)' });
+        gsap.to(el, { clipPath: 'inset(0 0% 0 0)', duration: 0.5, ease: WIPE, delay: i * 0.09,
+          scrollTrigger: { trigger: '.pillars', start: 'top 80%', once: true } });
+      });
+
+      // ===== TESTIMONIALS: cards TILT in (controlled asymmetry) =====
+      gsap.utils.toArray('.quote').forEach(function (el, i) {
+        gsap.from(el, { rotation: (i % 2 ? 3 : -3), y: 34, autoAlpha: 0, duration: 0.36, ease: SNAP,
+          transformOrigin: '50% 100%',
+          scrollTrigger: { trigger: el, start: 'top 86%', once: true } });
+      });
+
+      // ===== PRICING: featured SCALE-POPS, side tiers slide from outside =====
+      gsap.utils.toArray('.tier').forEach(function (el, i) {
+        var hot = el.classList.contains('hot');
+        gsap.from(el, hot
+          ? { scale: 0.82, autoAlpha: 0, duration: 0.36, ease: SNAP }
+          : { x: (i === 0 ? -70 : 70), autoAlpha: 0, duration: 0.34, ease: SNAP },
+          { scrollTrigger: { trigger: '.tiers', start: 'top 82%', once: true } });
+      });
+
+      // ===== FAQ: quick micro-stagger snap =====
+      ScrollTrigger.batch('.faq', { start: 'top 90%', once: true,
+        onEnter: function (b) { gsap.from(b, { x: -30, autoAlpha: 0, duration: 0.28, ease: SNAP, stagger: 0.06 }); } });
     });
 
-    // reduced motion: everything lands in final state
+    // reduced motion: everything lands in final state, no choreography
     gsap.matchMedia().add('(prefers-reduced-motion: reduce)', function () {
-      gsap.set('[data-hero], [data-hero-stage], [data-hero-float], .r', { clearProps: 'all' });
-      document.querySelectorAll('[data-count]').forEach(function (el) {
-        el.textContent = el.getAttribute('data-count');
-      });
+      gsap.to('#scrollProg', { scaleX: 1, ease: 'none',
+        scrollTrigger: { trigger: document.body, start: 'top top', end: 'bottom bottom', scrub: 0.3 } });
+      document.querySelectorAll('[data-count]').forEach(function (el) { el.textContent = el.getAttribute('data-count'); });
     });
   })();
 </script>
