@@ -8899,8 +8899,168 @@ const ExpenseReports = () => {
   );
 };
 
+/* ======================================================================
+   SYSTEM ADMIN CONSOLE (Phase 6) — gov_admin only
+   Tabs: Users · Audit Trail · Platform Stats. All live via /api/v1/admin/*.
+   ====================================================================== */
+const ADMIN_ROLES = ['gov_admin', 'gov_officer', 'gov_analyst', 'citizen'];
+const adminApi = (path, opts) => apiFetch('/api/v1/admin' + path, opts);
+const fmtWhen = (iso) => iso ? String(iso).replace('T', ' ').slice(0, 16) : '—';
+
+const AdminUsers = () => {
+  const [rows, setRows] = React.useState(null);
+  const [q, setQ] = React.useState('');
+  const [toast, toastHost] = useToast();
+  const me = (czAuth.user() || {}).id;
+
+  const load = React.useCallback(() => {
+    adminApi('/users' + (q ? '?q=' + encodeURIComponent(q) : ''))
+      .then(setRows).catch(e => { setRows([]); toast(e.message || 'Load failed', 'error'); });
+  }, [q]);
+  React.useEffect(() => { const t = setTimeout(load, 250); return () => clearTimeout(t); }, [load]);
+
+  const patch = (id, body) => {
+    adminApi('/users/' + id, { method: 'PATCH', json: body })
+      .then(() => { toast('Updated', 'success'); load(); })
+      .catch(e => toast(e.message || 'Update failed', 'warn'));
+  };
+
+  return (
+    <div className="tab-pane">
+      <div className="toolbar">
+        <SearchBar value={q} onChange={setQ} placeholder="Search by username..." />
+        <span className="small-meta">{rows ? rows.length + ' account(s)' : 'loading…'}</span>
+      </div>
+      <div className="admin-table-wrap">
+        <table className="admin-table">
+          <thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Status</th><th>Last login</th><th>Actions</th></tr></thead>
+          <tbody>
+            {rows === null && <tr><td colSpan={6} className="admin-empty">Loading…</td></tr>}
+            {rows && rows.length === 0 && <tr><td colSpan={6} className="admin-empty">No accounts match.</td></tr>}
+            {(rows || []).map(u => (
+              <tr key={u.id} className={u.is_active ? '' : 'admin-off'}>
+                <td><strong>{u.username || '—'}</strong>{u.id === me && <Badge variant="gold">YOU</Badge>}</td>
+                <td>{u.display_name || '—'}</td>
+                <td>
+                  <select className="brutal-select admin-role" value={u.role || 'citizen'}
+                    disabled={u.id === me}
+                    onChange={e => patch(u.id, { role: e.target.value })}>
+                    {ADMIN_ROLES.map(r => <option key={r} value={r}>{r}</option>)}
+                  </select>
+                </td>
+                <td>{u.is_active ? <Badge variant="green">ACTIVE</Badge> : <Badge variant="red">DISABLED</Badge>}</td>
+                <td className="small-meta">{fmtWhen(u.last_login_at)}</td>
+                <td>
+                  {u.id !== me && (
+                    <button className="btn-brutal" style={{ fontSize: 10, padding: '5px 10px' }}
+                      onClick={() => patch(u.id, { is_active: !u.is_active })}>
+                      {u.is_active ? 'DEACTIVATE' : 'ACTIVATE'}
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {toastHost}
+    </div>
+  );
+};
+
+const AdminAudit = () => {
+  const [rows, setRows] = React.useState(null);
+  const [action, setAction] = React.useState('');
+  const ACTIONS = ['', 'login', 'login_failed', 'lockout', 'logout', 'token_reuse_detected', 'register', 'claim_anonymous', 'admin_user_update', 'fine_updated'];
+  React.useEffect(() => {
+    adminApi('/audit?limit=150' + (action ? '&action=' + action : ''))
+      .then(setRows).catch(() => setRows([]));
+  }, [action]);
+  const tone = (a) => /fail|lockout|reuse|reject/.test(a) ? 'var(--red)' : /login|register|claim|update|fine/.test(a) ? 'var(--gold)' : 'var(--cyan)';
+  return (
+    <div className="tab-pane">
+      <div className="toolbar">
+        <SegmentedControl options={['ALL', 'LOGIN', 'FAILED', 'ADMIN']} value={action === '' ? 'ALL' : action === 'login' ? 'LOGIN' : action === 'login_failed' ? 'FAILED' : 'ADMIN'}
+          onChange={v => setAction(v === 'ALL' ? '' : v === 'LOGIN' ? 'login' : v === 'FAILED' ? 'login_failed' : 'admin_user_update')} accent="var(--gold)" />
+        <span className="small-meta">{rows ? rows.length + ' entries' : 'loading…'} · append-only</span>
+      </div>
+      <div className="audit-list">
+        {rows === null && <div className="admin-empty">Loading audit trail…</div>}
+        {rows && rows.length === 0 && <div className="admin-empty">No entries.</div>}
+        {(rows || []).map(r => (
+          <div key={r.id} className="audit-row">
+            <span className="audit-dot" style={{ background: tone(r.action) }}></span>
+            <span className="audit-action">{r.action}</span>
+            <span className="audit-actor">{(r.performed_by || 'system').slice(0, 20)}</span>
+            <span className="audit-detail small-meta">{JSON.stringify(r.details || {}).slice(0, 80)}</span>
+            <span className="audit-time small-meta">{fmtWhen(r.created_at)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const AdminStats = () => {
+  const [s, setS] = React.useState(null);
+  React.useEffect(() => { adminApi('/stats').then(setS).catch(() => setS(false)); }, []);
+  const n = v => (v == null ? '—' : String(v));
+  return (
+    <div className="tab-pane">
+      {!s && <div className="admin-empty">Loading platform stats…</div>}
+      {s && (
+        <>
+          <div className="kpi-grid-4">
+            <KPICard label="TOTAL ACCOUNTS" value={n(s.users_total)} color="var(--gold)" />
+            <KPICard label="DISABLED" value={n(s.users_inactive)} color="var(--red)" />
+            <KPICard label="TELEGRAM CONNECTED" value={n(s.telegram_connected)} color="var(--cyan)" />
+            <KPICard label="AUDIT ROWS" value={n(s.audit_rows)} color="var(--green)" />
+          </div>
+          <div className="widgets-grid mt-20">
+            <div className="widget-card">
+              <div className="widget-title">ACCOUNTS BY ROLE</div>
+              <div style={{ padding: 8 }}>
+                {ADMIN_ROLES.map(r => (
+                  <div key={r} className="role-row">
+                    <span>{r}</span>
+                    <span className="role-count">{n((s.users_by_role || {})[r])}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="widget-card">
+              <div className="widget-title">PLATFORM VOLUME</div>
+              <div style={{ padding: 8 }}>
+                {[['Support tickets', s.tickets], ['Expenses logged', s.expenses], ['Fake-news analyses', s.fake_news_analyses], ['Traffic incidents', s.tv_incidents], ['Challans issued', s.tv_challans]].map(([l, v]) => (
+                  <div key={l} className="role-row"><span>{l}</span><span className="role-count">{n(v)}</span></div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
+
+const AdminPanel = ({ onBack }) => {
+  const [tab, setTab] = React.useState('users');
+  const tabs = [{ key: 'users', label: 'USERS' }, { key: 'audit', label: 'AUDIT TRAIL' }, { key: 'stats', label: 'PLATFORM STATS' }];
+  return (
+    <div className="subpage fade-in">
+      <SubPageHeader title="SYSTEM ADMIN" gatewayId="ADMIN_CONSOLE"
+        subtitle="USER MANAGEMENT · APPEND-ONLY AUDIT · PLATFORM STATS"
+        accentColor="var(--gold)" onBack={onBack} />
+      <Tabs tabs={tabs} active={tab} onChange={setTab} accent="var(--gold)" />
+      {tab === 'users' && <AdminUsers />}
+      {tab === 'audit' && <AdminAudit />}
+      {tab === 'stats' && <AdminStats />}
+    </div>
+  );
+};
+
 // Export all modules
 Object.assign(window, {
   DocumentIntelligence, ResumeScreening, TrafficViolations, AnomalyMonitoring,
-  RAGChatbot, FakeNewsDetector, SupportTickets, ExpenseCategorizer
+  RAGChatbot, FakeNewsDetector, SupportTickets, ExpenseCategorizer, AdminPanel
 });
