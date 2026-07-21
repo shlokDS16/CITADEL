@@ -25,6 +25,7 @@ from app.modules.traffic_violations import router as traffic_router
 from app.modules.anomaly_monitoring import router as anomaly_router
 from app.modules.citizen_assistant import router as citizen_router
 from app.modules.fake_news import router as fake_news_router
+from app.modules.auth import router as auth_router
 from app.modules.tickets import router as tickets_router
 # NOTE: expenses/__init__ lazy-exports via PEP-562 __getattr__, but the
 # from-import machinery binds the SUBMODULE named `router` onto the package
@@ -44,6 +45,13 @@ async def lifespan(app: FastAPI):
     log.info("CITADEL backend v%s booting in %s mode", __version__, settings.APP_ENV)
     log.info("CORS origins: %s", settings.cors_origin_list)
     log.info("Groq classifier: %s", settings.GROQ_CLASSIFIER_MODEL)
+
+    # Ensure the two demo auth accounts exist with real argon2id hashes.
+    try:
+        from app.modules.auth.service import ensure_seed_accounts
+        ensure_seed_accounts()
+    except Exception as e:
+        log.warning("Auth seed failed: %s", e)
 
     # Start the Traffic Violations snapshot-detection pre-warm loop (Phase 3++).
     # Keeps /snapshots/detect responses instant by refreshing the cache every 30s.
@@ -121,6 +129,7 @@ app.add_middleware(
 
 
 # ---- module routers ----
+app.include_router(auth_router,      prefix="/api", tags=["auth"])
 app.include_router(doc_intel_router, prefix="/api", tags=["document-intelligence"])
 app.include_router(resume_router,    prefix="/api", tags=["resume-screening"])
 app.include_router(traffic_router,   prefix="/api", tags=["traffic-violations"])

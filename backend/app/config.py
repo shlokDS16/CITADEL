@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     GROQ_CLASSIFIER_MODEL: str = "llama-3.3-70b-versatile"
     GROQ_ENDPOINT: str = "https://api.groq.com/openai/v1/chat/completions"
 
+    # ---- Auth (Phase 3) ----
+    JWT_SECRET: str = Field(..., description="HS256 signing secret — env only, never in code")
+    JWT_ACCESS_MINUTES: int = 30
+    JWT_REFRESH_DAYS: int = 14
+
     # ---- Server ----
     APP_ENV: str = "development"
     APP_HOST: str = "0.0.0.0"
