@@ -48,11 +48,19 @@ class LogoutIn(BaseModel):
 
 
 class RegisterIn(BaseModel):
-    """Citizen self-registration. Gov accounts are seeded/admin-created only."""
+    """Self-registration for either portal.
+
+    CITADEL ships as an open showcase, so the government portal accepts
+    self-signup too. A government signup is granted `gov_officer` (full
+    operational workflow: approve incidents, issue challans, triage
+    tickets) but never `gov_admin` — admin is seeded and owns the admin
+    panel. Citizen signup grants `citizen`.
+    """
     username: str = Field(..., min_length=3, max_length=64, pattern=r"^[a-zA-Z0-9._-]+$")
     password: str = Field(..., min_length=8, max_length=128)
     display_name: Optional[str] = Field(default=None, max_length=128)
     email: Optional[str] = Field(default=None, max_length=255)
+    portal: Literal["government", "citizen"] = "citizen"
 
 
 class ClaimIn(BaseModel):

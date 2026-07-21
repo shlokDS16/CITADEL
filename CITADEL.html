@@ -92,8 +92,8 @@ const App = () => {
     if (!loginUser || !loginPass) { setLoginErr('Choose a username and password'); return; }
     if (loginPass.length < 8) { setLoginErr('Password must be at least 8 characters'); return; }
     setLoginBusy(true); setLoginErr('');
-    apiFetch('/api/v1/auth/register', { json: { username: loginUser, password: loginPass } })
-      .then(() => apiFetch('/api/v1/auth/login', { json: { username: loginUser, password: loginPass, portal: 'citizen' } }))
+    apiFetch('/api/v1/auth/register', { json: { username: loginUser, password: loginPass, portal: loginRole } })
+      .then(() => apiFetch('/api/v1/auth/login', { json: { username: loginUser, password: loginPass, portal: loginRole } }))
       .then(finishLogin)
       .catch(e => setLoginErr(e.message || 'Registration failed'))
       .finally(() => setLoginBusy(false));
@@ -212,12 +212,15 @@ const App = () => {
               </button>
             </div>
             <div className="login-footer">
-              {isGov ? (
-                <span>Government accounts are issued by the administrator.</span>
-              ) : signupMode ? (
+              {signupMode ? (
                 <span>Have an account? <a style={{ cursor: 'pointer' }} onClick={() => { setSignupMode(false); setLoginErr(''); }}>Log in</a></span>
               ) : (
                 <span>Need an account? <a style={{ cursor: 'pointer' }} onClick={() => { setSignupMode(true); setLoginErr(''); setLoginUser(''); setLoginPass(''); }}>Sign Up</a></span>
+              )}
+              {signupMode && isGov && (
+                <div style={{ marginTop: 8, fontSize: 10, opacity: 0.7, letterSpacing: 0.5 }}>
+                  New government accounts are granted OFFICER access.
+                </div>
               )}
             </div>
           </div>

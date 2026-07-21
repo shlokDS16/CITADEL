@@ -105,7 +105,7 @@ async def register(payload: schemas.RegisterIn) -> schemas.UserOut:
     try:
         row = await run_in_threadpool(
             service.register, payload.username, payload.password,
-            payload.display_name, payload.email,
+            payload.display_name, payload.email, payload.portal,
         )
         return schemas.UserOut(**row)
     except service.AuthError as e:

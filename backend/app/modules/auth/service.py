@@ -246,17 +246,26 @@ def logout(raw_token: str, user_id: Optional[str]) -> None:
 # --------------------------------------------------------------------------
 # Citizen registration
 # --------------------------------------------------------------------------
-def register(username: str, password: str, display_name: Optional[str], email: Optional[str]) -> dict[str, Any]:
+#: portal -> role granted on self-signup. Government self-signup gets
+#: gov_officer (operational, not admin). See RegisterIn docstring.
+_SIGNUP_ROLE = {"government": "gov_officer", "citizen": "citizen"}
+
+
+def register(
+    username: str, password: str, display_name: Optional[str],
+    email: Optional[str], portal: str = "citizen",
+) -> dict[str, Any]:
     if _user_by_username(username):
         raise AuthError("username already taken", status=409)
+    role = _SIGNUP_ROLE.get(portal, "citizen")
     row = get_supabase().table("users").insert({
         "username": username,
         "password_hash": security.hash_password(password),
-        "role": "citizen",
+        "role": role,
         "display_name": display_name,
         "email": email,
     }).execute().data[0]
-    _audit("register", str(row["id"]), {"username": username[:64]})
+    _audit("register", str(row["id"]), {"username": username[:64], "role": role})
     return _shape_user(row)
 
 
