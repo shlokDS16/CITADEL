@@ -376,17 +376,33 @@ def ticket_stats(submitted_by: Optional[str] = None) -> dict[str, Any]:
     }
 
 
+#: Ownership guard (Phase 3.3). Anonymous tickets have no owner by design
+#: — nobody can rate/reopen/update them through the citizen surface, and a
+#: gov role bypasses ownership (officers act on any ticket).
+def _assert_owner(row: dict[str, Any], actor: Optional[str], is_gov: bool, action: str) -> None:
+    if is_gov:
+        return
+    owner = row.get("submitted_by")
+    if row.get("is_anonymous") or owner is None:
+        raise PermissionError(f"anonymous tickets cannot be {action} — no owner exists")
+    if not actor or str(owner) != str(actor):
+        raise PermissionError(f"only the ticket's submitter can {action} it")
+
+
 def add_citizen_update(
     ticket_id: str,
     text: str,
     actor_id: Optional[str] = None,
     actor_label: str = "You",
+    is_gov: bool = False,
 ) -> dict[str, Any]:
     body = _strip_html(text)
     if not body:
         raise ValueError("text is required")
-    if not repo.get_ticket(ticket_id):
+    row = repo.get_ticket(ticket_id)
+    if not row:
         raise LookupError(f"ticket {ticket_id} not found")
+    _assert_owner(row, actor_id, is_gov, "commented on")
     # ticket_updates.actor_id FKs to users — same pre-auth demotion as
     # tickets.submitted_by (see create_ticket).
     if actor_id and not repo.user_exists(actor_id):
@@ -409,13 +425,17 @@ def add_citizen_update(
     }
 
 
-def rate_ticket(ticket_id: str, rating: int, comment: Optional[str] = None) -> dict[str, Any]:
+def rate_ticket(
+    ticket_id: str, rating: int, comment: Optional[str] = None,
+    actor: Optional[str] = None, is_gov: bool = False,
+) -> dict[str, Any]:
     """Citizen rates the resolution 1-5. Only meaningful once resolved."""
     if rating < 1 or rating > 5:
         raise ValueError("rating must be between 1 and 5")
     row = repo.get_ticket(ticket_id)
     if not row:
         raise LookupError(f"ticket {ticket_id} not found")
+    _assert_owner(row, actor, is_gov, "rated")
     if row.get("status") not in ("resolved", "closed"):
         raise ValueError(
             f"ticket is {row.get('status')} — only a resolved ticket can be rated"
@@ -431,7 +451,10 @@ def rate_ticket(ticket_id: str, rating: int, comment: Optional[str] = None) -> d
     return shape_ticket(updated or {**row, **patch})
 
 
-def reopen_ticket(ticket_id: str, reason: str) -> dict[str, Any]:
+def reopen_ticket(
+    ticket_id: str, reason: str,
+    actor: Optional[str] = None, is_gov: bool = False,
+) -> dict[str, Any]:
     """Reopen a resolved ticket within REOPEN_WINDOW_DAYS of resolution."""
     body = _strip_html(reason)
     if not body:
@@ -439,6 +462,7 @@ def reopen_ticket(ticket_id: str, reason: str) -> dict[str, Any]:
     row = repo.get_ticket(ticket_id)
     if not row:
         raise LookupError(f"ticket {ticket_id} not found")
+    _assert_owner(row, actor, is_gov, "reopened")
     if row.get("status") not in ("resolved", "closed"):
         raise ValueError(f"ticket is {row.get('status')} — only a resolved ticket can be reopened")
 

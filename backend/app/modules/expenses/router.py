@@ -16,7 +16,7 @@ from datetime import date
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, UploadFile
 from starlette.concurrency import run_in_threadpool
 
 from app.shared.ratelimit import rate_limit
@@ -30,13 +30,19 @@ _RL_ML = Depends(rate_limit("expenses:ml", 30, 60))    # can reach Groq (cached 
 _RL_STD = Depends(rate_limit("expenses:std", 60, 60))
 
 
-def _citizen(x_user_id: Optional[str] = Header(default=None, alias="X-User-Id")) -> str:
-    if not x_user_id:
-        raise HTTPException(status_code=400, detail="X-User-Id header (uuid) is required")
-    try:
-        return str(UUID(x_user_id))
-    except (ValueError, AttributeError, TypeError):
-        raise HTTPException(status_code=400, detail="X-User-Id must be a uuid")
+def _citizen(request: Request) -> str:
+    """Identity = the verified JWT subject attached by AuthPolicyMiddleware.
+
+    The pre-auth x-user-id header is DEAD on this module as of Phase 3.3 —
+    a client-chosen header must never pick whose finances are returned.
+    """
+    claims = getattr(request.state, "user", None)
+    if not claims or not claims.get("sub"):
+        raise HTTPException(
+            status_code=401, detail="authentication required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return str(claims["sub"])
 
 
 @router.get(
@@ -538,17 +544,12 @@ async def tax_summary(citizen: str = Depends(_citizen)) -> schemas.TaxSummaryOut
     summary="Download FY export — format=csv|xlsx|tax_package (sync, spec's async job dropped: a citizen-FY builds in <1s)",
 )
 async def export_report(
+    request: Request,
     format: str = Query(default="csv", pattern="^(csv|xlsx|tax_package)$"),
-    uid: Optional[str] = Query(
-        default=None,
-        description="Identity fallback for browser navigations (<a download>) "
-        "which cannot send X-User-Id — same pattern as fake-news report.html.",
-    ),
-    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
 ):
     from fastapi.responses import Response
 
-    citizen = _citizen(x_user_id or uid)
+    citizen = _citizen(request)
 
     builders = {
         "csv": (service.export_csv, "text/csv; charset=utf-8"),

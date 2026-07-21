@@ -113,6 +113,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# ---- Auth policy (Phase 3.3) ----
+# Added BEFORE CORSMiddleware in code → CORS wraps it (add_middleware is
+# LIFO), so preflights are answered by CORS and real requests hit the
+# policy. The middleware also passes OPTIONS explicitly as a second belt.
+from app.core.policy import AuthPolicyMiddleware  # noqa: E402
+
+app.add_middleware(AuthPolicyMiddleware)
+
 # ---- CORS ----
 app.add_middleware(
     CORSMiddleware,

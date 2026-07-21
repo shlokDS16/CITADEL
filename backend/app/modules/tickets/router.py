@@ -26,6 +26,7 @@ from fastapi import (
     Header,
     HTTPException,
     Query,
+    Request,
     UploadFile,
 )
 from starlette.concurrency import run_in_threadpool
@@ -46,21 +47,27 @@ _RL_CLASSIFY = Depends(rate_limit("tickets:classify", 10, 60))
 _RL_STD = Depends(rate_limit("tickets:std", 60, 60))
 
 
-def _actor(x_user_id: Optional[str]) -> Optional[str]:
-    """Actor uuid from the header, if it looks like one.
+def _claims(request: Request) -> dict:
+    claims = getattr(request.state, "user", None)
+    if not claims or not claims.get("sub"):
+        raise HTTPException(
+            status_code=401, detail="authentication required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return claims
 
-    Phase 3 replaces this with a verified JWT subject. Until then a
-    non-uuid value (e.g. the hardcoded 'rsd' login) is treated as no
-    identity rather than being written into a uuid column.
-    """
-    if not x_user_id:
-        return None
-    from uuid import UUID
 
-    try:
-        return str(UUID(x_user_id))
-    except (ValueError, AttributeError, TypeError):
-        return None
+def _actor(request: Request) -> str:
+    """Verified JWT subject (AuthPolicyMiddleware). The pre-auth
+    x-user-id header is dead on this module as of Phase 3.3."""
+    return str(_claims(request)["sub"])
+
+
+def _is_gov(request: Request) -> bool:
+    from app.core import security as _sec
+
+    claims = getattr(request.state, "user", None) or {}
+    return claims.get("role") in _sec.GOV_ROLES
 
 
 @router.get(
@@ -116,11 +123,11 @@ async def preview(payload: schemas.TicketPreviewIn) -> schemas.TicketPreviewOut:
     dependencies=[_RL_CLASSIFY],
 )
 async def create_ticket(
+    request: Request,
     payload: schemas.TicketCreateIn,
-    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
 ) -> schemas.TicketCreateOut:
     try:
-        result = await run_in_threadpool(service.create_ticket, payload, _actor(x_user_id))
+        result = await run_in_threadpool(service.create_ticket, payload, _actor(request))
         return schemas.TicketCreateOut(
             ticket=schemas.TicketOut(**result["ticket"]),
             preview=schemas.TicketPreviewOut(**result["preview"]),
@@ -142,18 +149,17 @@ async def create_ticket(
     dependencies=[_RL_STD],
 )
 async def my_tickets(
+    request: Request,
     status: Optional[str] = Query(default=None, description="Comma-separated status filter"),
     category: Optional[str] = Query(default=None, description="Comma-separated category filter"),
     limit: int = Query(default=25, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> schemas.TicketListOut:
-    # Pre-auth (Phase 3 seam): submitted_by is stored NULL for browser
-    # identities (they aren't users rows — see service.create_ticket), so
-    # scoping by X-User-Id would return nothing. Until a verified JWT
-    # subject exists, "mine" = all tickets, matching how traffic/anomaly
-    # behave for the single hardcoded login.
+    # Scoped to the verified JWT subject (3.3 closes the 1.4 seam). Tickets
+    # created before auth existed have submitted_by NULL and correctly do
+    # not appear as anyone's "mine".
     result = await run_in_threadpool(
-        service.list_tickets, None, status, category, limit, offset
+        service.list_tickets, _actor(request), status, category, limit, offset
     )
     return schemas.TicketListOut(**result)
 
@@ -165,10 +171,9 @@ async def my_tickets(
     summary="My-Tickets KPI strip — counts and mean resolution time",
     dependencies=[_RL_STD],
 )
-async def ticket_stats() -> schemas.TicketStatsOut:
-    # Unscoped pre-auth, same reasoning as /mine above.
+async def ticket_stats(request: Request) -> schemas.TicketStatsOut:
     return schemas.TicketStatsOut(
-        **await run_in_threadpool(service.ticket_stats, None)
+        **await run_in_threadpool(service.ticket_stats, _actor(request))
     )
 
 
@@ -180,17 +185,17 @@ async def ticket_stats() -> schemas.TicketStatsOut:
     dependencies=[_RL_STD],
 )
 async def community(
+    request: Request,
     sort: str = Query(default="trending", pattern="^(trending|new|nearby|unresolved)$"),
     q: Optional[str] = Query(default=None, max_length=120),
     limit: int = Query(default=25, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     lat: Optional[float] = Query(default=None, ge=-90, le=90),
     lng: Optional[float] = Query(default=None, ge=-180, le=180),
-    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
 ) -> schemas.CommunityListOut:
     try:
         result = await run_in_threadpool(
-            service.community, sort, q, limit, offset, lat, lng, _actor(x_user_id)
+            service.community, sort, q, limit, offset, lat, lng, _actor(request)
         )
         return schemas.CommunityListOut(**result)
     except ValueError as ve:
@@ -223,20 +228,10 @@ async def map_nearby(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _require_citizen(x_user_id: Optional[str]) -> str:
-    """Upvotes and comments are per-citizen, so they need an identity.
-
-    Until Phase 3 this is an unverified header — but a *missing* one is
-    still a 400, because without it the idempotency key (ticket, citizen)
-    is meaningless and one caller could upvote unboundedly.
-    """
-    actor = _actor(x_user_id)
-    if not actor:
-        raise HTTPException(
-            status_code=400,
-            detail="X-User-Id header with a uuid is required for this action",
-        )
-    return actor
+def _require_citizen(request: Request) -> str:
+    """Per-citizen actions need the verified identity — same as _actor now
+    that the JWT is mandatory; kept as a named alias for readability."""
+    return _actor(request)
 
 
 @router.post(
@@ -247,10 +242,10 @@ def _require_citizen(x_user_id: Optional[str]) -> str:
     dependencies=[_RL_STD],
 )
 async def upvote(
+    request: Request,
     ticket_id: str,
-    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
 ) -> schemas.UpvoteOut:
-    citizen = _require_citizen(x_user_id)
+    citizen = _require_citizen(request)
     try:
         return schemas.UpvoteOut(**await run_in_threadpool(service.upvote, ticket_id, citizen))
     except LookupError as le:
@@ -268,10 +263,10 @@ async def upvote(
     dependencies=[_RL_STD],
 )
 async def remove_upvote(
+    request: Request,
     ticket_id: str,
-    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
 ) -> schemas.UpvoteOut:
-    citizen = _require_citizen(x_user_id)
+    citizen = _require_citizen(request)
     try:
         return schemas.UpvoteOut(
             **await run_in_threadpool(service.remove_upvote, ticket_id, citizen)
@@ -304,11 +299,11 @@ async def list_comments(ticket_id: str) -> list[schemas.CommentOut]:
     dependencies=[_RL_STD],
 )
 async def add_comment(
+    request: Request,
     ticket_id: str,
     payload: schemas.CommentIn,
-    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
 ) -> schemas.CommentOut:
-    citizen = _require_citizen(x_user_id)
+    citizen = _require_citizen(request)
     try:
         return schemas.CommentOut(
             **await run_in_threadpool(service.add_comment, ticket_id, citizen, payload.text)
@@ -345,17 +340,20 @@ async def get_ticket(ticket_id: str) -> schemas.TicketOut:
     dependencies=[_RL_STD],
 )
 async def add_update(
+    request: Request,
     ticket_id: str,
     payload: schemas.TicketUpdateIn,
-    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
 ) -> schemas.TicketUpdateOut:
     try:
         row = await run_in_threadpool(
-            service.add_citizen_update, ticket_id, payload.text, _actor(x_user_id)
+            service.add_citizen_update, ticket_id, payload.text, _actor(request),
+            "You", _is_gov(request),
         )
         return schemas.TicketUpdateOut(**row)
     except LookupError as le:
         raise HTTPException(status_code=404, detail=str(le))
+    except PermissionError as pe:
+        raise HTTPException(status_code=403, detail=str(pe))
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:  # noqa: BLE001
@@ -370,14 +368,17 @@ async def add_update(
     summary="Rate a resolved ticket 1-5",
     dependencies=[_RL_STD],
 )
-async def rate_ticket(ticket_id: str, payload: schemas.TicketRateIn) -> schemas.TicketOut:
+async def rate_ticket(request: Request, ticket_id: str, payload: schemas.TicketRateIn) -> schemas.TicketOut:
     try:
         row = await run_in_threadpool(
-            service.rate_ticket, ticket_id, payload.rating, payload.comment
+            service.rate_ticket, ticket_id, payload.rating, payload.comment,
+            _actor(request), _is_gov(request),
         )
         return schemas.TicketOut(**row)
     except LookupError as le:
         raise HTTPException(status_code=404, detail=str(le))
+    except PermissionError as pe:
+        raise HTTPException(status_code=403, detail=str(pe))
     except ValueError as ve:
         # Rating an unresolved ticket is a valid request in the wrong state.
         raise HTTPException(status_code=409, detail=str(ve))
@@ -393,12 +394,17 @@ async def rate_ticket(ticket_id: str, payload: schemas.TicketRateIn) -> schemas.
     summary=f"Reopen a resolved ticket within {service.REOPEN_WINDOW_DAYS} days",
     dependencies=[_RL_STD],
 )
-async def reopen_ticket(ticket_id: str, payload: schemas.TicketReopenIn) -> schemas.TicketOut:
+async def reopen_ticket(request: Request, ticket_id: str, payload: schemas.TicketReopenIn) -> schemas.TicketOut:
     try:
-        row = await run_in_threadpool(service.reopen_ticket, ticket_id, payload.reason)
+        row = await run_in_threadpool(
+            service.reopen_ticket, ticket_id, payload.reason,
+            _actor(request), _is_gov(request),
+        )
         return schemas.TicketOut(**row)
     except LookupError as le:
         raise HTTPException(status_code=404, detail=str(le))
+    except PermissionError as pe:
+        raise HTTPException(status_code=403, detail=str(pe))
     except ValueError as ve:
         raise HTTPException(status_code=409, detail=str(ve))
     except Exception as e:  # noqa: BLE001
