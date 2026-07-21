@@ -492,9 +492,10 @@ const TelegramSetup = ({ role }) => {
       </div>
       <div className="tg-body">
         <p className="tg-lede">
-          Receive challans, anomaly alerts and other notifications on your own Telegram,
-          exactly the way the platform does. Use the shared CITADEL bot (easiest) or your
-          own bot.
+          Receive challans, anomaly alerts and other notifications on your own Telegram.
+          {cfg && cfg.platform_bot_available
+            ? ' Use the shared CITADEL bot (easiest) or bring your own.'
+            : ' This deployment has no shared bot, so create your own with @BotFather (guide below). Alerts go only to the chat you connect here.'}
         </p>
 
         <label className="field-label">CHAT ID *</label>
@@ -526,14 +527,20 @@ const TelegramSetup = ({ role }) => {
         </button>
         {showGuide && (
           <div className="tg-guide">
-            <div className="tg-guide-h">Easy path · shared CITADEL bot (30 seconds)</div>
-            <ol>
-              <li>In Telegram, open <b>@{botName}</b> and press <b>Start</b> (send any message once, so the bot may write to you).</li>
-              <li>Open <b>@userinfobot</b> and press Start. It replies with your numeric <b>Id</b>.</li>
-              <li>Paste that number into <b>Chat ID</b> above. Leave <b>Bot Token</b> blank.</li>
-              <li>Press <b>Save</b>, then <b>Send Test</b>. The alert should arrive in your chat.</li>
-            </ol>
-            <div className="tg-guide-h">Advanced path · your own bot</div>
+            {cfg && cfg.platform_bot_available && (
+              <>
+                <div className="tg-guide-h">Easy path · shared CITADEL bot (30 seconds)</div>
+                <ol>
+                  <li>In Telegram, open <b>@{botName}</b> and press <b>Start</b> (send any message once, so the bot may write to you).</li>
+                  <li>Open <b>@userinfobot</b> and press Start. It replies with your numeric <b>Id</b>.</li>
+                  <li>Paste that number into <b>Chat ID</b> above. Leave <b>Bot Token</b> blank.</li>
+                  <li>Press <b>Save</b>, then <b>Send Test</b>. The alert should arrive in your chat.</li>
+                </ol>
+              </>
+            )}
+            <div className="tg-guide-h">
+              {cfg && cfg.platform_bot_available ? 'Advanced path · your own bot' : 'Create your own bot (2 minutes)'}
+            </div>
             <ol>
               <li>Open <b>@BotFather</b>, send <b>/newbot</b>, pick a name. It gives you a token like <code>123456789:AAF…</code>.</li>
               <li>Open your new bot and press <b>Start</b> once.</li>
