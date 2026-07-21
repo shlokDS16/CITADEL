@@ -24,6 +24,8 @@
 </head>
 <body>
   <div id="root"></div>
+  <!-- deploy-time backend URL override (plain script: runs before the Babel-compiled app) -->
+  <script src="config.js?v=20260504b"></script>
   <script type="text/babel" src="components.jsx?v=20260504b"></script>
   <script type="text/babel" src="pages.jsx?v=20260504b"></script>
   <script type="text/babel" src="tweaks-panel.jsx?v=20260504b"></script>
@@ -43,12 +45,76 @@ const App = () => {
   const [loginRole, setLoginRole] = React.useState(null);
   const [cmdOpen, setCmdOpen] = React.useState(false);
 
-  const goLanding = () => { setPage('landing'); setRole(null); setCmdOpen(false); };
-  const goLogin = (r) => { setLoginRole(r); setPage('login'); };
-  const doLogin = () => { setRole(loginRole); setPage('dashboard'); };
+  const [loginUser, setLoginUser] = React.useState('');
+  const [loginPass, setLoginPass] = React.useState('');
+  const [loginErr, setLoginErr] = React.useState('');
+  const [loginBusy, setLoginBusy] = React.useState(false);
+  const [signupMode, setSignupMode] = React.useState(false);
+
+  const goLanding = () => {
+    czLogout();                       // revoke the refresh token server-side
+    setPage('landing'); setRole(null); setCmdOpen(false);
+  };
+  const goLogin = (r) => {
+    setLoginRole(r); setPage('login'); setLoginErr(''); setSignupMode(false);
+    setLoginUser(r === 'government' ? 'rsd' : 'citizen'); setLoginPass('');
+  };
+
+  const finishLogin = (session) => {
+    czAuth.set(session);
+    // Adopt any pre-auth browser data (tickets/expenses created before
+    // login existed) into this citizen account — once, best-effort.
+    const anonUid = localStorage.getItem('citadel_tk_uid');
+    if (session.user.role === 'citizen' && anonUid && anonUid !== session.user.id) {
+      apiFetch('/api/v1/auth/claim', { json: { anonymous_uid: anonUid } })
+        .then(r => {
+          const n = Object.values(r.migrated || {}).reduce((a, b) => a + b, 0);
+          if (n) console.info(`[citadel] adopted ${n} pre-auth rows into this account`);
+        })
+        .catch(() => {});
+      // future module reads use the account identity
+      try { localStorage.setItem('citadel_tk_uid', session.user.id); } catch {}
+    }
+    setRole(session.user.role === 'citizen' ? 'citizen' : 'government');
+    setPage('dashboard');
+  };
+
+  const doLogin = () => {
+    if (!loginUser || !loginPass) { setLoginErr('Enter username and password'); return; }
+    setLoginBusy(true); setLoginErr('');
+    apiFetch('/api/v1/auth/login', { json: { username: loginUser, password: loginPass, portal: loginRole } })
+      .then(finishLogin)
+      .catch(e => setLoginErr(e.message || 'Login failed'))
+      .finally(() => setLoginBusy(false));
+  };
+
+  const doSignup = () => {
+    if (!loginUser || !loginPass) { setLoginErr('Choose a username and password'); return; }
+    if (loginPass.length < 8) { setLoginErr('Password must be at least 8 characters'); return; }
+    setLoginBusy(true); setLoginErr('');
+    apiFetch('/api/v1/auth/register', { json: { username: loginUser, password: loginPass } })
+      .then(() => apiFetch('/api/v1/auth/login', { json: { username: loginUser, password: loginPass, portal: 'citizen' } }))
+      .then(finishLogin)
+      .catch(e => setLoginErr(e.message || 'Registration failed'))
+      .finally(() => setLoginBusy(false));
+  };
   const goSub = (sub) => { setPage(sub); setCmdOpen(false); };
   const goDash = () => { setPage('dashboard'); setCmdOpen(false); };
   const openCmd = () => setCmdOpen(true);
+
+  // Restore a persisted session on reload: verify the stored token against
+  // /auth/me (apiFetch auto-refreshes if the access token expired). An
+  // invalid/revoked session falls back to the landing page silently.
+  React.useEffect(() => {
+    const session = czAuth.get();
+    if (!session || !session.user) return;
+    apiFetch('/api/v1/auth/me')
+      .then(me => {
+        setRole(me.role === 'citizen' ? 'citizen' : 'government');
+        setPage('dashboard');
+      })
+      .catch(() => czAuth.clear());
+  }, []);
 
   React.useEffect(() => {
     const onKey = (e) => {
@@ -125,15 +191,34 @@ const App = () => {
             </div>
             <div className="login-body">
               <label className="field-label">Username</label>
-              <input className="brutal-input" placeholder="Enter username" defaultValue={isGov ? 'rsd' : 'ss'} />
+              <input className="brutal-input" placeholder={signupMode ? 'Choose a username' : 'Enter username'}
+                value={loginUser} onChange={e => setLoginUser(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') (signupMode ? doSignup : doLogin)(); }} />
               <label className="field-label">Password</label>
-              <input className="brutal-input" type="password" placeholder="Enter password" defaultValue="••••••••" />
-              <button className="btn-brutal action-btn" style={{ background: accent, color: isGov ? '#000' : '#fff', marginTop: 20 }} onClick={doLogin}>
-                ACCESS SYSTEM
+              <input className="brutal-input" type="password"
+                placeholder={signupMode ? 'Min 8 characters' : 'Enter password'}
+                value={loginPass} onChange={e => setLoginPass(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') (signupMode ? doSignup : doLogin)(); }} />
+              {loginErr && (
+                <div style={{ marginTop: 12, padding: '8px 10px', border: '2px solid var(--red)', background: '#fff',
+                  color: 'var(--red)', fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 700 }}>
+                  ✕ {loginErr}
+                </div>
+              )}
+              <button className="btn-brutal action-btn" disabled={loginBusy}
+                style={{ background: accent, color: isGov ? '#000' : '#fff', marginTop: 20 }}
+                onClick={signupMode ? doSignup : doLogin}>
+                {loginBusy ? 'VERIFYING…' : signupMode ? 'CREATE ACCOUNT' : 'ACCESS SYSTEM'}
               </button>
             </div>
             <div className="login-footer">
-              Need an account? <a>Sign Up</a>
+              {isGov ? (
+                <span>Government accounts are issued by the administrator.</span>
+              ) : signupMode ? (
+                <span>Have an account? <a style={{ cursor: 'pointer' }} onClick={() => { setSignupMode(false); setLoginErr(''); }}>Log in</a></span>
+              ) : (
+                <span>Need an account? <a style={{ cursor: 'pointer' }} onClick={() => { setSignupMode(true); setLoginErr(''); setLoginUser(''); setLoginPass(''); }}>Sign Up</a></span>
+              )}
             </div>
           </div>
           <div style={{ position: 'absolute', bottom: 30, fontFamily: 'var(--font-mono)', fontSize: 10, letterSpacing: 2, opacity: 0.3, textTransform: 'uppercase' }}>

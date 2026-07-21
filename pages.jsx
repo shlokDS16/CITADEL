@@ -8827,10 +8827,29 @@ const ExpenseReports = () => {
     exApi('/reports/tax-summary').then(setTax).catch(() => {});
   }, []);
 
-  // Browser downloads can't send the identity header — the endpoint
-  // accepts ?uid= for exactly this (same pattern as fake-news reports).
-  const download = (format) =>
-    window.open(`${API_BASE}${EX_BASE}/reports/export?format=${format}&uid=${exUid}`, '_blank', 'noopener');
+  // Authenticated Blob download: fetch with the Bearer header, then hand
+  // the bytes to the browser via an object URL. No identity in the query
+  // string — tokens or uids in URLs leak into logs and history.
+  const download = (format) => {
+    const session = czAuth.get();
+    fetch(`${API_BASE}${EX_BASE}/reports/export?format=${format}`, {
+      headers: {
+        'ngrok-skip-browser-warning': 'true',
+        ...(session && session.access_token ? { Authorization: `Bearer ${session.access_token}` } : { 'x-user-id': exUid }),
+      },
+    })
+      .then(async r => {
+        if (!r.ok) throw new Error(`export failed (${r.status})`);
+        const blob = await r.blob();
+        const cd = r.headers.get('content-disposition') || '';
+        const name = (cd.match(/filename="([^"]+)"/) || [])[1] || `citadel-export.${format === 'tax_package' ? 'zip' : format}`;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = name; a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+      })
+      .catch(e => toast(e.message || 'Export failed', 'error'));
+  };
 
   const fyLabel = fy ? fy.fy : 'FY';
   return (

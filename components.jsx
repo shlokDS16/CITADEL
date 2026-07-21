@@ -20,7 +20,17 @@ const CitadelBackground = () => (
 // (or set localStorage 'citadel_live'='1') to opt in to real API calls.
 // ====================================================================
 
-const API_BASE = 'http://127.0.0.1:8000';
+// Backend base URL. Local dev defaults to the local uvicorn; a hosted
+// deploy (e.g. Vercel frontend → ngrok/Render backend) overrides it via
+// window.CITADEL_API_BASE (set by config.js) or a ?api= query param.
+const API_BASE = (() => {
+  try {
+    if (window.CITADEL_API_BASE) return String(window.CITADEL_API_BASE).replace(/\/+$/, '');
+    const q = new URLSearchParams(window.location.search).get('api');
+    if (q) return q.replace(/\/+$/, '');
+  } catch (e) {}
+  return 'http://127.0.0.1:8000';
+})();
 
 const isLiveMode = () => {
   try {
@@ -43,7 +53,59 @@ const useLive = () => {
  *   - options.params → object → ?key=val querystring
  * Returns parsed JSON, throws Error on non-2xx with .status set.
  */
-const apiFetch = async (path, options = {}) => {
+/* ---- Auth session store (Phase 3) ------------------------------------- */
+// One persisted session: { access_token, refresh_token, user:{id,username,role} }.
+// apiFetch attaches the access token automatically and retries ONCE through
+// a refresh on 401 — callers never handle token plumbing themselves.
+const AUTH_KEY = 'citadel_auth_v1';
+const czAuth = {
+  get: () => {
+    try { return JSON.parse(localStorage.getItem(AUTH_KEY)) || null; }
+    catch { return null; }
+  },
+  set: (session) => {
+    try { localStorage.setItem(AUTH_KEY, JSON.stringify(session)); } catch {}
+  },
+  clear: () => { try { localStorage.removeItem(AUTH_KEY); } catch {} },
+  user: () => (czAuth.get() || {}).user || null,
+};
+
+// Single-flight refresh: concurrent 401s share one refresh call instead of
+// racing (a race would rotate the token twice and trip reuse detection).
+let _refreshPromise = null;
+const czRefresh = () => {
+  if (!_refreshPromise) {
+    const session = czAuth.get();
+    if (!session || !session.refresh_token) return Promise.reject(new Error('no session'));
+    _refreshPromise = fetch(`${API_BASE}/api/v1/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true' },
+      body: JSON.stringify({ refresh_token: session.refresh_token }),
+    }).then(async r => {
+      if (!r.ok) { czAuth.clear(); throw new Error('session expired'); }
+      const next = await r.json();
+      czAuth.set(next);
+      return next;
+    }).finally(() => { _refreshPromise = null; });
+  }
+  return _refreshPromise;
+};
+
+const czLogout = async () => {
+  const session = czAuth.get();
+  czAuth.clear();
+  if (session && session.refresh_token) {
+    try {
+      await fetch(`${API_BASE}/api/v1/auth/logout`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true' },
+        body: JSON.stringify({ refresh_token: session.refresh_token }),
+      });
+    } catch {}
+  }
+};
+
+const apiFetch = async (path, options = {}, _isRetry = false) => {
   const { json, form, params, method, ...rest } = options;
   let url = path.startsWith('http') ? path : `${API_BASE}${path}`;
   if (params) {
@@ -54,10 +116,21 @@ const apiFetch = async (path, options = {}) => {
     const qs = q.toString();
     if (qs) url += (url.includes('?') ? '&' : '?') + qs;
   }
+  const session = czAuth.get();
   const init = {
     method: method || (json || form ? 'POST' : 'GET'),
-    headers: {},
     ...rest,
+    // ngrok's free tier serves a browser-warning interstitial unless this
+    // header is present — send it always (harmless off-ngrok) so the hosted
+    // frontend's API calls pass straight through to the tunnelled backend.
+    // Placed after ...rest and merged so caller headers (auth) are kept.
+    headers: {
+      'ngrok-skip-browser-warning': 'true',
+      // Bearer token attached automatically when a session exists; an
+      // explicit caller-supplied Authorization header still wins.
+      ...(session && session.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+      ...(rest.headers || {}),
+    },
   };
   if (json !== undefined) {
     init.body = JSON.stringify(json);
@@ -67,6 +140,18 @@ const apiFetch = async (path, options = {}) => {
     // do NOT set content-type — browser adds the multipart boundary
   }
   const r = await fetch(url, init);
+
+  // Expired access token → one silent refresh, then replay the request.
+  // Skipped for auth endpoints themselves and for anything already retried.
+  if (r.status === 401 && !_isRetry && session && session.refresh_token && !path.includes('/auth/')) {
+    try {
+      await czRefresh();
+      return apiFetch(path, options, true);
+    } catch {
+      // fall through — surface the original 401 to the caller
+    }
+  }
+
   const ct = r.headers.get('content-type') || '';
   const body = ct.includes('json') ? await r.json() : await r.text();
   if (!r.ok) {
@@ -1063,5 +1148,5 @@ Object.assign(window, {
   FunnelChart, RadarChart, MapMock, StatusTimeline, useToast,
   ProgressRing, AlertTicker,
   // Live-backend wiring helpers
-  API_BASE, isLiveMode, useLive, apiFetch, LiveBadge,
+  API_BASE, isLiveMode, useLive, apiFetch, LiveBadge, czAuth, czLogout,
 });
