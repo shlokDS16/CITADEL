@@ -3158,3 +3158,20 @@ body.dark .tv-timeline-row { background: #0f0f0f; }
   background: #dcdad4;
 }
 .tk-map-canvas.leaflet-container { font-family: var(--font-mono); }
+
+/* === TELEGRAM SETUP (Phase 6) === */
+.tg-card { display: flex; flex-direction: column; }
+.tg-status { font-family: var(--font-mono); font-size: 9px; font-weight: 700; letter-spacing: 1px; padding: 3px 8px; border: 2px solid #000; }
+.tg-body { padding: 4px 2px 2px; }
+.tg-lede { font-family: var(--font-mono); font-size: 12px; line-height: 1.6; color: #333; margin: 0 0 14px; }
+.tg-actions { display: flex; gap: 10px; align-items: stretch; margin-top: 16px; flex-wrap: wrap; }
+.tg-msg { margin-top: 12px; padding: 8px 10px; border: 2px solid #000; background: #fff; font-family: var(--font-mono); font-size: 11px; font-weight: 700; line-height: 1.5; }
+.tg-guide-toggle { margin-top: 16px; width: 100%; text-align: left; background: #f2f0eb; border: 2px solid #000; padding: 9px 12px; font-family: var(--font-display); font-weight: 700; font-size: 12px; letter-spacing: 0.5px; cursor: pointer; box-shadow: 3px 3px 0 #000; }
+.tg-guide-toggle:hover { background: #fff; }
+.tg-guide { margin-top: 12px; border: 2px solid #000; background: #fbfaf7; padding: 14px 16px; }
+.tg-guide-h { font-family: var(--font-display); font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; margin: 6px 0 8px; padding-bottom: 4px; border-bottom: 2px solid #000; }
+.tg-guide-h:first-child { margin-top: 0; }
+.tg-guide ol { margin: 0 0 10px; padding-left: 20px; }
+.tg-guide li { font-family: var(--font-mono); font-size: 11.5px; line-height: 1.7; margin-bottom: 5px; color: #222; }
+.tg-guide code { background: #eceae4; border: 1px solid #ccc; padding: 0 4px; font-size: 10.5px; }
+.tg-note { font-family: var(--font-mono); font-size: 10.5px; line-height: 1.6; color: #666; border-top: 1px dashed #bbb; padding-top: 10px; margin-top: 4px; }

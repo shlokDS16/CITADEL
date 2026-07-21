@@ -301,6 +301,14 @@ const App = () => {
           </div>
 
           <div className="section-divider">
+            <span>Alerts & Integrations</span>
+          </div>
+
+          <div className="widgets-grid" style={{ gridTemplateColumns: 'minmax(0, 520px)' }}>
+            <TelegramSetup role="government" />
+          </div>
+
+          <div className="section-divider">
             <span>Intelligence & Monitoring</span>
           </div>
 
@@ -390,6 +398,14 @@ const App = () => {
           <div className="widgets-grid">
             <CoreDynamics />
             <SessionLog lines={citLogLines} />
+          </div>
+
+          <div className="section-divider">
+            <span>Alerts & Integrations</span>
+          </div>
+
+          <div className="widgets-grid" style={{ gridTemplateColumns: 'minmax(0, 520px)' }}>
+            <TelegramSetup role="citizen" />
           </div>
 
           <div className="section-divider">

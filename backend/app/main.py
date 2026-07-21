@@ -27,6 +27,7 @@ from app.modules.citizen_assistant import router as citizen_router
 from app.modules.fake_news import router as fake_news_router
 from app.modules.auth import router as auth_router
 from app.modules.overview import router as overview_router
+from app.modules.telegram import router as telegram_router
 from app.modules.tickets import router as tickets_router
 # NOTE: expenses/__init__ lazy-exports via PEP-562 __getattr__, but the
 # from-import machinery binds the SUBMODULE named `router` onto the package
@@ -140,6 +141,7 @@ app.add_middleware(
 # ---- module routers ----
 app.include_router(auth_router,      prefix="/api", tags=["auth"])
 app.include_router(overview_router,  prefix="/api", tags=["overview"])
+app.include_router(telegram_router,  prefix="/api", tags=["telegram"])
 app.include_router(doc_intel_router, prefix="/api", tags=["document-intelligence"])
 app.include_router(resume_router,    prefix="/api", tags=["resume-screening"])
 app.include_router(traffic_router,   prefix="/api", tags=["traffic-violations"])

@@ -418,6 +418,120 @@ const OverviewStats = ({ role }) => {
   );
 };
 
+// ---- Telegram self-setup (Phase 6, both portals) ----
+// Any signed-in account can point CITADEL alerts at its own Telegram chat,
+// reusing the platform's shared bot or its own BotFather bot. The test send
+// delivers through the real Bot API, so you receive exactly as the demo does.
+const TelegramSetup = ({ role }) => {
+  const accent = role === 'government' ? 'var(--gold)' : 'var(--red)';
+  const [cfg, setCfg] = React.useState(null);
+  const [chatId, setChatId] = React.useState('');
+  const [token, setToken] = React.useState('');
+  const [busy, setBusy] = React.useState('');
+  const [msg, setMsg] = React.useState(null); // {ok, text}
+  const [showGuide, setShowGuide] = React.useState(false);
+
+  const load = React.useCallback(() => {
+    apiFetch('/api/v1/telegram/config')
+      .then(c => { setCfg(c); if (c.chat_id) setChatId(c.chat_id); })
+      .catch(() => setCfg({ configured: false, platform_bot_available: false }));
+  }, []);
+  React.useEffect(() => { load(); }, [load]);
+
+  const save = () => {
+    if (!chatId.trim()) { setMsg({ ok: false, text: 'Enter your Chat ID first.' }); return; }
+    setBusy('save'); setMsg(null);
+    apiFetch('/api/v1/telegram/config', { method: 'PUT', json: { chat_id: chatId.trim(), bot_token: token.trim() || null } })
+      .then(c => { setCfg(c); setToken(''); setMsg({ ok: true, text: 'Saved. Send a test to confirm delivery.' }); })
+      .catch(e => setMsg({ ok: false, text: e.message || 'Save failed' }))
+      .finally(() => setBusy(''));
+  };
+  const test = () => {
+    setBusy('test'); setMsg(null);
+    apiFetch('/api/v1/telegram/test', { method: 'POST' })
+      .then(r => { setMsg({ ok: r.ok, text: r.ok ? 'Test alert delivered. Check your Telegram.' : r.detail }); if (r.ok) load(); })
+      .catch(e => setMsg({ ok: false, text: e.message || 'Test failed' }))
+      .finally(() => setBusy(''));
+  };
+  const disconnect = () => {
+    setBusy('dc'); setMsg(null);
+    apiFetch('/api/v1/telegram/config', { method: 'DELETE' })
+      .then(() => { setChatId(''); setToken(''); setMsg({ ok: true, text: 'Disconnected.' }); load(); })
+      .catch(e => setMsg({ ok: false, text: e.message || 'Failed' }))
+      .finally(() => setBusy(''));
+  };
+
+  const botName = (cfg && cfg.platform_bot_username) || 'citadel2005_bot';
+  const connected = cfg && cfg.configured;
+  const verified = connected && cfg.verified_at;
+
+  return (
+    <div className="widget-card tg-card">
+      <div className="widget-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill={accent} aria-hidden="true"><path d="M21.9 4.3l-3.2 15.1c-.24 1.06-.87 1.32-1.76.82l-4.87-3.59-2.35 2.26c-.26.26-.48.48-.98.48l.35-4.96 9.03-8.16c.39-.35-.09-.55-.6-.2L6.63 13.2l-4.8-1.5c-1.04-.33-1.06-1.04.22-1.55L20.55 2.9c.87-.32 1.63.2 1.35 1.4z"/></svg>
+        TELEGRAM ALERTS
+        <span className="tg-status" style={{ marginLeft: 'auto', background: verified ? 'var(--green)' : connected ? 'var(--gold)' : '#ccc', color: verified || connected ? '#000' : '#555' }}>
+          {verified ? 'VERIFIED' : connected ? 'SAVED · UNTESTED' : 'NOT CONNECTED'}
+        </span>
+      </div>
+      <div className="tg-body">
+        <p className="tg-lede">
+          Receive challans, anomaly alerts and other notifications on your own Telegram,
+          exactly the way the platform does. Use the shared CITADEL bot (easiest) or your
+          own bot.
+        </p>
+
+        <label className="field-label">CHAT ID *</label>
+        <input className="brutal-input" placeholder="e.g. 6437838710" value={chatId}
+          onChange={e => setChatId(e.target.value)} inputMode="numeric" />
+
+        <label className="field-label mt-14">BOT TOKEN <span style={{ opacity: 0.55, fontWeight: 400 }}>(optional. blank uses the CITADEL bot)</span></label>
+        <input className="brutal-input" type="password" autoComplete="off"
+          placeholder={cfg && cfg.uses_own_bot ? 'Own bot saved (' + cfg.bot_token_masked + '). Leave blank to keep.' : 'Paste a BotFather token to use your own bot'}
+          value={token} onChange={e => setToken(e.target.value)} />
+
+        <div className="tg-actions">
+          <button className="btn-brutal action-btn" style={{ background: accent, color: role === 'government' ? '#000' : '#fff', width: 'auto', flex: 1 }}
+            disabled={busy === 'save'} onClick={save}>{busy === 'save' ? 'SAVING…' : 'SAVE'}</button>
+          <button className="btn-brutal" style={{ fontSize: 12, padding: '10px 16px' }}
+            disabled={!connected || busy === 'test'} onClick={test}>{busy === 'test' ? 'SENDING…' : '✈ SEND TEST'}</button>
+          {connected && <button className="btn-brutal" style={{ fontSize: 12, padding: '10px 16px' }}
+            disabled={busy === 'dc'} onClick={disconnect} title="Remove Telegram config">✕</button>}
+        </div>
+
+        {msg && (
+          <div className="tg-msg" style={{ borderColor: msg.ok ? 'var(--green)' : 'var(--red)', color: msg.ok ? '#1a7a30' : 'var(--red)' }}>
+            {msg.ok ? '✓ ' : '✕ '}{msg.text}
+          </div>
+        )}
+
+        <button className="tg-guide-toggle" onClick={() => setShowGuide(g => !g)}>
+          {showGuide ? '▾' : '▸'} HOW TO GET YOUR CREDENTIALS
+        </button>
+        {showGuide && (
+          <div className="tg-guide">
+            <div className="tg-guide-h">Easy path · shared CITADEL bot (30 seconds)</div>
+            <ol>
+              <li>In Telegram, open <b>@{botName}</b> and press <b>Start</b> (send any message once, so the bot may write to you).</li>
+              <li>Open <b>@userinfobot</b> and press Start. It replies with your numeric <b>Id</b>.</li>
+              <li>Paste that number into <b>Chat ID</b> above. Leave <b>Bot Token</b> blank.</li>
+              <li>Press <b>Save</b>, then <b>Send Test</b>. The alert should arrive in your chat.</li>
+            </ol>
+            <div className="tg-guide-h">Advanced path · your own bot</div>
+            <ol>
+              <li>Open <b>@BotFather</b>, send <b>/newbot</b>, pick a name. It gives you a token like <code>123456789:AAF…</code>.</li>
+              <li>Open your new bot and press <b>Start</b> once.</li>
+              <li>Get your Chat ID from <b>@userinfobot</b> as above.</li>
+              <li>Paste both the <b>token</b> and <b>Chat ID</b>, Save, then Send Test.</li>
+            </ol>
+            <div className="tg-note">Your token is stored on the server and never shown back in full. For a group chat, add the bot to the group and use the group's negative Chat ID.</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 // ---- KPI Card (stat + sparkline) ----
 const KPICard = ({ value, label, data = [], color = 'var(--gold)', delta, deltaDir }) => {
   const max = Math.max(...data, 1);
@@ -1192,7 +1306,7 @@ const AlertTicker = ({ items }) => (
 // Export all to window so pages.jsx can reference them
 Object.assign(window, {
   CitadelBackground, NavBar, NotificationDrawer, CommandPalette,
-  GatewayCard, StatCard, OverviewStats, KPICard, CoreDynamics, SessionLog,
+  GatewayCard, StatCard, OverviewStats, TelegramSetup, KPICard, CoreDynamics, SessionLog,
   ActivityTimeline, NetworkTopology, QuickActions, MiniChart,
   Donut, Heatmap, SubPageHeader, Tabs, SegmentedControl,
   TwoColumnLayout, AnimNum, Badge, StatusPill, SeverityBadge,
