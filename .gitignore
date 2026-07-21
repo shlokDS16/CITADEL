@@ -89,3 +89,6 @@ backend/.fn_cache/
 *.mp4
 *.pt
 sample video/
+
+# local session handoff (internal notes, not for the public repo)
+NEXT_SESSION.md
