@@ -18,7 +18,7 @@
 | Database / storage / auth | Supabase (new bucket `resumes`) |
 | Async work | FastAPI `BackgroundTasks` |
 | Telegram | Bot API direct via `httpx` (`https://api.telegram.org/bot{TOKEN}/...`) |
-| Bot token | `8267971604:AAGHZVQYoUvyx-shs6XVq3MY0RnW8zzHTYE` (env `TELEGRAM_BOT_TOKEN`) |
+| Bot token | `YOUR_TELEGRAM_BOT_TOKEN` (env `TELEGRAM_BOT_TOKEN`) |
 
 ---
 

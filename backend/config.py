@@ -10,7 +10,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 
 # Google AI Configuration
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "AIzaSyDSewl6MhI_g--eyjFOjORt3pjM43YcUZ4")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 
 # Model Configuration
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-mpnet-base-v2")

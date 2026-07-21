@@ -85,3 +85,7 @@ backend/.fn_cache/
 # Claude worktrees + transient agent data
 .claude/worktrees/
 .claude/__claude_resume__/
+.vercel_deploy/
+*.mp4
+*.pt
+sample video/

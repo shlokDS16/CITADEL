@@ -36,7 +36,7 @@ This checkpoint represents the **stable state** of the C.I.T.A.D.E.L. applicatio
 
 ### Environment
 - `.env` file contains `VITE_GEMINI_API_KEY` and `VITE_API_URL`
-- API key: `AIzaSyDSewl6MhI_g--eyjFOjORt3pjM43YcUZ4`
+- API key: `YOUR_GEMINI_API_KEY`
 
 ### Design
 - Neo-brutalist "playful" UI with bold borders, 3D tilted cards, color-coded modules
