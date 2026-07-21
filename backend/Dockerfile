@@ -33,6 +33,18 @@ RUN pip install --upgrade pip \
  && pip install -r requirements.txt \
  && python -m spacy download en_core_web_sm
 
+# Post-install fixes, in their own layer AFTER the big pip install so that
+# cached layer survives edits here:
+# - ultralytics drags in full opencv-python, which overwrites headless cv2's
+#   files and needs X11 libs (libxcb) this slim image lacks. Uninstall both
+#   variants and force-reinstall headless so exactly one cv2 remains.
+# - git: citizen_assistant auto-clones PageIndex on first boot; without git
+#   the knowledge RAG is silently unavailable.
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+ && rm -rf /var/lib/apt/lists/* \
+ && pip uninstall -y opencv-python opencv-contrib-python \
+ && pip install --no-cache-dir --force-reinstall --no-deps "opencv-python-headless>=4.10"
+
 COPY . ./
 
 EXPOSE 8000
