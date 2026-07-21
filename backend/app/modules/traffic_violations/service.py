@@ -105,6 +105,81 @@ def delete_camera(cam_id: str, actor: str = "rsd") -> Optional[dict[str, Any]]:
             "unlinked_incidents": unlinked}
 
 
+def delete_incidents(inc_ids: list[str], actor: str = "rsd") -> dict[str, Any]:
+    """Permanently delete incidents and their evidence footage.
+
+    For each inc_id (the human INC-xxxx): removes the tv_incidents row and
+    every local evidence artifact under CLIPS_DIR ({inc}.jpg / {inc}.raw.jpg
+    / {inc}.mp4). Any linked challan is preserved: the
+    tv_challans.incident_id FK is ON DELETE SET NULL, so the financial
+    record survives with its incident link cleared (a challan is a legal
+    record, footage is not). Best-effort removes the Supabase Storage clip
+    if the row carried a storage path. Each deletion is audited.
+
+    Returns {deleted: [...], not_found: [...], count, challans_unlinked}.
+    """
+    sb = get_supabase()
+    deleted: list[str] = []
+    not_found: list[str] = []
+    challans_unlinked = 0
+
+    for raw_id in inc_ids or []:
+        safe = "".join(c for c in str(raw_id) if c.isalnum() or c == "-")
+        if not safe:
+            continue
+        rows = (
+            sb.table("tv_incidents").select("id, inc_id, video_clip_path")
+            .eq("inc_id", safe).limit(1).execute()
+        ).data or []
+        if not rows:
+            not_found.append(raw_id)
+            continue
+        pk = rows[0]["id"]
+
+        # count challans that will be unlinked (for the audit/report)
+        try:
+            ch = (sb.table("tv_challans").select("id", count="exact")
+                  .eq("incident_id", pk).limit(1).execute())
+            challans_unlinked += ch.count or 0
+        except Exception:  # noqa: BLE001
+            pass
+
+        # DB row (challan FK is SET NULL, so no cascade block)
+        sb.table("tv_incidents").delete().eq("id", pk).execute()
+
+        # local evidence artifacts
+        for suffix in (".jpg", ".raw.jpg", ".mp4"):
+            f = CLIPS_DIR / f"{safe}{suffix}"
+            try:
+                if f.exists():
+                    f.unlink()
+            except Exception as e:  # noqa: BLE001
+                log.debug("evidence unlink %s failed: %s", f, e)
+
+        # best-effort Supabase Storage clip removal
+        path = rows[0].get("video_clip_path")
+        if path and not str(path).startswith("http"):
+            try:
+                sb.storage.from_("incidents").remove([path])
+            except Exception:  # noqa: BLE001
+                pass
+
+        try:
+            sb.table("tv_audit_log").insert({
+                "entity_type": "incident", "entity_id": safe,
+                "action": "incident_deleted", "actor": actor,
+                "payload": {"via": "incidents_ui"},
+            }).execute()
+        except Exception:  # noqa: BLE001
+            pass
+        deleted.append(safe)
+
+    log.info("Deleted %d incident(s) by %s (%d not found, %d challans unlinked)",
+             len(deleted), actor, len(not_found), challans_unlinked)
+    return {"deleted": deleted, "not_found": not_found,
+            "count": len(deleted), "challans_unlinked": challans_unlinked}
+
+
 # ============================================================
 # Header stats (camera_count + detections_today)
 # ============================================================

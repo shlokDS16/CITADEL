@@ -358,6 +358,23 @@ async def loop_tracks(loop_id: str):
 # (Supabase Storage uploads can flake on h264 codec issues; the local
 #  `.tv_clips/{inc_id}.mp4` is the authoritative copy.)
 # ============================================================
+@router.post("/traffic-violations/incidents/delete", tags=["traffic-violations"])
+async def delete_incidents(body: dict):
+    """Permanently delete selected incidents + their evidence footage.
+    Body: { inc_ids: ["INC-8844", ...], actor?: "rsd" }."""
+    inc_ids = body.get("inc_ids") or []
+    if not isinstance(inc_ids, list) or not inc_ids:
+        raise HTTPException(status_code=400, detail="inc_ids (non-empty list) required")
+    if len(inc_ids) > 200:
+        raise HTTPException(status_code=400, detail="too many ids in one request (max 200)")
+    actor = body.get("actor") or "rsd"
+    try:
+        return service.delete_incidents(inc_ids, actor=actor)
+    except Exception as e:
+        log.exception("delete_incidents failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/traffic-violations/incidents/{inc_id}/clip.mp4", tags=["traffic-violations"])
 async def incident_clip(inc_id: str):
     # sanitise inc_id (alphanumeric + dash only)

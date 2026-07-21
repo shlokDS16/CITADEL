@@ -3958,7 +3958,7 @@ const PlateDetailModal = ({ result, onClose }) => {
 // ====================================================================
 // Phase 1+ — Bulk Actions Bar (Incidents tab — sticky bottom)
 // ====================================================================
-const BulkActionsBar = ({ count, onApproveAll, onRejectAll, onClear }) => {
+const BulkActionsBar = ({ count, onApproveAll, onRejectAll, onDeleteAll, onClear }) => {
   if (count === 0) return null;
   return (
     <div className="tv-bulk-bar">
@@ -3971,6 +3971,11 @@ const BulkActionsBar = ({ count, onApproveAll, onRejectAll, onClear }) => {
       <button className="btn-brutal action-btn" onClick={onRejectAll} style={{ fontSize: 11, padding: '6px 14px', width: 'auto', background: 'var(--red)', color: '#fff' }}>
         ✕ REJECT ALL
       </button>
+      {onDeleteAll && (
+        <button className="btn-brutal action-btn" onClick={onDeleteAll} style={{ fontSize: 11, padding: '6px 14px', width: 'auto', background: '#000', color: 'var(--red)', borderColor: 'var(--red)' }}>
+          🗑 DELETE
+        </button>
+      )}
     </div>
   );
 };
@@ -4078,6 +4083,25 @@ const TrafficIncidents = ({ navHint }) => {
       setTimeout(() => setToast(''), 4000);
     } catch (e) {
       setToast(`✕ Bulk ${action} failed: ${e.message || e}`);
+      setTimeout(() => setToast(''), 5000);
+    }
+  };
+
+  const doDelete = async () => {
+    if (selectedIds.length === 0) return;
+    if (!window.confirm(`Permanently delete ${selectedIds.length} incident(s) and their evidence footage?\n\nThis removes the incident and its snapshot/clip from the database and storage. Any challan already issued is kept as a legal record. This cannot be undone.`)) return;
+    try {
+      const result = await apiFetch('/api/traffic-violations/incidents/delete', {
+        ...TRAFFIC_AUTH, json: { inc_ids: selectedIds, actor: 'rsd' },
+      });
+      setSelectedIds([]);
+      setRefreshKey(k => k + 1);
+      const nf = result.not_found?.length ? ` · ${result.not_found.length} not found` : '';
+      const ch = result.challans_unlinked ? ` · ${result.challans_unlinked} challan(s) unlinked` : '';
+      setToast(`🗑 ${result.count} incident(s) deleted${ch}${nf}`);
+      setTimeout(() => setToast(''), 4500);
+    } catch (e) {
+      setToast(`✕ Delete failed: ${e.message || e}`);
       setTimeout(() => setToast(''), 5000);
     }
   };
@@ -4237,6 +4261,7 @@ const TrafficIncidents = ({ navHint }) => {
         count={selectedIds.length}
         onApproveAll={() => doBulk('approve')}
         onRejectAll={() => doBulk('reject')}
+        onDeleteAll={doDelete}
         onClear={clearSelection}
       />
     </div>
