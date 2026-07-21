@@ -1,0 +1,63 @@
+# Render Blueprint — CITADEL backend (FastAPI + CPU ML).
+# Create via Render dashboard → New → Blueprint → connect this repo.
+# Secrets (sync:false) are entered once in the dashboard, never in git.
+services:
+  - type: web
+    name: citadel-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: standard                 # 2 GB RAM. Bump to "pro" (4 GB) if
+                                   # deepfake/media analysis OOMs (loads SigLIP2).
+    region: singapore              # closest to the India userbase / Supabase
+    healthCheckPath: /api/v1/health
+    autoDeploy: true               # redeploy on push to the tracked branch
+    disk:
+      name: citadel-models         # persists the ~3 GB of HF/torch models +
+      mountPath: /data             # YOLO weights across restarts/redeploys
+      sizeGB: 10
+    envVars:
+      # --- non-secret config ---
+      - key: APP_ENV
+        value: production
+      - key: GROQ_CLASSIFIER_MODEL
+        value: llama-3.3-70b-versatile
+      - key: SUPABASE_BUCKET_DOCUMENTS
+        value: documents
+      - key: SUPABASE_BUCKET_PROCESSED
+        value: processed
+      - key: SUPABASE_BUCKET_RESUMES
+        value: resumes
+      - key: MAX_UPLOAD_SIZE_MB
+        value: "10"
+      - key: MAX_BATCH_SIZE
+        value: "10"
+      - key: EMBEDDING_MODEL
+        value: BAAI/bge-small-en-v1.5
+      - key: EMBEDDING_DIM
+        value: "384"
+      - key: COST_PER_HIRE_RUPEES
+        value: "18000"
+      - key: RESUME_AUTO_SHORTLIST_DEFAULT
+        value: "70"
+      # CORS_ORIGINS — set to the Vercel frontend URL after that deploy
+      # (e.g. https://citadel-xxxx.vercel.app). Comma-separate for multiple.
+      - key: CORS_ORIGINS
+        sync: false
+      # --- secrets: paste values in the Render dashboard ---
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: OCR_SPACE_API_KEY
+        sync: false
+      - key: GOOGLE_FACTCHECK_API_KEY
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_DEFAULT_CHAT_ID
+        sync: false
