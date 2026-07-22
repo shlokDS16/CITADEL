@@ -48,20 +48,23 @@ const App = () => {
   const [loginUser, setLoginUser] = React.useState('');
   const [loginPass, setLoginPass] = React.useState('');
   const [loginErr, setLoginErr] = React.useState('');
+  const [loginOk, setLoginOk] = React.useState('');
   const [loginBusy, setLoginBusy] = React.useState(false);
   const [signupMode, setSignupMode] = React.useState(false);
+  const [currentUser, setCurrentUser] = React.useState(null);  // logged-in account (drives the navbar profile)
 
   const goLanding = () => {
     czLogout();                       // revoke the refresh token server-side
-    setPage('landing'); setRole(null); setCmdOpen(false);
+    setPage('landing'); setRole(null); setCmdOpen(false); setCurrentUser(null);
   };
   const goLogin = (r) => {
-    setLoginRole(r); setPage('login'); setLoginErr(''); setSignupMode(false);
+    setLoginRole(r); setPage('login'); setLoginErr(''); setLoginOk(''); setSignupMode(false);
     setLoginUser(r === 'government' ? 'rsd' : 'citizen'); setLoginPass('');
   };
 
   const finishLogin = (session) => {
     czAuth.set(session);
+    setCurrentUser(session.user);
     // Adopt any pre-auth browser data (tickets/expenses created before
     // login existed) into this citizen account — once, best-effort.
     const anonUid = localStorage.getItem('citadel_tk_uid');
@@ -81,7 +84,7 @@ const App = () => {
 
   const doLogin = () => {
     if (!loginUser || !loginPass) { setLoginErr('Enter username and password'); return; }
-    setLoginBusy(true); setLoginErr('');
+    setLoginBusy(true); setLoginErr(''); setLoginOk('');
     apiFetch('/api/v1/auth/login', { json: { username: loginUser, password: loginPass, portal: loginRole } })
       .then(finishLogin)
       .catch(e => setLoginErr(e.message || 'Login failed'))
@@ -89,12 +92,23 @@ const App = () => {
   };
 
   const doSignup = () => {
-    if (!loginUser || !loginPass) { setLoginErr('Choose a username and password'); return; }
+    const uname = loginUser.trim();
+    if (!uname || !loginPass) { setLoginErr('Choose a username and password'); return; }
+    if (uname.length < 3) { setLoginErr('Username must be at least 3 characters'); return; }
+    if (/\s/.test(uname)) { setLoginErr('Username cannot contain spaces — try letters, numbers, . _ or -'); return; }
+    if (!/^[a-zA-Z0-9._-]+$/.test(uname)) { setLoginErr('Username can use only letters, numbers, and . _ -'); return; }
     if (loginPass.length < 8) { setLoginErr('Password must be at least 8 characters'); return; }
     setLoginBusy(true); setLoginErr('');
-    apiFetch('/api/v1/auth/register', { json: { username: loginUser, password: loginPass, portal: loginRole } })
-      .then(() => apiFetch('/api/v1/auth/login', { json: { username: loginUser, password: loginPass, portal: loginRole } }))
-      .then(finishLogin)
+    // Create the account, then hand the user to the sign-in screen with a
+    // clear success notice — we do NOT auto-log-them-in.
+    apiFetch('/api/v1/auth/register', { json: { username: uname, password: loginPass, portal: loginRole } })
+      .then(() => {
+        setSignupMode(false);
+        setLoginPass('');
+        setLoginUser(uname);
+        setLoginErr('');
+        setLoginOk('Account created. Please sign in with your new credentials.');
+      })
       .catch(e => setLoginErr(e.message || 'Registration failed'))
       .finally(() => setLoginBusy(false));
   };
@@ -110,6 +124,7 @@ const App = () => {
     if (!session || !session.user) return;
     apiFetch('/api/v1/auth/me')
       .then(me => {
+        setCurrentUser(me);
         setRole(me.role === 'citizen' ? 'citizen' : 'government');
         setPage('dashboard');
       })
@@ -198,12 +213,31 @@ const App = () => {
               <label className="field-label">Username</label>
               <input className="brutal-input" placeholder={signupMode ? 'Choose a username' : 'Enter username'}
                 value={loginUser} onChange={e => setLoginUser(e.target.value)}
+                autoCapitalize="none" autoCorrect="off" spellCheck="false" autoComplete="username"
                 onKeyDown={e => { if (e.key === 'Enter') (signupMode ? doSignup : doLogin)(); }} />
+              {signupMode && (
+                <div style={{ marginTop: -4, marginBottom: 6, fontSize: 10, opacity: 0.6, fontFamily: 'var(--font-mono)' }}>
+                  Letters, numbers, . _ - — no spaces.
+                </div>
+              )}
               <label className="field-label">Password</label>
               <input className="brutal-input" type="password"
-                placeholder={signupMode ? 'Min 8 characters' : 'Enter password'}
+                placeholder={signupMode ? 'At least 8 characters' : 'Enter password'}
                 value={loginPass} onChange={e => setLoginPass(e.target.value)}
+                autoCapitalize="none" autoCorrect="off" spellCheck="false"
+                autoComplete={signupMode ? 'new-password' : 'current-password'}
                 onKeyDown={e => { if (e.key === 'Enter') (signupMode ? doSignup : doLogin)(); }} />
+              {signupMode && (
+                <div style={{ marginTop: -4, marginBottom: 6, fontSize: 10, opacity: 0.6, fontFamily: 'var(--font-mono)' }}>
+                  Just 8+ characters. No uppercase / number / symbol rule.
+                </div>
+              )}
+              {loginOk && (
+                <div style={{ marginTop: 12, padding: '8px 10px', border: '2px solid var(--green)', background: '#fff',
+                  color: '#0a7d34', fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 700 }}>
+                  ✓ {loginOk}
+                </div>
+              )}
               {loginErr && (
                 <div style={{ marginTop: 12, padding: '8px 10px', border: '2px solid var(--red)', background: '#fff',
                   color: 'var(--red)', fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 700 }}>
@@ -218,9 +252,9 @@ const App = () => {
             </div>
             <div className="login-footer">
               {signupMode ? (
-                <span>Have an account? <a style={{ cursor: 'pointer' }} onClick={() => { setSignupMode(false); setLoginErr(''); }}>Log in</a></span>
+                <span>Have an account? <a style={{ cursor: 'pointer' }} onClick={() => { setSignupMode(false); setLoginErr(''); setLoginOk(''); }}>Log in</a></span>
               ) : (
-                <span>Need an account? <a style={{ cursor: 'pointer' }} onClick={() => { setSignupMode(true); setLoginErr(''); setLoginUser(''); setLoginPass(''); }}>Sign Up</a></span>
+                <span>Need an account? <a style={{ cursor: 'pointer' }} onClick={() => { setSignupMode(true); setLoginErr(''); setLoginOk(''); setLoginUser(''); setLoginPass(''); }}>Sign Up</a></span>
               )}
               {signupMode && isGov && (
                 <div style={{ marginTop: 8, fontSize: 10, opacity: 0.7, letterSpacing: 0.5 }}>
@@ -276,7 +310,7 @@ const App = () => {
     return (
       <div>
         <CitadelBackground />
-        <NavBar role="government" user="RSD" onLogout={goLanding} onOpenCmd={openCmd} />
+        <NavBar role="government" user={currentUser} onLogout={goLanding} onOpenCmd={openCmd} />
         <CommandPalette open={cmdOpen} onClose={() => setCmdOpen(false)} onJump={goSub} role="government" />
         <div className="dashboard-content">
           <div className="dashboard-header">
@@ -383,7 +417,7 @@ const App = () => {
     return (
       <div>
         <CitadelBackground />
-        <NavBar role="citizen" user="SS" onLogout={goLanding} onOpenCmd={openCmd} />
+        <NavBar role="citizen" user={currentUser} onLogout={goLanding} onOpenCmd={openCmd} />
         <CommandPalette open={cmdOpen} onClose={() => setCmdOpen(false)} onJump={goSub} role="citizen" />
         <div className="dashboard-content">
           <div className="dashboard-header">
@@ -462,7 +496,7 @@ const App = () => {
     return (
       <div>
         <CitadelBackground />
-        <NavBar role={role} user={role === 'government' ? 'RSD' : 'SS'} onLogout={goLanding} onDashboard={goDash} onOpenCmd={openCmd} />
+        <NavBar role={role} user={currentUser} onLogout={goLanding} onDashboard={goDash} onOpenCmd={openCmd} />
         <CommandPalette open={cmdOpen} onClose={() => setCmdOpen(false)} onJump={goSub} role={role} />
         {subPages[page]}
       </div>

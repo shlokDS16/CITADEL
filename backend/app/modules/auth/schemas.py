@@ -62,6 +62,13 @@ class RegisterIn(BaseModel):
     email: Optional[str] = Field(default=None, max_length=255)
     portal: Literal["government", "citizen"] = "citizen"
 
+    @field_validator("username", mode="before")
+    @classmethod
+    def _trim_username(cls, v: str) -> str:
+        # Mobile keyboards often append a trailing space / autocapitalize;
+        # trim before the pattern check so a stray space is not a hard 422.
+        return v.strip() if isinstance(v, str) else v
+
 
 class ClaimIn(BaseModel):
     """Adopt rows created under the pre-auth browser uuid into this account."""

@@ -209,7 +209,15 @@ const NAV_NOTIFS = {
 const NavBar = ({ role, user, onLogout, onDashboard, onOpenCmd }) => {
   const isGov = role === 'government';
   const accent = isGov ? 'var(--gold)' : 'var(--red)';
+  // `user` is the logged-in account's display name (falls back to username).
+  // The profile block below is derived entirely from it — no hardcoded name.
+  const displayName = (typeof user === 'string' ? user : (user && (user.display_name || user.username))) || 'USER';
+  const initials = displayName.trim().split(/[\s._-]+/).filter(Boolean).slice(0, 2)
+    .map(s => s[0]).join('').toUpperCase() || displayName.slice(0, 2).toUpperCase();
   const [notifOpen, setNotifOpen] = React.useState(false);
+  const confirmLogout = () => {
+    if (window.confirm('Log out of CITADEL? You will need to sign in again to return.')) onLogout();
+  };
   const [notifs, setNotifs] = React.useState(NAV_NOTIFS[isGov ? 'government' : 'citizen'] || []);
   const notifCount = notifs.length;
   const now = new Date();
@@ -239,10 +247,13 @@ const NavBar = ({ role, user, onLogout, onDashboard, onOpenCmd }) => {
           {notifCount > 0 && <span className="nav-badge">{notifCount}</span>}
         </button>
         <div className="nav-user">
-          <div className="nav-user-name">{user}</div>
-          <div className="nav-user-role">{isGov ? 'OFFICIAL' : 'CITIZEN'}</div>
+          <div className="nav-user-avatar" style={{ background: accent, color: isGov ? '#000' : '#fff' }} title={displayName}>{initials}</div>
+          <div className="nav-user-meta">
+            <div className="nav-user-name">{displayName}</div>
+            <div className="nav-user-role">{isGov ? 'OFFICIAL' : 'CITIZEN'}</div>
+          </div>
         </div>
-        <button className="btn-brutal" onClick={onLogout} style={{ background: accent, color: isGov ? '#000' : '#fff', borderColor: '#000', fontSize: 12, padding: '6px 14px' }}>LOGOUT</button>
+        <button className="btn-brutal" onClick={confirmLogout} style={{ background: accent, color: isGov ? '#000' : '#fff', borderColor: '#000', fontSize: 12, padding: '6px 14px' }}>LOGOUT</button>
       </div>
       {notifOpen && (
         <NotificationDrawer
