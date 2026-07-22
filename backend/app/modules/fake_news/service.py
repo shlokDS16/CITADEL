@@ -132,6 +132,8 @@ def health() -> schemas.HealthResponse:
         tables_ok=tables_ok,
         tables_missing=missing,
         groq_configured=bool(settings.GROQ_API_KEY),
+        groq_backup_configured=bool(getattr(settings, "GROQ_API_KEY_2", "")),
+        gemini_configured=bool(getattr(settings, "GEMINI_API_KEY", "")),
         google_factcheck_configured=bool(settings.GOOGLE_FACTCHECK_API_KEY),
         notes=notes,
     )

@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     GROQ_CLASSIFIER_MODEL: str = "llama-3.3-70b-versatile"
     GROQ_ENDPOINT: str = "https://api.groq.com/openai/v1/chat/completions"
 
+    # ---- Gemini (cross-provider LLM fallback) ----
+    #: Used by the RAG assistant + fake-news Layer-4 rationale when BOTH Groq
+    #: keys are drained (100k tokens/day free cap). Exported to os.environ at
+    #: startup so LiteLLM's gemini/* routing and the provider chains see it.
+    GEMINI_API_KEY: str = Field("", description="AIza... Gemini API key (optional fallback)")
+
     # ---- Auth (Phase 3) ----
     JWT_SECRET: str = Field(..., description="HS256 signing secret — env only, never in code")
     JWT_ACCESS_MINUTES: int = 30

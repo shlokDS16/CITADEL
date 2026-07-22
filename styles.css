@@ -3111,6 +3111,9 @@ body.dark .tv-timeline-row { background: #0f0f0f; }
 .fn-quota { background: #FBEFC8; color: #5a4500; border: 3px solid #000;
   box-shadow: 6px 6px 0 var(--gold); padding: 12px 16px; margin-bottom: 16px;
   font-family: var(--font-mono); font-size: 12px; font-weight: 600; }
+.fn-fetchfail { background: #FBE0E2; color: #7a141c; border: 3px solid #000;
+  box-shadow: 6px 6px 0 var(--red); padding: 12px 16px; margin-bottom: 16px;
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.5; }
 .fn-err { background: #FBE0E2; color: #8a1a22; border: 2px solid var(--red);
   padding: 10px 14px; font-family: var(--font-mono); font-size: 12px; }
 

@@ -7153,6 +7153,18 @@ const FakeNewsAnalyze = ({ reopen, clearReopen }) => {
                   <ProgressRing value={fnPct(result.confidence)} size={68} color={v.c} />
                 </div>
 
+                {(() => {
+                  const fail = (result.reasoning || []).find(s =>
+                    /could not fetch|extract readable|paywalled|unreachable/i.test(s));
+                  if (!fail) return null;
+                  return (
+                    <div className="fn-fetchfail">
+                      <b>⚠ Couldn't read that link.</b> {fail}
+                      <div style={{ marginTop: 6 }}>Open the article, copy its text, switch to <b>TEXT</b> mode and paste it — the full waterfall runs on the content.</div>
+                    </div>
+                  );
+                })()}
+
                 <div className="section-divider mt-14"><span>DETECTION WATERFALL</span></div>
                 <FakeNewsWaterfall layers={result.layers} verdict={result.verdict} />
 

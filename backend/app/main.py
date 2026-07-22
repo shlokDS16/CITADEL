@@ -49,6 +49,18 @@ async def lifespan(app: FastAPI):
     log.info("CORS origins: %s", settings.cors_origin_list)
     log.info("Groq classifier: %s", settings.GROQ_CLASSIFIER_MODEL)
 
+    # Export the Gemini key so LiteLLM's gemini/* routing and the provider
+    # chains (which read os.getenv) can use it as a cross-provider fallback
+    # when both Groq keys are drained. Declared in Settings but pydantic does
+    # not populate os.environ, so do it explicitly (portable across local +
+    # Docker launch). Same pattern pageindex_engine uses for GROQ_API_KEY.
+    import os as _os
+    if settings.GEMINI_API_KEY and not _os.getenv("GEMINI_API_KEY"):
+        _os.environ["GEMINI_API_KEY"] = settings.GEMINI_API_KEY
+        log.info("Gemini fallback: configured")
+    if settings.GROQ_API_KEY_2:
+        log.info("Groq backup key: configured")
+
     # Ensure the two demo auth accounts exist with real argon2id hashes.
     try:
         from app.modules.auth.service import ensure_seed_accounts

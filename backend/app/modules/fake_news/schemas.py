@@ -48,6 +48,8 @@ class HealthResponse(BaseModel):
     tables_ok: bool
     tables_missing: list[str] = []
     groq_configured: bool
+    groq_backup_configured: bool = False
+    gemini_configured: bool = False
     google_factcheck_configured: bool
     notes: list[str] = []
 
