@@ -2944,37 +2944,60 @@ const CameraHealthStrip = () => {
 // Plots all cameras geographically. Click a dot → focus camera.
 // ====================================================================
 const TrafficMiniMap = ({ cameras, onSelect }) => {
-  if (!cameras || cameras.length === 0) return null;
-  const lats = cameras.map(c => c.lat).filter(v => typeof v === 'number');
-  const lngs = cameras.map(c => c.lng).filter(v => typeof v === 'number');
-  if (lats.length === 0) return null;
+  const pts = (cameras || []).filter(c => typeof c.lat === 'number' && typeof c.lng === 'number');
+  if (pts.length === 0) return null;
+
+  const counts = { active: 0, degraded: 0, offline: 0 };
+  pts.forEach(c => { counts[c.status] = (counts[c.status] || 0) + 1; });
+
+  const lats = pts.map(c => c.lat), lngs = pts.map(c => c.lng);
   const minLat = Math.min(...lats), maxLat = Math.max(...lats);
   const minLng = Math.min(...lngs), maxLng = Math.max(...lngs);
-  const pad = 0.005;
-  const W = 100, H = 100;  // viewBox units
-  const x = (lng) => ((lng - (minLng - pad)) / ((maxLng + pad) - (minLng - pad))) * W;
-  const y = (lat) => H - ((lat - (minLat - pad)) / ((maxLat + pad) - (minLat - pad))) * H;  // invert Y
-  const dotColor = (status) => status === 'active' ? 'var(--green)' : status === 'degraded' ? 'var(--gold)' : 'var(--red)';
+  const midLat = (minLat + maxLat) / 2;
+  const cos = Math.cos(midLat * Math.PI / 180) || 1;   // longitude compresses toward the poles
+  // Uniform scale into a square viewBox so the geography is NOT distorted.
+  const spanX = ((maxLng - minLng) * cos) || 1e-4;
+  const spanY = (maxLat - minLat) || 1e-4;
+  const W = 100, H = 100, M = 9;
+  const scale = Math.min((W - 2 * M) / spanX, (H - 2 * M) / spanY);
+  const drawW = spanX * scale, drawH = spanY * scale;
+  const offX = (W - drawW) / 2, offY = (H - drawH) / 2;
+  const px = (lng) => offX + ((lng - minLng) * cos) * scale;
+  const py = (lat) => offY + (drawH - (lat - minLat) * scale);   // invert Y (north = up)
+  const color = (s) => s === 'active' ? 'var(--green)' : s === 'degraded' ? 'var(--gold)' : 'var(--red)';
+
   return (
     <div className="tv-mini-map">
-      <div className="widget-title" style={{ marginBottom: 6 }}>CAMERA GEO MAP · {cameras.length} POINTS</div>
-      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ width: '100%', height: 180, background: '#0a0a0a', border: '3px solid #000' }}>
-        {/* faint grid */}
-        {[20,40,60,80].map(v => <line key={`gh${v}`} x1="0" y1={v} x2={W} y2={v} stroke="#222" strokeWidth="0.2" />)}
-        {[20,40,60,80].map(v => <line key={`gv${v}`} x1={v} y1="0" x2={v} y2={H} stroke="#222" strokeWidth="0.2" />)}
-        {/* camera dots */}
-        {cameras.filter(c => typeof c.lat === 'number' && typeof c.lng === 'number').map(c => (
-          <g key={c.id} style={{ cursor: 'pointer' }} onClick={() => onSelect && onSelect(c)}>
-            <circle cx={x(c.lng)} cy={y(c.lat)} r={c.status === 'active' ? 2 : 1.5} fill={dotColor(c.status)} opacity={c.status === 'offline' ? 0.4 : 0.9} />
-            {c.status === 'active' && (
-              <circle cx={x(c.lng)} cy={y(c.lat)} r="3.5" fill="none" stroke={dotColor(c.status)} strokeWidth="0.3" opacity="0.5">
-                <animate attributeName="r" values="2;4;2" dur="2s" repeatCount="indefinite" />
-                <animate attributeName="opacity" values="0.6;0;0.6" dur="2s" repeatCount="indefinite" />
-              </circle>
-            )}
-          </g>
-        ))}
+      <div className="tv-map-head">
+        <span className="widget-title">CAMERA MAP</span>
+        <span className="tv-map-legend">
+          <i style={{ background: 'var(--green)' }} />{counts.active}
+          <i style={{ background: 'var(--gold)' }} />{counts.degraded}
+          <i style={{ background: 'var(--red)' }} />{counts.offline}
+        </span>
+      </div>
+      <svg viewBox="0 0 100 100" className="tv-map-svg" preserveAspectRatio="xMidYMid meet">
+        {[25, 50, 75].map(v => <line key={`gh${v}`} x1="4" y1={v} x2="96" y2={v} stroke="#242424" strokeWidth="0.3" />)}
+        {[25, 50, 75].map(v => <line key={`gv${v}`} x1={v} y1="4" x2={v} y2="96" stroke="#242424" strokeWidth="0.3" />)}
+        {pts.map(c => {
+          const cx = px(c.lng), cy = py(c.lat), s = 2.8;
+          return (
+            <g key={c.id} className="tv-map-pin" onClick={() => onSelect && onSelect(c)}>
+              <title>{`${c.name || c.id} · ${c.status}`}</title>
+              {c.status === 'active' && (
+                <circle cx={cx} cy={cy} r="2.6" fill="none" stroke="var(--green)" strokeWidth="0.4" opacity="0.55">
+                  <animate attributeName="r" values="2.6;5;2.6" dur="2.4s" repeatCount="indefinite" />
+                  <animate attributeName="opacity" values="0.55;0;0.55" dur="2.4s" repeatCount="indefinite" />
+                </circle>
+              )}
+              <rect x={cx - s / 2} y={cy - s / 2} width={s} height={s}
+                    fill={color(c.status)} stroke="#000" strokeWidth="0.5"
+                    opacity={c.status === 'offline' ? 0.5 : 1} />
+            </g>
+          );
+        })}
       </svg>
+      <div className="tv-map-hint">{pts.length} cameras · click a pin to jump to its feed</div>
     </div>
   );
 };
@@ -3338,7 +3361,7 @@ const CameraTile = ({ cam, index, snapshot, detections, violationLabels = [], on
   }, [url, isHls, isMp4, hasVideo]);
 
   return (
-    <div className="camera-tile" style={{ animationDelay: `${index * 0.04}s` }}>
+    <div id={`camtile-${cam.id}`} className="camera-tile" style={{ animationDelay: `${index * 0.04}s` }}>
       <div className="cam-feed">
         {onDelete && (
           <button
@@ -3522,23 +3545,11 @@ const CameraTile = ({ cam, index, snapshot, detections, violationLabels = [], on
 };
 
 const TrafficLive = ({ navHint }) => {
-  // Chip label → incident.type token mapping (backend returns the right column)
-  const CHIP_TO_TYPE = {
-    'RED LIGHT VIOLATION': 'RED LIGHT',
-    'SPEEDING': 'SPEEDING',
-    'WRONG LANE': 'WRONG LANE',
-    'NO HELMET': 'NO HELMET',
-    'NO SEATBELT': 'NO SEATBELT',
-    'ILLEGAL PARKING': 'ILLEGAL PARK',
-  };
-  const detectionTypes = Object.keys(CHIP_TO_TYPE);
-  const [selected, setSelected] = React.useState(detectionTypes);  // ALL on by default
   const [cameras, setCameras] = React.useState([]);
-  const [layout, setLayout] = React.useState('2x2');
+  // Layout now controls how many camera COLUMNS are shown — every camera is
+  // always rendered (no more silent slice that hid most of the fleet).
+  const [layout, setLayout] = React.useState('3 COL');
   const [recent, setRecent] = React.useState([]);
-  const toggle = (t) => setSelected(s => s.includes(t) ? s.filter(x => x !== t) : [...s, t]);
-  const selectAll = () => setSelected(detectionTypes);
-  const clearAll  = () => setSelected([]);
 
   const [snapshots, setSnapshots] = React.useState({});
   const [detections, setDetections] = React.useState({});
@@ -3594,26 +3605,26 @@ const TrafficLive = ({ navHint }) => {
     return () => { clearInterval(t1); clearInterval(t2); };
   }, []);
 
-  // Camera roster is paginated by chosen layout — 4 / 9 / 16 visible tiles.
-  const visibleCount = layout === '2x2' ? 4 : layout === '3x3' ? 9 : layout === '4x4' ? 16 : cameras.length;
-  const tiles = cameras.slice(0, visibleCount);
+  // Every camera renders; the layout control sets the column count (tile size).
+  const gridCols = layout === '2 COL' ? 2 : layout === '4 COL' ? 4 : layout === 'FOCUS' ? 1 : 3;
+  const tiles = cameras;
 
-  // Filter recent incidents by selected chip types — chips are now FUNCTIONAL filters.
-  const selectedTypeTokens = new Set(selected.map(s => CHIP_TO_TYPE[s]));
-  const filteredRecent = recent.filter(r => selectedTypeTokens.has(r.type));
-  const activeDetections = filteredRecent.length;
+  // Click a map pin → bring that camera's tile into view and flash it.
+  const focusCamera = React.useCallback((cam) => {
+    const el = document.getElementById(`camtile-${cam.id}`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.add('camera-tile--focus');
+    setTimeout(() => el.classList.remove('camera-tile--focus'), 1600);
+  }, []);
 
-  const tickerItems = filteredRecent.length === 0
+  const tickerItems = recent.length === 0
     ? [{
         tag: 'INFO',
         color: 'var(--cyan)',
-        text: selected.length === 0
-          ? 'No violation types selected — click a chip above to enable filtering.'
-          : recent.length === 0
-            ? `${cameras.length} cameras connected. Awaiting first detection — Phase 2 pipeline will populate incidents here.`
-            : `No recent detections of: ${selected.join(', ')}. Try toggling more chips.`
+        text: `${cameras.length} cameras connected. Awaiting first detection — the pipeline will populate incidents here.`,
       }]
-    : filteredRecent.slice(0, 6).map(r => ({
+    : recent.slice(0, 6).map(r => ({
         tag: r.severity === 'CRITICAL' ? 'ALERT' : 'NEW',
         color: r.severity === 'CRITICAL' ? 'var(--red)' : r.severity === 'HIGH' ? 'var(--gold)' : 'var(--cyan)',
         text: `${r.type} on ${r.cam} · Plate ${r.plate} · ${r.conf}% conf`,
@@ -3626,25 +3637,14 @@ const TrafficLive = ({ navHint }) => {
         <div className="live-grid-main">
           <div className="live-top-bar">
             <div className="live-controls">
-              <span className="live-indicator"><span className="pulse-dot"></span> LIVE · {detectSummary ? `${detectSummary.total} objects · ${detectSummary.cars}🚗 ${detectSummary.motorcycles}🏍 ${detectSummary.buses + detectSummary.trucks}🚛 ${detectSummary.persons}🚶` : `${activeDetections} active detections`}</span>
-              <SegmentedControl options={['2x2', '3x3', '4x4', 'FOCUS']} value={layout} onChange={setLayout} accent="var(--cyan)" />
+              <span className="live-indicator"><span className="pulse-dot"></span> LIVE · {detectSummary ? `${detectSummary.total} objects · ${detectSummary.cars}🚗 ${detectSummary.motorcycles}🏍 ${detectSummary.buses + detectSummary.trucks}🚛 ${detectSummary.persons}🚶` : `${cameras.length} cameras online`}</span>
             </div>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, opacity: 0.55, marginRight: 4 }}>FILTER:</span>
-              {detectionTypes.map(t => (
-                <Chip key={t} label={t} selected={selected.includes(t)} onClick={() => toggle(t)} />
-              ))}
-              <button
-                onClick={selected.length === detectionTypes.length ? clearAll : selectAll}
-                className="btn-brutal"
-                style={{ fontSize: 10, padding: '4px 10px', marginLeft: 4 }}
-                title={selected.length === detectionTypes.length ? 'Clear all filters' : 'Enable all filters'}
-              >
-                {selected.length === detectionTypes.length ? 'CLEAR' : 'ALL'}
-              </button>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, opacity: 0.55 }}>GRID:</span>
+              <SegmentedControl options={['2 COL', '3 COL', '4 COL', 'FOCUS']} value={layout} onChange={setLayout} accent="var(--cyan)" />
             </div>
           </div>
-          <div className="camera-grid">
+          <div className="camera-grid" style={{ gridTemplateColumns: `repeat(${gridCols}, 1fr)` }}>
         {tiles.map((c, i) => (
           <CameraTile
             key={c.id}
@@ -3659,7 +3659,7 @@ const TrafficLive = ({ navHint }) => {
           </div>
         </div>
         <div className="live-grid-side">
-          <TrafficMiniMap cameras={cameras} onSelect={(c) => console.log('focus', c.id)} />
+          <TrafficMiniMap cameras={cameras} onSelect={focusCamera} />
         </div>
       </div>
       <AlertTicker items={tickerItems} />
