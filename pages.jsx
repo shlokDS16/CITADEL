@@ -4064,6 +4064,11 @@ const TrafficIncidents = ({ navHint }) => {
 
   const sortedIncidents = React.useMemo(() => tvSortIncidents(incidents, sortKey), [incidents, sortKey]);
 
+  const allVisibleSelected = sortedIncidents.length > 0 && sortedIncidents.every(inc => selectedIds.includes(inc.id));
+  const toggleSelectAll = () => {
+    setSelectedIds(allVisibleSelected ? [] : sortedIncidents.map(inc => inc.id));
+  };
+
   const toggleSelected = (id) => {
     setSelectedIds(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]);
   };
@@ -4103,6 +4108,25 @@ const TrafficIncidents = ({ navHint }) => {
     } catch (e) {
       setToast(`✕ Delete failed: ${e.message || e}`);
       setTimeout(() => setToast(''), 5000);
+    }
+  };
+
+  const doSingleDelete = async (incId) => {
+    if (!window.confirm(`Permanently delete ${incId} and its evidence footage?\n\nThe incident and its snapshot/clip are removed from the database and storage. Any challan already issued is kept as a legal record. This cannot be undone.`)) return;
+    setBusyId(incId);
+    try {
+      const result = await apiFetch('/api/traffic-violations/incidents/delete', {
+        ...TRAFFIC_AUTH, json: { inc_ids: [incId], actor: 'rsd' },
+      });
+      setSelectedIds(s => s.filter(x => x !== incId));
+      setRefreshKey(k => k + 1);
+      setToast(result.count ? `🗑 ${incId} deleted` : `✕ ${incId} not found`);
+      setTimeout(() => setToast(''), 4000);
+    } catch (e) {
+      setToast(`✕ Delete ${incId} failed: ${e.message || e}`);
+      setTimeout(() => setToast(''), 5000);
+    } finally {
+      setBusyId(null);
     }
   };
 
@@ -4180,6 +4204,13 @@ const TrafficIncidents = ({ navHint }) => {
             <option value="cam">Camera (A → Z)</option>
           </select>
         </div>
+        <button
+          className="btn-brutal"
+          onClick={toggleSelectAll}
+          disabled={sortedIncidents.length === 0}
+          style={{ fontSize: 11, padding: '8px 14px' }}
+          title="Select every incident currently shown (respects active filters), then act on them in the bulk bar"
+        >{allVisibleSelected ? '☒ UNSELECT ALL' : `☑ SELECT ALL (${sortedIncidents.length})`}</button>
       </div>
       {!loading && incidents.length === 0 && (
         <div className="widget-card" style={{ padding: 40, textAlign: 'center' }}>
@@ -4195,11 +4226,9 @@ const TrafficIncidents = ({ navHint }) => {
           const isSelected = selectedIds.includes(inc.id);
           return (
             <div key={inc.id} className={`incident-card ${isSelected ? 'tv-selected' : ''}`} style={{ animationDelay: `${i * 0.05}s` }}>
-              {isPending && (
-                <label className="tv-card-checkbox" title="Select for bulk action">
-                  <input type="checkbox" checked={isSelected} onChange={() => toggleSelected(inc.id)} />
-                </label>
-              )}
+              <label className="tv-card-checkbox" title="Select for bulk action">
+                <input type="checkbox" checked={isSelected} onChange={() => toggleSelected(inc.id)} />
+              </label>
               <div className="incident-video-thumb"
                    onClick={(e) => { e.stopPropagation(); setViewIncident(inc); }}
                    style={{ cursor: 'pointer' }}
@@ -4246,12 +4275,21 @@ const TrafficIncidents = ({ navHint }) => {
                     <StatusPill status={inc.status} label={inc.status.toUpperCase()} />
                   </div>
                 )}
-                <button
-                  className="btn-brutal"
-                  onClick={() => downloadCourtPack(inc.id)}
-                  style={{ fontSize: 10, padding: '3px 8px', marginTop: 6, width: '100%' }}
-                  title="Download court-grade evidence manifest (JSON for now; zip in Phase 2)"
-                >📦 COURT PACK</button>
+                <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                  <button
+                    className="btn-brutal"
+                    onClick={() => downloadCourtPack(inc.id)}
+                    style={{ fontSize: 10, padding: '3px 8px', flex: 1 }}
+                    title="Download court-grade evidence manifest (JSON for now; zip in Phase 2)"
+                  >📦 COURT PACK</button>
+                  <button
+                    className="btn-brutal"
+                    disabled={busyId === inc.id}
+                    onClick={() => doSingleDelete(inc.id)}
+                    style={{ fontSize: 10, padding: '3px 8px', flex: 1, background: '#000', color: 'var(--red)', borderColor: 'var(--red)', opacity: busyId === inc.id ? 0.5 : 1 }}
+                    title="Permanently delete this incident + evidence footage (issued challans are preserved)"
+                  >{busyId === inc.id ? '...' : '🗑 DELETE'}</button>
+                </div>
               </div>
             </div>
           );
