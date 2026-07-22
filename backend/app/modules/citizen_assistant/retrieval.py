@@ -23,6 +23,7 @@ import os
 import re
 from typing import Any, Optional
 
+from app.config import settings
 from app.modules.citizen_assistant import live_facts, web_search
 from app.modules.citizen_assistant.pageindex_engine import PI_MODEL, get_trees
 
@@ -36,22 +37,27 @@ class _QuotaExhausted(Exception):
         self.retry_hint = retry_hint
 
 
-def _provider_chain() -> list[str]:
+def _provider_chain() -> list[tuple[str, Optional[str]]]:
     """
-    Project LLM priority: Groq primary → Gemini fallback (when Groq drained)
-    → local Ollama last resort. Only providers with credentials/reachable
-    are included; LiteLLM routes each model string to its provider.
+    Project LLM priority: Groq primary → Groq backup key → Gemini fallback
+    (when Groq drained) → local Ollama last resort. Each entry is
+    (model, api_key); api_key=None lets LiteLLM read the provider's env var.
+    Only providers with credentials/reachable are included.
     """
-    chain = [PI_MODEL.removeprefix("litellm/")]            # groq/...
+    groq_model = PI_MODEL.removeprefix("litellm/")            # groq/...
+    chain: list[tuple[str, Optional[str]]] = [(groq_model, None)]  # primary (env key)
+    key2 = getattr(settings, "GROQ_API_KEY_2", "")
+    if key2:
+        chain.append((groq_model, key2))                     # same model, backup key
     gkey = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if gkey:
         os.environ.setdefault("GEMINI_API_KEY", gkey)
-        chain.append(os.getenv("CITIZEN_GEMINI_MODEL", "gemini/gemini-1.5-flash"))
+        chain.append((os.getenv("CITIZEN_GEMINI_MODEL", "gemini/gemini-1.5-flash"), None))
     try:
         import httpx as _hx
         base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         _hx.get(base + "/api/tags", timeout=0.6)
-        chain.append(f"ollama/{os.getenv('OLLAMA_MODEL', 'llama3.2')}")
+        chain.append((f"ollama/{os.getenv('OLLAMA_MODEL', 'llama3.2')}", None))
     except Exception:
         pass
     return chain
@@ -89,13 +95,14 @@ def _llm(prompt: str, history: Optional[list] = None, max_tokens: int = 900,
     quota_hint = ""
     last_err = None
 
-    for model in chain:
+    for model, api_key in chain:
         for attempt in range(3):
             try:
                 r = litellm.completion(
                     model=model, messages=msgs,
                     temperature=temperature if attempt == 0 else 0.3,
                     max_tokens=max_tokens,
+                    **({"api_key": api_key} if api_key else {}),
                 )
                 txt = (r.choices[0].message.content or "").strip()
                 if txt:

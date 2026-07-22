@@ -35,18 +35,23 @@ class _QuotaExhausted(Exception):
         self.retry_hint = retry_hint
 
 
-def _provider_chain() -> list[str]:
-    chain = [_FN_MODEL]
+def _provider_chain() -> list[tuple[str, "str | None"]]:
+    """(model, api_key) chain: Groq primary → Groq backup key → Gemini →
+    Ollama. api_key=None lets LiteLLM read the provider env var."""
+    chain: list[tuple[str, "str | None"]] = [(_FN_MODEL, None)]
+    key2 = getattr(settings, "GROQ_API_KEY_2", "")
+    if key2:
+        chain.append((_FN_MODEL, key2))
     gkey = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if gkey:
         os.environ.setdefault("GEMINI_API_KEY", gkey)
-        chain.append(os.getenv("CITIZEN_GEMINI_MODEL", "gemini/gemini-1.5-flash"))
+        chain.append((os.getenv("CITIZEN_GEMINI_MODEL", "gemini/gemini-1.5-flash"), None))
     try:
         import httpx as _hx
 
         base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         _hx.get(base + "/api/tags", timeout=0.6)
-        chain.append(f"ollama/{os.getenv('OLLAMA_MODEL', 'llama3.2')}")
+        chain.append((f"ollama/{os.getenv('OLLAMA_MODEL', 'llama3.2')}", None))
     except Exception:  # noqa: BLE001
         pass
     return chain
@@ -73,13 +78,14 @@ def _llm(prompt: str, max_tokens: int = 360, temperature: float = 0.2) -> str:
     all_rate_limited = True
     quota_hint = ""
     last_err: Exception | None = None
-    for model in chain:
+    for model, api_key in chain:
         for attempt in range(2):
             try:
                 r = litellm.completion(
                     model=model, messages=msgs,
                     temperature=temperature if attempt == 0 else 0.3,
-                    max_tokens=max_tokens)
+                    max_tokens=max_tokens,
+                    **({"api_key": api_key} if api_key else {}))
                 txt = (r.choices[0].message.content or "").strip()
                 if txt:
                     return txt

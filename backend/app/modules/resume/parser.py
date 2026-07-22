@@ -16,9 +16,8 @@ import logging
 import re
 from typing import Any
 
-import httpx
-
 from app.config import settings
+from app.shared import groq_failover
 
 log = logging.getLogger("citadel.resume.parser")
 
@@ -97,24 +96,19 @@ urgency must be one of: LOW, NORMAL, HIGH"""
 def _groq_chat(system: str, user: str, *, max_tokens: int = 2000, timeout: int = 30) -> str:
     if not settings.GROQ_API_KEY:
         raise RuntimeError("GROQ_API_KEY not configured")
-    with httpx.Client(timeout=timeout) as client:
-        r = client.post(
-            settings.GROQ_ENDPOINT,
-            headers={
-                "Authorization": f"Bearer {settings.GROQ_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": settings.GROQ_CLASSIFIER_MODEL,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "temperature": 0,
-                "max_tokens": max_tokens,
-                "response_format": {"type": "json_object"},
-            },
-        )
+    r = groq_failover.post_chat(
+        {
+            "model": settings.GROQ_CLASSIFIER_MODEL,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": 0,
+            "max_tokens": max_tokens,
+            "response_format": {"type": "json_object"},
+        },
+        timeout=timeout,
+    )
     r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"]
 

@@ -29,6 +29,7 @@ from typing import Any
 import httpx
 
 from app.config import settings
+from app.shared import groq_failover
 
 log = logging.getLogger("citadel.traffic_violations.groq_vision")
 
@@ -149,14 +150,9 @@ def _classify_with_groq(jpeg_bytes: bytes, timeout: float = 30.0) -> dict[str, A
         "response_format": {"type": "json_object"},
     }
     try:
-        with httpx.Client(timeout=timeout) as c:
-            r = c.post(
-                GROQ_CHAT_ENDPOINT,
-                headers={"Authorization": f"Bearer {settings.GROQ_API_KEY}"},
-                json=payload,
-            )
-            r.raise_for_status()
-            content = r.json()["choices"][0]["message"]["content"]
+        r = groq_failover.post_chat(payload, timeout=timeout, endpoint=GROQ_CHAT_ENDPOINT)
+        r.raise_for_status()
+        content = r.json()["choices"][0]["message"]["content"]
         try:
             return json.loads(content)
         except json.JSONDecodeError:

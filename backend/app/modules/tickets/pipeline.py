@@ -210,7 +210,7 @@ def groq_category(text: str, timeout: float = 8.0) -> tuple[str, float, str]:
     if not _groq_configured():
         raise RuntimeError("GROQ_API_KEY not configured")
 
-    import httpx
+    from app.shared import groq_failover
 
     payload = {
         "model": settings.GROQ_CLASSIFIER_MODEL,
@@ -222,12 +222,7 @@ def groq_category(text: str, timeout: float = 8.0) -> tuple[str, float, str]:
         "max_tokens": 120,
         "response_format": {"type": "json_object"},
     }
-    headers = {
-        "Authorization": f"Bearer {settings.GROQ_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    with httpx.Client(timeout=timeout) as client:
-        resp = client.post(settings.GROQ_ENDPOINT, json=payload, headers=headers)
+    resp = groq_failover.post_chat(payload, timeout=timeout)
 
     if resp.status_code == 429:
         raise QuotaExhausted("Groq rate limit / daily token cap reached")

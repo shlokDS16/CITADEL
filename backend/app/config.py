@@ -34,7 +34,14 @@ class Settings(BaseSettings):
     OCR_SPACE_MAX_REQUEST_MB: int = 1
 
     # ---- Groq (document classification) ----
-    GROQ_API_KEY: str = Field(..., description="gsk_...")
+    GROQ_API_KEY: str = Field(..., description="gsk_... primary key")
+    #: Optional second key. When the primary returns 429/401/403 (daily
+    #: token cap or disabled key), every Groq call transparently retries
+    #: on this one. Same model — see app/shared/groq_failover.py.
+    GROQ_API_KEY_2: str = Field("", description="gsk_... backup key (optional)")
+    #: Current Groq flagship Llama; tuned against every module's prompts and
+    #: reliable in JSON mode. `openai/gpt-oss-120b` is a newer/bigger option
+    #: but a reasoning model (JSON-format risk) — swap here to A/B it.
     GROQ_CLASSIFIER_MODEL: str = "llama-3.3-70b-versatile"
     GROQ_ENDPOINT: str = "https://api.groq.com/openai/v1/chat/completions"
 

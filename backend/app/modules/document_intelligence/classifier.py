@@ -14,9 +14,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-import httpx
-
 from app.config import settings
+from app.shared import groq_failover
 
 log = logging.getLogger("citadel.classifier")
 
@@ -56,23 +55,18 @@ class ClassificationResult:
 
 def _classify_via_groq(text_excerpt: str, timeout: int = 15) -> ClassificationResult | None:
     try:
-        with httpx.Client(timeout=timeout) as client:
-            r = client.post(
-                settings.GROQ_ENDPOINT,
-                headers={
-                    "Authorization": f"Bearer {settings.GROQ_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": settings.GROQ_CLASSIFIER_MODEL,
-                    "messages": [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": text_excerpt},
-                    ],
-                    "temperature": 0,
-                    "max_tokens": 12,
-                },
-            )
+        r = groq_failover.post_chat(
+            {
+                "model": settings.GROQ_CLASSIFIER_MODEL,
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": text_excerpt},
+                ],
+                "temperature": 0,
+                "max_tokens": 12,
+            },
+            timeout=timeout,
+        )
         r.raise_for_status()
         body = r.json()
         content = (body.get("choices", [{}])[0].get("message", {}).get("content") or "").strip().lower()

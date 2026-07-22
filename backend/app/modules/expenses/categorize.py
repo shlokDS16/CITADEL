@@ -256,7 +256,7 @@ def groq_category(text: str, timeout: float = 8.0) -> tuple[str, float]:
 
     if not getattr(settings, "GROQ_API_KEY", ""):
         raise RuntimeError("GROQ_API_KEY not configured")
-    import httpx
+    from app.shared import groq_failover
 
     payload = {
         "model": settings.GROQ_CLASSIFIER_MODEL,
@@ -268,9 +268,7 @@ def groq_category(text: str, timeout: float = 8.0) -> tuple[str, float]:
         "max_tokens": 60,
         "response_format": {"type": "json_object"},
     }
-    headers = {"Authorization": f"Bearer {settings.GROQ_API_KEY}"}
-    with httpx.Client(timeout=timeout) as client:
-        resp = client.post(settings.GROQ_ENDPOINT, json=payload, headers=headers)
+    resp = groq_failover.post_chat(payload, timeout=timeout)
     if resp.status_code == 429:
         raise QuotaExhausted("Groq rate limited")
     if resp.status_code >= 400:
