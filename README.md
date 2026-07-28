@@ -122,8 +122,9 @@ That split is what this repo is configured for. Full rationale + alternatives
    check on `/api/v1/health`).
 3. Fill the `sync:false` secrets in the Render dashboard from your `.env`:
    `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_DB_URL`,
-   `GROQ_API_KEY`, `OCR_SPACE_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_DEFAULT_CHAT_ID`,
-   `JWT_SECRET`, `GOOGLE_FACTCHECK_API_KEY`, and `CORS_ORIGINS` (your Vercel URL).
+   `JWT_SECRET`, `GROQ_API_KEY`, `GROQ_API_KEY_2` (optional backup), `GEMINI_API_KEY` (optional fallback),
+   `OCR_SPACE_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_DEFAULT_CHAT_ID`,
+   `GOOGLE_FACTCHECK_API_KEY`, and `CORS_ORIGINS` (your Vercel URL).
 4. Deploy. First boot downloads ~3 GB of models to the disk (slow once, cached after).
    Note the service URL, e.g. `https://citadel-backend.onrender.com`.
 

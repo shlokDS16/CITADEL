@@ -81,8 +81,9 @@ default route), `CITADEL.html` (the app), `pages.jsx`, `components.jsx`, `styles
 **Backend (Render):**
 1. Render dashboard → New → Blueprint → connect this repo. It reads `render.yaml`.
 2. Fill the `sync:false` secrets from `backend/.env`: `SUPABASE_URL`,
-   `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_DB_URL`, `GROQ_API_KEY`,
-   `OCR_SPACE_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_DEFAULT_CHAT_ID`, `JWT_SECRET`,
+   `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_DB_URL`, `JWT_SECRET`,
+   `GROQ_API_KEY`, `GROQ_API_KEY_2` (optional backup), `GEMINI_API_KEY` (optional fallback),
+   `OCR_SPACE_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_DEFAULT_CHAT_ID`,
    `GOOGLE_FACTCHECK_API_KEY`, and set `CORS_ORIGINS` to your Vercel URL.
 3. First boot downloads ~3 GB of models to `/data` (slow once, cached after).
 4. Note the service URL, e.g. `https://citadel-backend.onrender.com`.
